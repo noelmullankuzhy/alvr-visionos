@@ -1,0 +1,33 @@
+#!/bin/sh
+# Pure-Swift unit tests for client helpers, compiled and run on macOS (the app has no Xcode test target).
+# Each tests/swift/<Name>Tests.swift declares the app sources it needs on one line:
+#   // SOURCES: ALVRClient/Foo.swift ALVRClient/Bar.swift
+# and provides `@main enum <Name>Tests { static func main() { ...; finishTests("<Name>") } }`.
+# Helpers under test must import only Foundation/simd so they build for macOS.
+# Usage (repo root): sh tests/swift/run-tests.sh [Name]
+set -e
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+FILTER="$1"
+OUT="$ROOT/local-scratch/swift-tests"
+mkdir -p "$OUT"
+fail=0
+ran=0
+for t in "$ROOT"/tests/swift/*Tests.swift; do
+  [ -e "$t" ] || continue
+  name=$(basename "$t" .swift)
+  if [ -n "$FILTER" ] && [ "$name" != "$FILTER" ] && [ "$name" != "${FILTER}Tests" ]; then
+    continue
+  fi
+  srcs=""
+  for s in $(sed -n 's#^// SOURCES: ##p' "$t" | head -1); do
+    srcs="$srcs $ROOT/$s"
+  done
+  # shellcheck disable=SC2086
+  xcrun swiftc -parse-as-library -swift-version 5 -o "$OUT/$name" "$ROOT/tests/swift/TestSupport.swift" $srcs "$t"
+  if "$OUT/$name"; then :; else fail=1; fi
+  ran=$((ran + 1))
+done
+echo "swift test files run: $ran"
+[ "$ran" -gt 0 ] || { echo "NO TESTS MATCHED"; exit 1; }
+[ "$fail" -eq 0 ] && echo SWIFT_TESTS_OK
+exit "$fail"
