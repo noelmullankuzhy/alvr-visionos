@@ -11,3 +11,7 @@ ALVRClient.xcodeproj/xcshareddata/
 ALVRClient.xcodeproj/xcshareddata_/
 ALVRClient_bicubic.gputrace/
 ALVRClient_profiled.gputrace/
+
+# Local scratch (tests, typecheck)
+local-scratch/
+.typecheck/
