@@ -40,7 +40,7 @@ func referenceEncode(_ rgb: simd_double3, kr: Double, kb: Double, fullRange: Boo
 
 // What the explicit planar shader does: transform * float4(y, cb, cr, 1) on normalized texture samples.
 func decode(_ codes: simd_double3, _ selection: ColourSelection) -> simd_float3 {
-    let bits = selection.bitDepth
+    let bits = selection.planeBitDepth
     let sample = simd_float4(ColourPipeline.sampleValue(code: codes.x, bitDepth: bits),
                              ColourPipeline.sampleValue(code: codes.y, bitDepth: bits),
                              ColourPipeline.sampleValue(code: codes.z, bitDepth: bits), 1)
@@ -64,7 +64,55 @@ enum ColourPipelineTests {
         testPrimariesToDisplayP3()
         testSelection()
         testLogLineAndFourCC()
+        testTransferFunctions()
+        testPlaneBitDepth()
         finishTests("ColourPipelineTests")
+    }
+
+    // Swift mirror of Shaders.metal NonlinearToLinearRGB / EncodingNonlinearToLinearRGB: finite everywhere,
+    // odd-symmetric, continuous at 0 and at the 0.04045 knee, unclipped above 1.
+    static func testTransferFunctions() {
+        func eotf(_ x: Float) -> Float { ColourPipeline.srgbEOTF(x) }
+        for x: Float in [-0.07, 0, 0.04045, 1, 1.2, -1.2, -0.04045] {
+            expect(eotf(x).isFinite, "sRGB EOTF finite at \(x), got \(eotf(x))")
+            expect(ColourPipeline.encodingGammaToLinear(x, gamma: 1.5).isFinite, "gamma 1.5 finite at \(x)")
+            expect(ColourPipeline.encodingGammaToLinear(eotf(x), gamma: 1.5).isFinite, "EOTF+gamma finite at \(x)")
+        }
+        expectNear(eotf(0), 0, 0, "EOTF(0)")
+        expectNear(eotf(1), 1, 1e-6, "EOTF(1)")
+        expectNear(eotf(1.2), Float(pow((1.2 + 0.055) / 1.055, 2.4)), 1e-6, "EOTF(1.2) is extended, not clipped")
+        expectNear(eotf(0.04045), Float(pow((0.04045 + 0.055) / 1.055, 2.4)), 1e-7, "EOTF at knee uses the power segment")
+        expectNear(eotf(-0.07), -eotf(0.07), 0, "EOTF odd at -0.07")
+        expect(eotf(-0.07) < 0, "EOTF(-0.07) stays negative")
+        let e: Float = 1e-6
+        expectNear(eotf(0.04045 - e), eotf(0.04045 + e), 1e-6, "EOTF continuous at knee")
+        expectNear(eotf(-0.04045 - e), eotf(-0.04045 + e), 1e-6, "EOTF continuous at negative knee")
+        expectNear(eotf(-e), eotf(e), 1e-6, "EOTF continuous at 0")
+        expectNear(ColourPipeline.encodingGammaToLinear(-0.07, gamma: 1.5), -Float(pow(0.07, 1.5)), 1e-7, "gamma odd at -0.07")
+        expectNear(ColourPipeline.encodingGammaToLinear(0, gamma: 1.5), 0, 0, "gamma(0)")
+        expectNear(ColourPipeline.encodingGammaToLinear(1, gamma: 1.5), 1, 1e-7, "gamma(1)")
+
+        // A 4:2:0 blue/red edge sample with G ~ -0.07 stays finite in every channel after the gamut matrix.
+        let sel = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 10)
+        let edge = simd_float3(0.6, -0.07, 0.7)
+        let linear = simd_float3(ColourPipeline.encodingGammaToLinear(eotf(edge.x), gamma: 1.5),
+                                 ColourPipeline.encodingGammaToLinear(eotf(edge.y), gamma: 1.5),
+                                 ColourPipeline.encodingGammaToLinear(eotf(edge.z), gamma: 1.5))
+        let p3 = sel.sourceToDisplayP3 * linear
+        expect(p3.x.isFinite && p3.y.isFinite && p3.z.isFinite, "edge sample finite in P3, got \(p3)")
+    }
+
+    // The YCbCr matrix follows the bound plane format, not the stream's BitsPerComponent.
+    static func testPlaneBitDepth() {
+        let s = ColourPipeline.select(primaries: nil, transfer: nil, matrix: "ITU_R_709_2", fullRange: true, bitDepth: 10, planeBitDepth: 8)
+        expectEqual(s.bitDepth, 10, "stream bit depth kept for the log")
+        expectEqual(s.planeBitDepth, 8, "plane bit depth")
+        expectNear3(decode(simd_double3(255, 128, 128), s), simd_float3(1, 1, 1), 1e-5, "8-bit planes of a 10-bit stream: white")
+        let ref8 = ColourPipeline.select(primaries: nil, transfer: nil, matrix: "ITU_R_709_2", fullRange: true, bitDepth: 8)
+        expect(s.yuvToRGB == ref8.yuvToRGB, "matrix equals the 8-bit one")
+        let s10 = ColourPipeline.select(primaries: nil, transfer: nil, matrix: "ITU_R_709_2", fullRange: true, bitDepth: 8, planeBitDepth: 10)
+        expectNear3(decode(simd_double3(1023, 512, 512), s10), simd_float3(1, 1, 1), 1e-5, "10-bit planes of an 8-bit-signalled stream: white")
+        expectEqual(ColourPipeline.select(primaries: nil, transfer: nil, matrix: nil, fullRange: true, bitDepth: 10).planeBitDepth, 10, "no plane info: stream depth")
     }
 
     // 8-bit planes are r8Unorm (code/255); 10-bit x420 planes hold the code in the 10 MSBs of 16 bits (r16Unorm).

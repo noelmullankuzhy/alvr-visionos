@@ -29,6 +29,8 @@ struct ColourSelection: Equatable {
     var matrix: YCbCrMatrix
     var fullRange: Bool
     var bitDepth: Int
+    // Code depth of the decoded planes actually bound (r8Unorm = 8, MSB-aligned r16Unorm = 10); sets yuvToRGB.
+    var planeBitDepth: Int
     var primariesAssumed: Bool
     var matrixAssumed: Bool
     var rangeAssumed: Bool
@@ -123,7 +125,8 @@ enum ColourPipeline {
 
     // Arguments are the CMFormatDescription extension values (kCVImageBuffer* strings, FullRangeVideo,
     // BitsPerComponent), nil when absent. Each field is parsed on its own: bit depth never implies a gamut.
-    static func select(primaries: String?, transfer: String?, matrix: String?, fullRange: Bool?, bitDepth: Int?) -> ColourSelection {
+    // planeBitDepth is the code depth of the planes the shader samples; nil falls back to the stream's bit depth.
+    static func select(primaries: String?, transfer: String?, matrix: String?, fullRange: Bool?, bitDepth: Int?, planeBitDepth: Int? = nil) -> ColourSelection {
         let parsedPrimaries: ColourPrimaries?
         switch primaries {
         case "ITU_R_709_2": parsedPrimaries = .bt709
@@ -152,13 +155,27 @@ enum ColourPipeline {
         let m = parsedMatrix ?? .bt709
         let full = fullRange ?? false
         let bits = bitDepth ?? 8
+        let planeBits = planeBitDepth ?? bits
         let hdrTransfer = parsedTransfer == .pq || parsedTransfer == .hlg
         let gamut = hdrTransfer ? matrix_identity_double3x3 : primariesToDisplayP3(p)
         return ColourSelection(
-            primaries: p, transfer: parsedTransfer, matrix: m, fullRange: full, bitDepth: bits,
+            primaries: p, transfer: parsedTransfer, matrix: m, fullRange: full, bitDepth: bits, planeBitDepth: planeBits,
             primariesAssumed: parsedPrimaries == nil, matrixAssumed: parsedMatrix == nil, rangeAssumed: fullRange == nil,
-            yuvToRGB: yuvToRGBMatrix(matrix: m, fullRange: full, bitDepth: bits),
+            yuvToRGB: yuvToRGBMatrix(matrix: m, fullRange: full, bitDepth: planeBits),
             sourceToDisplayP3: simd_float3x3(columns: (simd_float3(gamut.columns.0), simd_float3(gamut.columns.1), simd_float3(gamut.columns.2))))
+    }
+
+    // Swift mirror of Shaders.metal NonlinearToLinearRGB: sRGB EOTF, odd-symmetric outside [0, 1], pow on |x| only.
+    static func srgbEOTF(_ x: Float) -> Float {
+        let m = abs(x)
+        let y = m < 0.04045 ? m / 12.92 : pow((m + 0.055) / 1.055, 2.4)
+        return x < 0 ? -y : y
+    }
+
+    // Swift mirror of Shaders.metal EncodingNonlinearToLinearRGB.
+    static func encodingGammaToLinear(_ x: Float, gamma: Float) -> Float {
+        let y = pow(abs(x), gamma)
+        return x < 0 ? -y : y
     }
 
     // CoreVideo pixel format as its four-character code ("x420"), or hex when not printable.

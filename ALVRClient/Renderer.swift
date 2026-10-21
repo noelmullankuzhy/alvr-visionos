@@ -851,12 +851,13 @@ class Renderer {
             }
             
             if let videoFormat = EventHandler.shared.videoFormat {
-                let nextYuvTransform = VideoHandler.getYUVTransformForVideoFormat(videoFormat)
+                let colour = VideoHandler.getColourSelectionForVideoFormat(videoFormat)
+                let nextYuvTransform = colour.yuvToRGB
                 if nextYuvTransform != currentYuvTransform {
                     needsPipelineRebuild = true
                 }
                 currentYuvTransform = nextYuvTransform
-                let nextGamutTransform = VideoHandler.getGamutTransformForVideoFormat(videoFormat)
+                let nextGamutTransform = colour.sourceToDisplayP3
                 if nextGamutTransform != currentGamutTransform {
                     needsPipelineRebuild = true
                 }
@@ -1729,6 +1730,7 @@ class Renderer {
         let pixelBuffer = queuedFrame.imageBuffer
         let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let formatStr = VideoHandler.coreVideoPixelFormatToStr[format, default: "unknown"]
+        VideoHandler.boundPixelFormat = format
         if let videoFormat = EventHandler.shared.videoFormat {
             VideoHandler.logColourSelectionOnce(videoFormat: videoFormat, pixelFormat: format)
         }

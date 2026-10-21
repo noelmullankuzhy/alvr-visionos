@@ -867,24 +867,42 @@ struct VideoHandler {
     }
     
     // Primaries, transfer, matrix, range and bit depth, each read from its own format description extension.
+    // The YCbCr matrix's code depth follows the planes actually bound (boundPixelFormat), not BitsPerComponent.
+    // Cached per (format description, pixel format) so the per-frame callers do not rebuild it.
     static func getColourSelectionForVideoFormat(_ videoFormat: CMFormatDescription) -> ColourSelection {
+        let pixelFormat = boundPixelFormat
+        if let cached = cachedColourSelection, cached.videoFormat === videoFormat, cached.pixelFormat == pixelFormat {
+            return cached.selection
+        }
         let exts = videoFormat.extensions
         func string(_ key: CFString) -> String? { (exts[key] as? NSString).map { $0 as String } }
         func number(_ key: CFString) -> NSNumber? { exts[key] as? NSNumber }
-        return ColourPipeline.select(
+        let selection = ColourPipeline.select(
             primaries: string(kCMFormatDescriptionExtension_ColorPrimaries),
             transfer: string(kCMFormatDescriptionExtension_TransferFunction),
             matrix: string(kCMFormatDescriptionExtension_YCbCrMatrix),
             fullRange: number(kCMFormatDescriptionExtension_FullRangeVideo).map { $0.boolValue },
-            bitDepth: number(kCMFormatDescriptionExtension_BitsPerComponent)?.intValue)
+            bitDepth: number(kCMFormatDescriptionExtension_BitsPerComponent)?.intValue,
+            planeBitDepth: pixelFormat.flatMap(getPlaneBitDepthForFormat))
+        cachedColourSelection = (videoFormat, pixelFormat, selection)
+        return selection
+    }
+    // Pixel format of the decoded buffer the renderer last bound; nil until the first frame.
+    static var boundPixelFormat: OSType? = nil
+    private static var cachedColourSelection: (videoFormat: CMFormatDescription, pixelFormat: OSType?, selection: ColourSelection)? = nil
+
+    // Code depth of the planes getTextureTypesForFormat binds: r8Unorm holds 8-bit codes, r16Unorm the CV 10-bit
+    // biplanar formats (10 bits in the MSBs of 16). nil for the private formats, whose sampler does its own YCbCr.
+    static func getPlaneBitDepthForFormat(_ format: OSType) -> Int? {
+        switch getTextureTypesForFormat(format).first {
+        case .r8Unorm: return 8
+        case .r16Unorm: return 10
+        default: return nil
+        }
     }
 
     static func getYUVTransformForVideoFormat(_ videoFormat: CMFormatDescription) -> simd_float4x4 {
         return getColourSelectionForVideoFormat(videoFormat).yuvToRGB
-    }
-
-    static func getGamutTransformForVideoFormat(_ videoFormat: CMFormatDescription) -> simd_float3x3 {
-        return getColourSelectionForVideoFormat(videoFormat).sourceToDisplayP3
     }
 
     // One `ALVRCOLOUR ...` line whenever the stream's colour selection or the shader path changes.
@@ -896,7 +914,8 @@ struct VideoHandler {
         }
         lastColourLogKey = (videoFormat, pixelFormat)
         let path = isFormatSecret(pixelFormat) ? "secret" : "explicit"
-        let line = getColourSelectionForVideoFormat(videoFormat).logLine(path: path) + " pixel_format=\(ColourPipeline.fourCC(pixelFormat))"
+        let selection = getColourSelectionForVideoFormat(videoFormat)
+        let line = selection.logLine(path: path) + " plane_bits=\(selection.planeBitDepth) pixel_format=\(ColourPipeline.fourCC(pixelFormat))"
         if line != lastColourLogLine {
             lastColourLogLine = line
             print(line)

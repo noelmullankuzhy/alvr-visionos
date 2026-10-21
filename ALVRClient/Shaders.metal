@@ -226,41 +226,26 @@ vertex ColorInOut videoFrameVertexShader(ushort vertexID [[vertex_id]],
     return videoFrameVertexShaderCommon(vertexID, which, uniforms.projectionMatrix, uniforms.modelViewMatrixFrame, uniforms.tangents);
 }
 
+// sRGB EOTF extended to negative and >1 inputs by odd symmetry (as extended sRGB does): f(-x) = -f(x).
+// Out-of-range values come from limited-range codes outside 64..940 and 4:2:0 chroma at saturated edges; they stay
+// unclipped, and pow only ever sees non-negative bases, so no NaN reaches the gamut matrix.
+// Mirrored by ColourPipeline.srgbEOTF (tests/swift/ColourPipelineTests.swift).
 float3 NonlinearToLinearRGB(float3 color) {
     const float DIV12 = 1. / 12.92;
     const float DIV1 = 1. / 1.055;
     const float THRESHOLD = 0.04045;
     const float3 GAMMA = float3(2.4);
-        
-    float3 condition = float3(color.r < THRESHOLD, color.g < THRESHOLD, color.b < THRESHOLD);
-    float3 lowValues = color * DIV12;
-    float3 highValues = pow((color + 0.055) * DIV1, GAMMA);
-    return condition * lowValues + (1.0 - condition) * highValues;
+
+    float3 magnitude = abs(color);
+    float3 lowValues = magnitude * DIV12;
+    float3 highValues = pow((magnitude + 0.055) * DIV1, GAMMA);
+    return sign(color) * select(highValues, lowValues, magnitude < THRESHOLD);
 }
 
+// Inverse of the server's encoding gamma, odd-symmetric like the EOTF above (pow on |x| only).
+// Mirrored by ColourPipeline.encodingGammaToLinear.
 float3 EncodingNonlinearToLinearRGB(float3 color, float gamma) {
-    float3 ret;
-    ret.r = color.r < 0.0 ? color.r : pow(color.r, gamma);
-    ret.g = color.g < 0.0 ? color.g : pow(color.g, gamma);
-    ret.b = color.b < 0.0 ? color.b : pow(color.b, gamma);
-    return ret;
-}
-
-half3 NonlinearToLinearRGB_half(half3 color) {
-    const half DIV12 = 1. / 12.92;
-    const half DIV1 = 1. / 1.055;
-    const half THRESHOLD = 0.04045;
-    const half GAMMA = 2.4;
-      
-    return half3(color.r < THRESHOLD ? (color.r * DIV12) : pow((color.r + 0.055h) * DIV1, GAMMA), color.g < THRESHOLD ? (color.g * DIV12) : pow((color.g + 0.055h) * DIV1, GAMMA), color.b < THRESHOLD ? (color.b * DIV12) : pow((color.b + 0.055h) * DIV1, GAMMA));
-}
-
-half3 EncodingNonlinearToLinearRGB_half(half3 color, half gamma) {
-    half3 ret;
-    ret.r = color.r < 0.0 ? color.r : pow(color.r, gamma);
-    ret.g = color.g < 0.0 ? color.g : pow(color.g, gamma);
-    ret.b = color.b < 0.0 ? color.b : pow(color.b, gamma);
-    return ret;
+    return sign(color) * pow(abs(color), float3(gamma));
 }
 
 half colorclose_hsv(half3 hsv, half3 keyHsv, half2 tol)
