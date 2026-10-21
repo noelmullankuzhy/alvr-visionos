@@ -244,6 +244,32 @@ private func testUniquePresentedOutOfOrder() {
     expectEqual(int(s, "frames_presented"), 5, "timestamp changes")
 }
 
+// unique_presented_fps per window for each list of presented timestamps; each window is closed by a blank
+// render 1 s later. Dedupe covers the current and the previous window only.
+private func uniquePerWindow(_ windows: [[UInt64]]) -> [Double?] {
+    let (telemetry, sink, clock) = makeTelemetry()
+    startStream(telemetry)
+    for timestamps in windows {
+        for ts in timestamps {
+            telemetry.recordRender(frameTimestampNs: ts, displayed: true, presentNs: clock.ns)
+        }
+        clock.advance(ms: 1000)
+        telemetry.recordRender(frameTimestampNs: nil, displayed: false, presentNs: clock.ns)
+    }
+    return sink.objects("ALVRSTATS").map { double($0, "unique_presented_fps") }
+}
+
+private func testUniquePresentedWindows() {
+    // (a) More distinct timestamps than any fixed ring, then the first again: still 65.
+    expectEqual(uniquePerWindow([Array(1...65) + [1]]), [65.0], "(a) [1...65, 1] in one window counts 65")
+    // (b) Shown in window N and again in N+1 (after another frame): not unique in N+1.
+    expectEqual(uniquePerWindow([[7], [8, 7]]), [1.0, 1.0], "(b) adjacent-window reuse is not unique")
+    // (c) Shown in window N-2: counts again (only adjacent windows dedupe).
+    expectEqual(uniquePerWindow([[5], [6], [5]]), [1.0, 1.0, 1.0], "(c) reuse from two windows back counts")
+    // (d) Out of order within a window.
+    expectEqual(uniquePerWindow([[200, 100]]), [2.0], "(d) [200, 100] counts 2")
+}
+
 // The same timestamp queued twice: queue age is measured from the latest enqueue.
 private func testQueueAgeUsesLatestEnqueue() {
     let (telemetry, sink, clock) = makeTelemetry()
@@ -495,6 +521,7 @@ enum StreamTelemetryTests {
         testStatsJsonShape()
         testPacingCounters()
         testUniquePresentedOutOfOrder()
+        testUniquePresentedWindows()
         testQueueAgeUsesLatestEnqueue()
         testFormatRecords()
         testCodecHelpers()

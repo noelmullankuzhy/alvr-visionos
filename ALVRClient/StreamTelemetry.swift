@@ -207,11 +207,10 @@ final class StreamTelemetry {
     private var pollWaitMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var lateMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var lastPresentedTimestampNs: UInt64? = nil
-    // Recently presented timestamps (bounded): a timestamp not in here is a distinct presentation.
-    private static let presentedRingSize = 64
-    private var presentedRing = [UInt64](repeating: 0, count: StreamTelemetry.presentedRingSize)
-    private var presentedRingCount = 0
-    private var presentedRingIndex = 0
+    // Distinct timestamps presented in this and the previous window. A timestamp in neither is unique, so
+    // only adjacent windows dedupe (one shown two windows back counts again). Memory is two windows of frames.
+    private var presentedThisWindow = Set<UInt64>()
+    private var presentedLastWindow = Set<UInt64>()
 
     // Receive time per frame timestamp, a small ring so presentation can find it without allocating.
     private static let receiveRingSize = 32
@@ -232,6 +231,7 @@ final class StreamTelemetry {
         self.sink = sink
         self.clock = clock
         self.wallClock = wallClock
+        presentedThisWindow.reserveCapacity(256)
     }
 
     // MARK: - Stream lifecycle
@@ -243,8 +243,8 @@ final class StreamTelemetry {
             active = true
             resetWindow(clock())
             lastPresentedTimestampNs = nil
-            presentedRingCount = 0
-            presentedRingIndex = 0
+            presentedThisWindow.removeAll(keepingCapacity: true)
+            presentedLastWindow.removeAll(keepingCapacity: true)
         }
         format.viewWidth = viewWidth
         format.viewHeight = viewHeight
@@ -396,11 +396,8 @@ final class StreamTelemetry {
             } else {
                 framesPresented += 1
                 lastPresentedTimestampNs = ts
-                if !presentedRing[0..<presentedRingCount].contains(ts) {
+                if !presentedLastWindow.contains(ts) && presentedThisWindow.insert(ts).inserted {
                     uniquePresented += 1
-                    presentedRing[presentedRingIndex] = ts
-                    presentedRingIndex = (presentedRingIndex + 1) % StreamTelemetry.presentedRingSize
-                    presentedRingCount = min(presentedRingCount + 1, StreamTelemetry.presentedRingSize)
                 }
                 for i in 0..<StreamTelemetry.receiveRingSize where receiveRingTimestamps[i] == ts {
                     if presentNs >= receiveRingNs[i] {
@@ -493,7 +490,10 @@ final class StreamTelemetry {
         guard active, now >= windowStartNs, now - windowStartNs >= StreamTelemetry.windowNs else {
             return nil
         }
-        return takeWindow(now)
+        let record = takeWindow(now)
+        presentedLastWindow = presentedThisWindow
+        presentedThisWindow.removeAll(keepingCapacity: true)
+        return record
     }
 
     private func takeWindow(_ now: UInt64) -> StreamStatsRecord {
