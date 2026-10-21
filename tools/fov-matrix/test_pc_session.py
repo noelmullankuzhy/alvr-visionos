@@ -1,0 +1,149 @@
+"""Tests for pc-session.py (runs in WSL on the PC; here against a temp root)."""
+import importlib.util
+import io
+import json
+import os
+import tarfile
+import tempfile
+import time
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+spec = importlib.util.spec_from_file_location('pc_session', os.path.join(HERE, 'pc-session.py'))
+ps = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ps)
+
+def rd(path):
+    with open(path) as f:
+        return f.read()
+
+
+SESSION = {'session_settings': {'video': {
+    'preferred_fps': 72.0,
+    'bitrate': {'mode': {'variant': 'Adaptive', 'ConstantMbps': 30, 'Adaptive': {'x': 1}}},
+    'foveated_encoding': {'enabled': True, 'content': {'center_size_x': 0.4}},
+    'transcoding_view_resolution': {'variant': 'Absolute', 'Absolute': {'width': 100, 'height': {'enabled': True, 'content': 50}}},
+}}, 'client_connections': {'x': 1}}
+
+
+class PcSessionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        self.build = 'abc123'
+        d = os.path.join(self.root, 'alvr-build', 'out', self.build, 'alvr_streamer_windows')
+        os.makedirs(d)
+        self.session = os.path.join(d, 'session.json')
+        with open(self.session, 'w') as f:
+            json.dump(SESSION, f)
+        self.orig_text = rd(self.session)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def live(self):
+        with open(self.session) as f:
+            return json.load(f)
+
+    def test_backup_apply_restore_roundtrip(self):
+        self.assertIn('backup sha=', ps.backup(self.root, self.build))
+        out = ps.apply(self.root, self.build, ['video.preferred_fps=90.0', 'video.bitrate.mode.variant="ConstantMbps"', 'video.bitrate.mode.ConstantMbps=500',
+                                               'video.foveated_encoding.content.center_size_x=0.6'])
+        self.assertIn('written 4 sets', out)
+        v = self.live()['session_settings']['video']
+        self.assertEqual(v['preferred_fps'], 90.0)
+        self.assertEqual(v['bitrate']['mode'], {'variant': 'ConstantMbps', 'ConstantMbps': 500, 'Adaptive': {'x': 1}})
+        self.assertEqual(v['foveated_encoding']['content']['center_size_x'], 0.6)
+        self.assertEqual(self.live()['client_connections'], {'x': 1})
+        out = ps.restore(self.root, self.build)
+        self.assertTrue(out.startswith('restore OK'), out)
+        self.assertEqual(rd(self.session), self.orig_text)
+
+    def test_apply_starts_from_backup_not_previous_point(self):
+        ps.backup(self.root, self.build)
+        ps.apply(self.root, self.build, ['video.preferred_fps=90.0'])
+        ps.apply(self.root, self.build, ['video.foveated_encoding.enabled=false'])
+        v = self.live()['session_settings']['video']
+        self.assertEqual(v['preferred_fps'], 72.0)
+        self.assertFalse(v['foveated_encoding']['enabled'])
+
+    def test_strict_paths(self):
+        ps.backup(self.root, self.build)
+        with self.assertRaises(SystemExit) as cm:
+            ps.apply(self.root, self.build, ['video.nope.x=1'])
+        self.assertIn('no nope', str(cm.exception))
+        with self.assertRaises(SystemExit):
+            ps.apply(self.root, self.build, ['video.preferred_fpz=1'])
+        self.assertEqual(rd(self.session), self.orig_text)  # nothing written on error
+
+    def test_stale_backup_refused(self):
+        ps.backup(self.root, self.build)
+        with self.assertRaises(SystemExit) as cm:
+            ps.backup(self.root, self.build)
+        self.assertIn('stale backup', str(cm.exception))
+
+    def test_apply_without_backup_refused(self):
+        with self.assertRaises(SystemExit):
+            ps.apply(self.root, self.build, ['video.preferred_fps=90'])
+
+    def test_restore_without_backup_is_skip(self):
+        self.assertTrue(ps.restore(self.root, self.build).startswith('restore SKIP'))
+
+    def test_restore_detects_tamper_of_backup(self):
+        ps.backup(self.root, self.build)
+        bak = os.path.join(self.root, 'fov-matrix', 'session.orig.json')
+        with open(bak, 'a') as f:
+            f.write(' ')
+        with self.assertRaises(SystemExit) as cm:
+            ps.restore(self.root, self.build)
+        self.assertIn('restore FAILED', str(cm.exception))
+        self.assertTrue(os.path.exists(bak))  # kept for the GM
+
+    def test_flag_lifecycle_and_original_flag_restored(self):
+        flag = os.path.join(os.path.dirname(self.session), 'angle_chart.enable')
+        with open(flag, 'w') as f:
+            f.write('on')
+        ps.backup(self.root, self.build)
+        ps.flag(self.root, self.build, 'dump')
+        self.assertEqual(rd(flag).strip(), 'dump')
+        ps.flag(self.root, self.build, 'off')
+        self.assertFalse(os.path.exists(flag))
+        ps.flag(self.root, self.build, 'dump')
+        self.assertTrue(ps.restore(self.root, self.build).startswith('restore OK'))
+        self.assertEqual(rd(flag).strip(), 'on')
+
+    def test_flag_absent_originally_removed_on_restore(self):
+        flag = os.path.join(os.path.dirname(self.session), 'angle_chart.enable')
+        ps.backup(self.root, self.build)
+        ps.flag(self.root, self.build, 'dump')
+        ps.restore(self.root, self.build)
+        self.assertFalse(os.path.exists(flag))
+
+    def test_fetch_dump_picks_dir_newer_than_flag(self):
+        base = os.path.join(self.root, 'angle-chart')
+        for stamp in ('old', 'new'):
+            os.makedirs(os.path.join(base, stamp))
+            with open(os.path.join(base, stamp, 'meta.json'), 'w') as f:
+                f.write(stamp)
+        ps.backup(self.root, self.build)
+        flag = ps.flag(self.root, self.build, 'dump') and os.path.join(os.path.dirname(self.session), 'angle_chart.enable')
+        now = time.time()
+        os.utime(os.path.join(base, 'old'), (now - 500, now - 500))
+        os.utime(flag, (now - 100, now - 100))
+        os.utime(os.path.join(base, 'new'), (now, now))
+        buf = io.BytesIO()
+        self.assertEqual(ps.fetch_dump(self.root, self.build, buf), 'new')
+        buf.seek(0)
+        with tarfile.open(fileobj=buf) as t:
+            self.assertEqual(t.getnames(), ['dump', 'dump/meta.json'])
+
+    def test_fetch_dump_none_is_fatal(self):
+        ps.backup(self.root, self.build)
+        ps.flag(self.root, self.build, 'dump')
+        with self.assertRaises(SystemExit) as cm:
+            ps.fetch_dump(self.root, self.build, io.BytesIO())
+        self.assertIn('no dump', str(cm.exception))
+
+
+if __name__ == '__main__':
+    unittest.main()
