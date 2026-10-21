@@ -27,12 +27,17 @@ import simd
         let viewport = MTLViewport(originX: 8, originY: 12, width: 200, height: 160, znear: 0, zfar: 1)
         // Right-up-back reverse-Z projection: near=0.1, far=100 metres.
         let projection = simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0),
-                                               SIMD4(0, 0, 0.1 / 99.9, -1), SIMD4(0, 0, 10 / 99.9, 0)))
+                                               SIMD4(0.12, 0.04, 0.1 / 99.9, -1), SIMD4(0, 0, 10 / 99.9, 0)))
         let expectedDepth: Float = 0.1 * (100 - 2) / (2 * (100 - 0.1)) // two-metre plane
-        func render(_ layout: EDRLayout, _ value: Float, slice: Int, projection: simd_float4x4) {
+        func render(_ layout: EDRLayout, _ value: Float, slice: Int, projection: simd_float4x4,
+                    grid: EDRGrid = EDRGrid()) {
             let buffer = queue.makeCommandBuffer()!
             drawing.encode(buffer: buffer, colour: colour, depth: depth, slice: slice, viewport: viewport,
-                           patches: layout.patches(value: value), projection: projection)
+                           patches: layout.patches(value: value,
+                                                   centre: EDRView.centre(projectionX: Double(projection.columns.2.x),
+                                                                          projectionY: Double(projection.columns.2.y)),
+                                                   aspect: viewport.width / viewport.height, grid: grid,
+                                                   pixelHeight: viewport.height), projection: projection)
             buffer.commit(); buffer.waitUntilCompleted()
             expect(buffer.error == nil, "GPU completed: \(String(describing: buffer.error))")
         }
@@ -52,8 +57,24 @@ import simd
         }
         // Other array slice must survive every pass; offset viewport catches viewport-origin mistakes.
         render(.full, 0.25, slice: 0, projection: projection)
-        for layout in EDRLayout.allCases {
-            render(layout, 4, slice: 1, projection: projection)
+        // Independent straight-ahead golden: projection offsets (0.12, 0.04) give viewport (0.44, 0.52).
+        // Explicit row-major indices along the snake, independent of EDRGrid.entries.
+        let snake = [[0, 1, 2, 3, 4], [9, 8, 7, 6, 5], [10, 11, 12, 13, 14],
+                     [19, 18, 17, 16, 15], [20, 21, 22, 23, 24]]
+        // Every layout, plus all ranges, mirror directions and border modes for every grid area.
+        var cases = EDRLayout.allCases.map { ($0, EDRGrid()) }
+        for layout in [EDRLayout.gridOne, .gridTen, .gridFifty] {
+            for range in EDRGridRange.allCases {
+                for mirror in [false, true] {
+                    for borders in [false, true] {
+                        cases.append((layout, EDRGrid(range: range, mirror: mirror, borders: borders)))
+                    }
+                }
+            }
+        }
+        for (layout, grid) in cases {
+            let context = "\(layout.rawValue) \(grid.range.rawValue) mirror=\(grid.mirror) borders=\(grid.borders)"
+            render(layout, 4, slice: 1, projection: projection, grid: grid)
             var pixels = [UInt16](repeating: 0, count: width * height * 4)
             let depths = readDepth(slice: 1)
             pixels.withUnsafeMutableBytes {
@@ -73,16 +94,48 @@ import simd
                         case .full: expected = 4
                         case .split: expected = u < 0.5 ? 1 : 4
                         case .checkerboard: expected = (Int(u * 8) + Int(v * 8)) % 2 == 0 ? 0 : 4
+                        case .pairOne, .pairFive, .pairTwenty:
+                            // Independent total-area goldens, pixel-square geometry in a 200x160 viewport.
+                            let area = layout == .pairOne ? 0.01 : layout == .pairFive ? 0.05 : 0.20
+                            let side = sqrt(area * 200 * 160 / 2)
+                            let dx = (u - 0.44) * 200, dy = (v - 0.52) * 160
+                            if abs(dy) < side / 2 {
+                                if dx >= -1.5 * side && dx < -0.5 * side { expected = 1 }
+                                if dx >= 0.5 * side && dx < 1.5 * side { expected = 4 }
+                            }
+                        case .gridOne, .gridTen, .gridFifty:
+                            let area = layout == .gridOne ? 0.01 : layout == .gridTen ? 0.10 : 0.50
+                            let side = sqrt(area * 200 * 160 / 25)
+                            let pitch = side + (grid.borders ? 2 : 0) // seamless or two physical pixels of black
+                            let dx = (u - 0.44) * 200, dy = (v - 0.52) * 160
+                            for row in 0..<5 {
+                                for column in 0..<5 {
+                                    let cellX = Double(column - 2) * pitch, cellY = Double(row - 2) * pitch
+                                    if abs(dx - cellX) < side / 2 && abs(dy - cellY) < side / 2 {
+                                        let index = grid.mirror ? 24 - snake[row][column] : snake[row][column]
+                                        switch grid.range {
+                                        case .fine: expected = Float(1 + Double(index) / 24)
+                                        case .coarse: expected = Float(5 + index) / 10
+                                        case .knee: expected = Float(1.30 + Double(index) / 60)
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     if expected == 4 { bright += 1 }
                     let pixel = y * width + x
                     for channel in 0..<4 {
-                        let golden: Float = channel == 3 ? (inside ? 1 : 0) : expected
-                        expectEqual(Float(Float16(bitPattern: pixels[pixel * 4 + channel])), golden, "\(layout) pixel \(x),\(y) channel \(channel)")
+                        let actual = Float(Float16(bitPattern: pixels[pixel * 4 + channel]))
+                        let message = "\(context) pixel \(x),\(y) channel \(channel)"
+                        if channel == 3 {
+                            expectEqual(actual, inside ? 1 : 0, message)
+                        } else {
+                            expect(withinFloat16ULP(actual, expected), "\(message): expected \(expected) within one Float16 ulp, got \(actual)")
+                        }
                     }
                     expect(abs(depths[pixel] - (inside ? expectedDepth : 0)) < 1e-6,
-                           "\(layout) finite reverse-Z at \(x),\(y), including black surround: \(depths[pixel])")
+                           "\(context) finite reverse-Z at \(x),\(y), including black surround: \(depths[pixel])")
                 }
             }
             if layout == .onePercent { expectEqual(bright, 320, "1% of the 200×160 viewport") }
@@ -91,20 +144,29 @@ import simd
             otherColour.withUnsafeMutableBytes {
                 colour.getBytes($0.baseAddress!, bytesPerRow: 8, bytesPerImage: 8, from: MTLRegionMake2D(100, 80, 1, 1), mipmapLevel: 0, slice: 0)
             }
-            expectEqual(Float(Float16(bitPattern: otherColour[0])), 0.25, "other eye colour survives")
+            expect(withinFloat16ULP(Float(Float16(bitPattern: otherColour[0])), 0.25), "other eye colour survives")
             expect(abs(otherDepth - expectedDepth) < 1e-6, "other eye depth survives")
         }
         // The shader must receive each current projection, rather than a fixed raw depth.
         let infiniteProjection = simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0),
                                                        SIMD4(0, 0, 0, -1), SIMD4(0, 0, 0.05, 0)))
-        for level: Float in [0, 0.25, 0.5, 1, 1.25, 1.5, 1.75, 2, 2.5, 4] {
+        let levels = Set(EDRStep.values + EDRStep.fineValues + EDRGrid().entries.map(\.value)
+                         + EDRGrid(range: .coarse).entries.map(\.value) + EDRGrid(range: .knee).entries.map(\.value)).sorted()
+        for level in levels {
             render(.full, level, slice: 1, projection: infiniteProjection)
             var pixel = [UInt16](repeating: 0, count: 4)
             let z = readDepth(slice: 1)[80 * width + 100]
             pixel.withUnsafeMutableBytes {
                 colour.getBytes($0.baseAddress!, bytesPerRow: 8, bytesPerImage: 8, from: MTLRegionMake2D(100, 80, 1, 1), mipmapLevel: 0, slice: 1)
             }
-            for channel in 0..<4 { expectEqual(Float(Float16(bitPattern: pixel[channel])), channel == 3 ? 1 : level, "raw ramp \(level)") }
+            for channel in 0..<4 {
+                let actual = Float(Float16(bitPattern: pixel[channel]))
+                if channel == 3 {
+                    expectEqual(actual, 1, "opaque raw ramp alpha")
+                } else {
+                    expect(withinFloat16ULP(actual, level), "raw ramp \(level) within one Float16 ulp, got \(actual)")
+                }
+            }
             expect(abs(z - 0.025) < 1e-6, "updated projection, near/distance = 0.05/2")
         }
         finishTests("EDRGPU")

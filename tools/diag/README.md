@@ -195,7 +195,8 @@ Copies the directory contents into `Documents/diag-clips` in the installed
 Diagnostics and restart (or launch with `ALVR_DIAG=1`), then open **Brightness
 diagnostics (EDR ramp / PQ player)** under Advanced Settings, without a stream.
 The controls are absent when diagnostics is off. Keep the controls window to
-the side of the measurement area; both diagnostic spaces use mixed immersion.
+the side of the measurement area. EDR has an **Immersion: Full / Mixed** picker
+(default Full); stop/exit before changing it, then reopen EDR. PQ uses mixed immersion.
 Exit a diagnostic before entering a stream. Stop/exit also releases the player.
 
 **PQ split comparison:** Reload clips and select `split-1920x1080-30.mov`.
@@ -215,21 +216,72 @@ surround both write finite reverse-Z depth for a two-metre view plane, derived
 from each drawable view's current scene-aware projection (see
 [WWDC24 10092](https://developer.apple.com/videos/play/wwdc2024/10092/)).
 Pixels outside the view's viewport remain transparent with zero depth.
-Layout areas are fractions of
-each eye's drawable viewport, not calibrated fractions of the visible optical
-field. Centre patches have a black surround; split has unity on the left;
-checkerboard is 8×8 with equal black/bright areas. Pinch the ramp or tap Next
-to advance through 0/0.25/0.5/1/1.25/1.5/1.75/2/2.5/4, looping. Automatic mode
-holds each submitted level for 4 seconds, or 60 seconds with Sustained selected.
-Manual Next overrides the timer. Changing settings restarts that level's timer;
-late frames advance once instead of skipping unpresented levels. The mark
-button records the most recently submitted value/layout as a visual threshold.
+Layout areas are fractions of each eye's drawable viewport, not calibrated
+fractions of the visible optical field. Pair/grid centres follow each eye's
+straight-ahead point (the projection's tangent origin), rather than the viewport
+centre. Their patches are square in physical viewport pixels. The surround is
+black. The original half-field **split** stays unchanged: 1.0 left, step value right.
 
-`Diag.log` keeps decision 65's timestamp-first format and key/value fields:
+**Pair comparison:** choose **pair 1%**, **pair 5%** or **pair 20%**. These percentages
+are the **total** lit area: each of the two squares occupies 0.5%, 2.5% or 10% of
+the eye's viewport respectively. The horizontal gap equals one patch width.
+Close one eye, compare right with the fixed **1.0** reference on the left, and
+answer **Right brighter**, **Same**, or **Right darker** after each change. Each
+answer logs the most recently submitted step/value/layout and advances one step.
+The same answer controls apply to split. Use manual mode to answer at your own pace.
+For each layout and immersion, the **highest value answered “brighter”** is the
+visual headroom estimate at that area; retain the complete answer sequence to
+spot inconsistent responses. Compare areas under the same headset conditions.
+Full immersion has shown about 1.5× in the half-field experiment; mixed has shown
+no headroom. Small highlights may behave differently: these are measurements to
+repeat on device, not a guarantee of a particular peak.
+
+Pinch the ramp or tap **Next** to advance, or **Back** to revisit a step; both wrap.
+**Default** steps remain 0/0.25/0.5/1/1.25/1.5/1.75/2/2.5/4.
+**Fine** steps are 0.5/1/1.25/1.5/1.6/1.7/1.8/1.9/2/2.2/2.5/3/4.
+Changing the step list starts at its first value. Automatic mode holds each
+submitted level for 4 seconds, or 60 seconds with Sustained selected. Manual
+stepping overrides the timer. Changing settings restarts that level's timer;
+late frames advance once instead of skipping unpresented levels. The original
+single-patch/checkerboard layouts retain the mark button.
+
+**Graded grid:** choose **grid 1%**, **grid 10%** or **grid 50%** for a static 5×5
+cluster of square cells. **Borders** defaults OFF: pitch equals cell size,
+so neighbouring patches share edges exactly with no gap or overlap. Abutting
+patches make small brightness differences easiest to compare without a black
+line separating them. Turn Borders ON for the previous 2-physical-pixel black
+seams. Total lit cell area equals the chosen fraction (seams and labels excluded). Rows **A–E** appear
+on the left and columns **1–5** above, outside the grid in grey 0.15. Close one
+eye and compare adjacent values along the snake: A1→A5, B5→B1, C1→C5,
+D5→D1, E1→E5. The **fine** grid range has 25 values from 1.00 through 2.00
+(interval 1/24 ≈ 0.04167); **coarse** runs from 0.50 through 2.90 by 0.10.
+Use **knee** after locating the plateau near 1.4–1.5: its 25 values span
+1.30 through 1.70 in 24 equal intervals (1/60 ≈ 0.016667), narrowing the
+comparison around where brightness stops increasing. It uses the same snake
+order and Mirror control.
+**Mirror** reverses all 25 values to expose position bias. Record cell addresses
+where differences stop being visible, then use the logged map to recover values.
+All 25 cell values are logged on entry, restart, and each range/Mirror/Borders change; every grid cell line includes `borders=0|1`.
+Pair/grid clusters shift inward when necessary to keep patches and grid labels
+inside each eye's viewport, preserving sizes and shared edges. A `shifted=1`
+line identifies the layout and eye view (0 left, 1 right), once per shifted
+layout/border mode/view in each immersive renderer run.
+Grids hold all values simultaneously; stepping and Automatic apply to ramp layouts.
+
+The 520-point grouped form separates Display, Pattern, running controls and HDR
+video. Immersion and ranges use segmented pickers; the Layout menu groups Ramp,
+Compare and Grid patterns. Start/Stop stay together, while the running section
+shows only ramp navigation/marking, comparison answers or the grid hint. Sustained
+is visible only with Automatic enabled. The header reports status, immersion,
+layout and the submitted value or grid range.
+
+Every `edr` line carries `immersion=full|mixed`. `Diag.log` keeps decision 65's
+timestamp-first format and quotes layout names containing spaces:
 
 ```text
-DIAG edr t_ms=1234 step=9 value=4.000 layout=10% mode=auto hold_s=60
-DIAG edr t_ms=5678 mark=true value=4.000 layout=10%
+DIAG edr t_ms=1234 step=9 value=4.000 layout=10% mode=auto hold_s=60 immersion=full
+DIAG edr t_ms=5678 answer=brighter step=3 value=1.500 layout="pair 5%" immersion=full
+DIAG edr t_ms=6789 grid="grid 10%" range=fine mirror=0 borders=0 cell=A1 value=1.000 immersion=full
 DIAG pq t_ms=9000 path=window clip=pq-steps.mov current_s=2.000 step=1 rate=1.000 waiting=none
 ```
 

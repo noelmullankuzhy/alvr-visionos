@@ -12,6 +12,14 @@ func expect(_ condition: @autoclosure () -> Bool, _ message: String, file: Stati
     }
 }
 
+// Render-target conversion may choose either adjacent binary16 value. Keep the tolerance
+// local to GPU patch assertions; integer colours, alpha and unrelated tests remain exact.
+func withinFloat16ULP(_ actual: Float, _ expected: Float) -> Bool {
+    let half = Float16(expected)
+    guard actual.isFinite, half.isFinite else { return false }
+    return abs(actual - expected) <= Float(half.ulp)
+}
+
 func expectEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
     expect(actual == expected, "\(message) expected \(expected), got \(actual)", file: file, line: line)
 }

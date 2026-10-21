@@ -71,8 +71,12 @@ final class EDRRenderer {
     let drawing: EDRDrawing
     let badge: DiagEyeRenderer?
     let runID = EDRSession.shared.currentRun
-    init(_ layer: LayerRenderer) throws {
+    private var anchorMissingLogged = false
+    private var shiftedViews = Set<String>()
+    let immersion: String
+    init(_ layer: LayerRenderer, immersion: String) throws {
         self.layer = layer
+        self.immersion = immersion
         badge = Diag.isOn ? DiagEyeRenderer(layer) : nil
         queue = layer.device.makeCommandQueue()!
         drawing = try EDRDrawing(device: layer.device, library: layer.device.makeDefaultLibrary()!)
@@ -97,7 +101,6 @@ final class EDRRenderer {
         frame.startUpdate(); frame.endUpdate()
         LayerRenderer.Clock().wait(until: timing.optimalInputTime)
         frame.startSubmission()
-        defer { frame.endSubmission() }
         let drawables: [LayerRenderer.Drawable]
 #if XCODE_BETA_26
         if #available(visionOS 26.0, *) { drawables = frame.queryDrawables() }
@@ -105,19 +108,38 @@ final class EDRRenderer {
 #else
         drawables = frame.queryDrawable().map { [$0] } ?? []
 #endif
+        // Stop can invalidate the layer before a drawable is available; do not end an unsubmitted frame.
         guard !drawables.isEmpty, let buffer = queue.makeCommandBuffer() else { return }
-        let patches = EDRSession.shared.frame()
+        // The compositor needs the device pose each frame was rendered for; without it nothing in this space was
+        // shown on device (21 Oct). The patches are drawn in view space, so the current pose keeps them head-locked.
+        let presentation = LayerRenderer.Clock.Instant.epoch.duration(to: timing.presentationTime).timeInterval
+        let anchor = WorldTracker.shared.worldTracking.queryDeviceAnchor(atTimestamp: presentation)
+        if anchor == nil, !anchorMissingLogged { anchorMissingLogged = true; Diag.log("edr", ["device_anchor": "missing", "immersion": immersion]) }
+        let snapshot = EDRSession.shared.frame()
         for drawable in drawables {
+            drawable.deviceAnchor = anchor
             for (index, view) in drawable.views.enumerated() {
                 let map = view.textureMap
+                let projection = drawable.computeProjection(viewIndex: index)
+                let centre = EDRView.centre(projectionX: Double(projection.columns.2.x),
+                                            projectionY: Double(projection.columns.2.y))
+                let shiftKey = "\(snapshot.layout.rawValue):\(snapshot.grid.borders):\(index)"
+                if let fields = snapshot.shiftFields(centre: centre, aspect: map.viewport.width / map.viewport.height,
+                                                     pixelHeight: map.viewport.height, view: index, immersion: immersion),
+                   shiftedViews.insert(shiftKey).inserted {
+                    Diag.log("edr", fields)
+                }
+                let patches = snapshot.patches(centre: centre, aspect: map.viewport.width / map.viewport.height,
+                                               pixelHeight: map.viewport.height)
                 drawing.encode(buffer: buffer, colour: drawable.colorTextures[map.textureIndex],
                                depth: drawable.depthTextures[map.textureIndex], slice: map.sliceIndex,
-                               viewport: map.viewport, patches: patches, projection: drawable.computeProjection(viewIndex: index))
+                               viewport: map.viewport, patches: patches, projection: projection)
             }
             badge?.encode(buffer: buffer, drawable: drawable, mode: "edr_ramp", generation: nil)
             drawable.encodePresent(commandBuffer: buffer)
         }
         buffer.commit()
+        frame.endSubmission()
     }
 }
 
