@@ -424,3 +424,18 @@ vertex float4 diagEDRVertex(uint id [[vertex_id]], constant float &depth [[buffe
 fragment float4 diagEDRFragment(constant float &value [[buffer(0)]]) {
     return float4(value, value, value, 1.0);
 }
+
+struct DiagEyeVertexOut {
+    float4 position [[position]];
+    float2 uv;
+    uint layer [[render_target_array_index]];
+};
+vertex DiagEyeVertexOut diagEyeVertex(uint id [[vertex_id]], constant float &depth [[buffer(0)]], constant uint &layer [[buffer(1)]]) {
+    const float2 positions[] = {float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1)};
+    return {float4(positions[id], depth, 1), positions[id] * float2(0.5, -0.5) + 0.5, layer};
+}
+fragment float4 diagEyeFragment(DiagEyeVertexOut in [[stage_in]], constant float4 &colour [[buffer(0)]], constant uint &glyph [[buffer(1)]]) {
+    int2 cell = int2(floor(in.uv * float2(5, 7))) - 1;
+    bool ink = cell.x >= 0 && cell.x < 3 && cell.y >= 0 && cell.y < 5 && ((glyph >> uint(cell.y * 3 + cell.x)) & 1u);
+    return ink ? float4(0, 0, 0, 1) : colour;
+}

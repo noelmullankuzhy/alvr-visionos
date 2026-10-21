@@ -26,9 +26,10 @@ import simd
         let projection = simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0, 0.1 / 99.9, -1), SIMD4(0, 0, 10 / 99.9, 0)))
         let placement = DiagEye.placement(tangents: SIMD4(1, 1, 1, 1))
         for layout in EDRLayout.allCases {
+            let patches = layout.patches(value: 4)
             let buffer = queue.makeCommandBuffer()!
             for (slice, eye) in [DiagEye.left, .right].enumerated() {
-                ramp.encode(buffer: buffer, colour: colour, depth: depth, slice: slice, viewport: viewport, patches: layout.patches(value: 4), projection: projection)
+                ramp.encode(buffer: buffer, colour: colour, depth: depth, slice: slice, viewport: viewport, patches: patches, projection: projection)
                 badge.encode(buffer: buffer, colour: colour, depth: depth, slice: slice, viewport: viewport, placement: placement, eye: eye, projection: projection)
             }
             buffer.commit(); buffer.waitUntilCompleted()
@@ -49,9 +50,15 @@ import simd
                         let rgb = SIMD3(Float(Float16(bitPattern: pixels[base])), Float(Float16(bitPattern: pixels[base + 1])), Float(Float16(bitPattern: pixels[base + 2])))
                         if inside {
                             expect(rgb == SIMD3(eye.colour.x, eye.colour.y, eye.colour.z) || rgb == .zero, "solid SDR badge or black glyph, never EDR")
+                            let column = Int(floor((u - r.x) / r.z * 5)) - 1
+                            let row = Int(floor((v - r.y) / r.w * 7)) - 1
+                            let rows = eye == .left ? ["100", "100", "100", "100", "111"] : ["110", "101", "110", "101", "101"]
+                            if column >= 0 && column < 3 && row >= 0 && row < 5 {
+                                expectEqual(rgb == .zero, Array(rows[row])[column] == "1", "readable L/R glyph orientation")
+                            }
                             if rgb == .zero { black += 1 } else { cyanOrMagenta += 1 }
                         } else if u >= 0 && u < 1 && v >= 0 && v < 1 {
-                            let patch = layout.patches(value: 4).last { u >= $0.x && u < $0.x + $0.width && v >= $0.y && v < $0.y + $0.height }
+                            let patch = patches.last { u >= $0.x && u < $0.x + $0.width && v >= $0.y && v < $0.y + $0.height }
                             expectEqual(rgb, SIMD3(repeating: patch?.value ?? 0), "all pixels outside badge preserved, including 1% patch")
                         }
                     }

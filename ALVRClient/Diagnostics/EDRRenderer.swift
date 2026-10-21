@@ -69,9 +69,11 @@ final class EDRRenderer {
     let layer: LayerRenderer
     let queue: MTLCommandQueue
     let drawing: EDRDrawing
+    let badge: DiagEyeRenderer?
     let runID = EDRSession.shared.currentRun
     init(_ layer: LayerRenderer) throws {
         self.layer = layer
+        badge = Diag.isOn ? DiagEyeRenderer(layer) : nil
         queue = layer.device.makeCommandQueue()!
         drawing = try EDRDrawing(device: layer.device, library: layer.device.makeDefaultLibrary()!)
     }
@@ -112,6 +114,7 @@ final class EDRRenderer {
                                depth: drawable.depthTextures[map.textureIndex], slice: map.sliceIndex,
                                viewport: map.viewport, patches: patches, projection: drawable.computeProjection(viewIndex: index))
             }
+            badge?.encode(buffer: buffer, drawable: drawable, mode: "edr_ramp", generation: nil)
             drawable.encodePresent(commandBuffer: buffer)
         }
         buffer.commit()

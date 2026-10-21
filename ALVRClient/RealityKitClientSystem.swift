@@ -1467,6 +1467,8 @@ class RealityKitClientSystemCorrectlyAssociated : System {
     
     // TODO: Share this with Renderer somehow
     @MainActor func renderFrame(drawableTexture: MTLTexture, offscreenTexture: MTLTexture, depthTexture: MTLTexture, vrrBuffer: MTLBuffer, commandBuffer: MTLCommandBuffer) -> (MTLCommandBuffer, RKQueuedFrame, matrix_float4x4)? {
+        let chromaKey = ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings)
+        renderer.frameChromaKey = chromaKey
         /// Per frame updates hare
         EventHandler.shared.framesRendered += 1
         var streamingActiveForFrame = EventHandler.shared.streamingActive
@@ -1572,7 +1574,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
                 }
             }*/
 
-            if CACurrentMediaTime() - renderer.lastReconfigureTime > 1.0 && (settings.chromaKeyEnabled != renderer.chromaKeyEnabled || settings.chromaKeyColorR != renderer.chromaKeyColor.x || settings.chromaKeyColorG != renderer.chromaKeyColor.y || settings.chromaKeyColorB != renderer.chromaKeyColor.z || settings.chromaKeyDistRangeMin != renderer.chromaKeyLerpDistRange.x || settings.chromaKeyDistRangeMax != renderer.chromaKeyLerpDistRange.y) {
+            if CACurrentMediaTime() - renderer.lastReconfigureTime > 1.0 && (chromaKey.enabled != renderer.chromaKeyEnabled || chromaKey.colour != renderer.chromaKeyColor || chromaKey.range != renderer.chromaKeyLerpDistRange) {
                 renderer.lastReconfigureTime = CACurrentMediaTime()
                 needsPipelineRebuild = true
             }
@@ -1584,7 +1586,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             }
 
             if needsPipelineRebuild {
-                self.renderer.rebuildRenderPipelines()
+                self.renderer.rebuildRenderPipelines(chromaKey: chromaKey)
                 self.currentRenderColorFormat = self.renderer.currentRenderColorFormat
                 self.currentDrawableRenderColorFormat = self.renderer.currentDrawableRenderColorFormat
                 self.recreateFramePool()

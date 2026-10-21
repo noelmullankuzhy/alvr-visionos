@@ -73,6 +73,8 @@
 		D65D2E012C00000100650001 /* EDRDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D2E022C00000100650001 /* EDRDiagnostic.swift */; };
 		D65D2E012C00000100650002 /* EDRRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D2E022C00000100650002 /* EDRRenderer.swift */; };
 		D65D2E012C00000100650003 /* BrightnessDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */; };
+		D65D5E012C00000100650001 /* DiagEye.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D5E022C00000100650001 /* DiagEye.swift */; };
+		D65D5E012C00000100650002 /* DiagEyeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D5E022C00000100650002 /* DiagEyeRenderer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -188,6 +190,8 @@
 		D65D2E022C00000100650001 /* EDRDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/EDRDiagnostic.swift; sourceTree = "<group>"; };
 		D65D2E022C00000100650002 /* EDRRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/EDRRenderer.swift; sourceTree = "<group>"; };
 		D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/BrightnessDiagnostics.swift; sourceTree = "<group>"; };
+		D65D5E022C00000100650001 /* DiagEye.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagEye.swift; sourceTree = "<group>"; };
+		D65D5E022C00000100650002 /* DiagEyeRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagEyeRenderer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -273,6 +277,8 @@
 				D63A0E022C00000100630002 /* HDRPipeline.swift */,
 				D63A0E022C00000100630004 /* HDRProbe.swift */,
 				D65D0E022C00000100650002 /* Diag.swift */,
+				D65D5E022C00000100650002 /* DiagEyeRenderer.swift */,
+				D65D5E022C00000100650001 /* DiagEye.swift */,
 				D65D0E022C00000100650004 /* DiagProbes.swift */,
 				D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */,
 				D65D2E022C00000100650002 /* EDRRenderer.swift */,
@@ -503,6 +509,8 @@
 				D63A0E012C00000100630001 /* HDRPipeline.swift in Sources */,
 				D63A0E012C00000100630003 /* HDRProbe.swift in Sources */,
 				D65D0E012C00000100650001 /* Diag.swift in Sources */,
+				D65D5E012C00000100650002 /* DiagEyeRenderer.swift in Sources */,
+				D65D5E012C00000100650001 /* DiagEye.swift in Sources */,
 				D65D0E012C00000100650003 /* DiagProbes.swift in Sources */,
 				D65D2E012C00000100650003 /* BrightnessDiagnostics.swift in Sources */,
 				D65D2E012C00000100650002 /* EDRRenderer.swift in Sources */,
