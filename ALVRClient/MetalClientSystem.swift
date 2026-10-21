@@ -49,6 +49,7 @@ class MetalClientSystem {
         
         layerRenderer.onSpatialEvent = { eventCollection in
             for event in eventCollection {
+                self.renderer.cornerChart?.spatialEvent(event)
                 RealityKitClientView.handleSpatialEvent(nil, event)
             }
         }

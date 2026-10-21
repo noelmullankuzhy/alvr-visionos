@@ -36,6 +36,8 @@ struct GlobalSettings: Codable {
     var hdrPQ: Bool = false
     // "Diagnostics" (GM decision 65): DIAG lines to alvr_log and Documents/diag; read once at launch.
     var diagnostics: Bool = false
+    // Corner chart (decision 65, CornerChartMode raw value): with Diagnostics on and no stream; read at renderer start.
+    var cornerChart: String = CornerChartMode.off.rawValue
 
     init() {}
     
@@ -68,6 +70,7 @@ struct GlobalSettings: Codable {
         self.claimControllerHomeButton = try container.decodeIfPresent(Bool.self, forKey: .claimControllerHomeButton) ?? self.claimControllerHomeButton
         self.hdrPQ = try container.decodeIfPresent(Bool.self, forKey: .hdrPQ) ?? self.hdrPQ
         self.diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? self.diagnostics
+        self.cornerChart = try container.decodeIfPresent(String.self, forKey: .cornerChart) ?? self.cornerChart
     }
 }
 

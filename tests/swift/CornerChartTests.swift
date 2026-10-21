@@ -71,9 +71,13 @@ private func testLabels() {
         let top100 = labels.first { $0.pos == .T && $0.pct == 100 }!.rect
         let top75 = labels.first { $0.pos == .T && $0.pct == 75 }!.rect
         expect(top75.y1 - top75.y0 > top100.y1 - top100.y0, "inner labels larger")
-        let quads = CornerChart.geometry(t, widthPx: w, heightPx: h, selected: (.TL, 94), status: "L tL 94")
-        expect(quads.allSatisfy { inside($0.rect, drawable) }, "all chart geometry inside the drawable")
-        expect(quads.count > labels.count, "rings, labels, selection and status")
+        for pos in CornerPos.allCases {
+            for pct in [100, 75] {
+                let quads = CornerChart.geometry(t, widthPx: w, heightPx: h, selected: (pos, pct), status: "L tL 94")
+                expect(quads.allSatisfy { inside($0.rect, drawable) }, "all chart geometry inside the drawable, \(pos) \(pct) selected")
+                expect(quads.count > labels.count, "rings, labels, selection and status")
+            }
+        }
     }
 }
 

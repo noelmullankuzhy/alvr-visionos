@@ -372,6 +372,22 @@ struct Entry: View {
                             saveAction()
                         }
 
+                        if gStore.settings.diagnostics {
+                            Picker(selection: $gStore.settings.cornerChart) {
+                                ForEach(CornerChartMode.allCases, id: \.rawValue) {
+                                    Text($0.rawValue).tag($0.rawValue)
+                                }
+                            } label: {
+                                Text("Corner chart")
+                                Text("With no stream: numbered rings at 100-75% of each eye's view. Head still, look into each corner. Pinch right/left: ring out/in; hold right: record; hold left: back (or d-pad, A, B).")
+                                    .font(.system(size: 10))
+                            }
+                            .pickerStyle(.menu)
+                            .onChange(of: gStore.settings.cornerChart) {
+                                saveAction()
+                            }
+                        }
+
                         Button {
                             openWindow(id: "InputDebug")
                         } label: {
