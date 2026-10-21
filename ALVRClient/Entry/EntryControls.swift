@@ -16,8 +16,26 @@ struct EntryControls: View {
     
     @State private var showImmersiveSpace = false
     @State private var immersiveSpaceIsShown = false
-    
+    // Scripted launches (-ALVRAutoEnter YES) enter on their own; there is no tap in the simulator.
+    @State private var autoEnter = AutoEnterPolicy(enabled: UserDefaults.standard.bool(forKey: "ALVRAutoEnter"))
+
     let saveAction: ()->Void
+
+    /// -ALVRAutoEnterRenderer metal|realitykit overrides the saved setting for this launch only (never written back).
+    private var useRealityKit: Bool {
+        switch UserDefaults.standard.string(forKey: "ALVRAutoEnterRenderer")?.lowercased() {
+        case "realitykit": return true
+        case "metal": return false
+        default: return gStore.settings.realityKitRenderer
+        }
+    }
+
+    private func autoEnterIfDue() {
+        if autoEnter.update(connected: eventHandler.connectionState == .connected, showing: model.isShowingClient) {
+            print("ALVRAUTO entering immersive renderer=\(useRealityKit ? "realitykit" : "metal")")
+            model.isShowingClient = true
+        }
+    }
 
     var body: some View {
         @Bindable var model = model
@@ -40,6 +58,9 @@ struct EntryControls: View {
         .buttonStyle(.borderless)
         .glassBackgroundEffect(in: .rect(cornerRadius: 50))
 
+        .onChange(of: eventHandler.connectionState, initial: true) { autoEnterIfDue() }
+        .onChange(of: model.isShowingClient) { autoEnterIfDue() }
+
         //Enable Client
         .onChange(of: model.isShowingClient) { _, isShowing in
             Task {
@@ -47,7 +68,7 @@ struct EntryControls: View {
 
                     saveAction()
                     print("Opening Immersive Space")
-                    if gStore.settings.realityKitRenderer {
+                    if useRealityKit {
                         if !DummyMetalRenderer.haveRenderInfo {
                             var dummySpaceIsOpened = false
                             while !dummySpaceIsOpened {
