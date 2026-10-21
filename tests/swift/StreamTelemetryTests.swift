@@ -299,6 +299,65 @@ private func testFileSink() {
     expect(made.first?.hasSuffix("Z.jsonl") ?? false, "lazy file named by UTC start")
 }
 
+// Records in sink call order, with session starts inline; safe to call from several threads.
+private final class OrderedSink: StreamTelemetrySink {
+    private let lock = NSLock()
+    private let encoder = StreamTelemetryRecord.makeEncoder()
+    private(set) var entries: [[String: Any]] = []
+    func beginSession(utcStart: Date) {
+        lock.lock()
+        entries.append(["session": true])
+        lock.unlock()
+    }
+    func write(_ record: StreamTelemetryRecord) {
+        guard case .format = record, let json = record.json(using: encoder),
+              let object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] else { return }
+        lock.lock()
+        entries.append(object)
+        lock.unlock()
+    }
+}
+
+// The session's initial format must be enqueued before any format update that follows the session
+// start, so the first record of a session is never older than a later one.
+private func testSessionStartFormatOrdering() {
+    var violations = 0
+    var sessionsChecked = 0
+    for _ in 0..<300 {
+        let sink = OrderedSink()
+        let telemetry = StreamTelemetry(sink: sink)
+        DispatchQueue.concurrentPerform(iterations: 2) { worker in
+            if worker == 0 {
+                startStream(telemetry)
+            } else {
+                for value in 1...200 {
+                    telemetry.updateFormat { $0.displayRefreshRateHz = Double(value) }
+                }
+            }
+        }
+        let entries = sink.entries
+        guard let sessionIndex = entries.firstIndex(where: { $0["session"] != nil }) else {
+            violations += 1
+            continue
+        }
+        let formats = entries[(sessionIndex + 1)...]
+        guard let first = formats.first else {
+            violations += 1
+            continue
+        }
+        sessionsChecked += 1
+        let firstValue = double(first, "display_refresh_rate_hz") ?? 0
+        if first["view_width"] == nil || formats.dropFirst().contains(where: { (double($0, "display_refresh_rate_hz") ?? 0) < firstValue }) {
+            violations += 1
+        }
+        if entries[..<sessionIndex].count != 0 {
+            violations += 1
+        }
+    }
+    expectEqual(sessionsChecked, 300, "every run starts one session with an initial format")
+    expectEqual(violations, 0, "initial format first and never older than later updates")
+}
+
 private func testPrunePolicy() {
     let names = (1...23).map { String(format: "202610%02dT120000Z.jsonl", $0) }.shuffled() + ["notes.txt", ".DS_Store", "x.jsonl"]
     let pruned = StreamTelemetryFileSink.filesToPrune(names, keep: 20)
@@ -316,11 +375,17 @@ private func testFileSinkPrunesOnSessionStart() {
         try? Data().write(to: dir.appendingPathComponent(String(format: "202609%02dT000000Z.jsonl", day)))
     }
     try? Data().write(to: dir.appendingPathComponent("keep.txt"))
+    // A directory with a telemetry-style name, older than everything: never deleted, never counted.
+    let namedDir = dir.appendingPathComponent("20250101T000000Z.jsonl")
+    try? FileManager.default.createDirectory(at: namedDir, withIntermediateDirectories: true)
+    try? Data().write(to: namedDir.appendingPathComponent("inner.txt"))
     let sink = StreamTelemetryFileSink(directory: dir, echo: false)
     sink.beginSession(utcStart: Date(timeIntervalSince1970: 1_792_546_200))
     sink.flush()
     let left = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted()
-    expectEqual(left.count, 21, "newest 20 telemetry files plus the foreign file")
+    expectEqual(left.count, 22, "newest 20 telemetry files plus the foreign file and directory")
+    expect(left.contains("20250101T000000Z.jsonl"), "timestamp-named directory not pruned")
+    expect(FileManager.default.fileExists(atPath: namedDir.appendingPathComponent("inner.txt").path), "directory contents untouched")
     expect(left.contains("20261021T013000Z.jsonl"), "new session file kept")
     expect(!left.contains("20260906T000000Z.jsonl"), "older files pruned")
     expect(left.contains("20260907T000000Z.jsonl"), "19 newest older files kept")
@@ -337,6 +402,7 @@ enum StreamTelemetryTests {
         testFormatRecords()
         testCodecHelpers()
         testFileSink()
+        testSessionStartFormatOrdering()
         testPrunePolicy()
         testFileSinkPrunesOnSessionStart()
         finishTests("StreamTelemetryTests")

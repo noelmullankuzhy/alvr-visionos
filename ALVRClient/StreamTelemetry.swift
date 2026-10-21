@@ -216,12 +216,13 @@ final class StreamTelemetry {
         format.enableHdr = enableHdr
         format.forceFastSecretTextureFormats = forceFastSecretTextureFormats
         let record = takeFormatIfChanged(force: newSession)
+        // Session start and its initial format are enqueued (sink serial queue) under the lock, so any
+        // later format update, which must take the lock first, is enqueued after them.
         if newSession {
-            // Under the lock so no record from another thread reaches the sink ahead of the session.
             sink.beginSession(utcStart: Date(timeIntervalSince1970: wallClock()))
         }
-        lock.unlock()
         emit(record)
+        lock.unlock()
     }
 
     func streamingStopped() {
@@ -629,8 +630,10 @@ final class StreamTelemetryFileSink: StreamTelemetrySink {
         }
     }
 
+    // Regular files only: a directory with a telemetry-style name is neither counted nor deleted.
     private func pruneOldFiles() {
-        guard let directory, let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        guard let directory, let urls = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else { return }
+        let names = urls.filter { (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true }.map { $0.lastPathComponent }
         for name in StreamTelemetryFileSink.filesToPrune(names, keep: StreamTelemetryFileSink.keepFiles) {
             try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
