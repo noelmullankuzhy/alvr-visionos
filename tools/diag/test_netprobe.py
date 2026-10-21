@@ -18,6 +18,11 @@ spec.loader.exec_module(n)
 
 
 class NetProbeTests(unittest.TestCase):
+    def test_swift_golden_bytes(self):
+        self.assertEqual(n.packet(0x0102030405060708, 0x11223344, 1, 3,
+                                  0x090a0b0c0d0e0f10, 30).hex(),
+                         '415650440102030405060708090a0b0c0d0e0f1011223344000100030000')
+
     def test_packet(self):
         packet = n.packet(123, 7, 2, 5, 999, 100)
         self.assertEqual(len(packet), 100)
