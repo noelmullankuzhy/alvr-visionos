@@ -162,7 +162,9 @@ final class CornerChartRenderer {
         pass.depthAttachment.texture = drawable.depthTextures[0]
         pass.depthAttachment.loadAction = .clear
         pass.depthAttachment.storeAction = .store
-        pass.depthAttachment.clearDepth = 0.0
+        // Non-zero, as the streaming pass clears: the chart writes no depth, and a depth-0 chart was not shown
+        // on device in mixed immersion (21 Oct; only the depth-writing eye badges were).
+        pass.depthAttachment.clearDepth = 0.000000001
         pass.rasterizationRateMap = rasterizationRateMap
         pass.renderTargetArrayLength = viewports.count
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
