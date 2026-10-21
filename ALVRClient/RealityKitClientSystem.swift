@@ -1525,7 +1525,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             defer { nalViewsPtr.deallocate() }
             alvr_report_compositor_start(queuedFrame!.timestamp, nalViewsPtr)
 
-            queuedFrame = QueuedFrame(imageBuffer: queuedFrame!.imageBuffer, timestamp: queuedFrame!.timestamp, viewParamsValid: true, viewParams: [nalViewsPtr[0], nalViewsPtr[1]])
+            queuedFrame = QueuedFrame(imageBuffer: queuedFrame!.imageBuffer, timestamp: queuedFrame!.timestamp, viewParamsValid: true, viewParams: [nalViewsPtr[0], nalViewsPtr[1]], videoFormat: queuedFrame!.videoFormat)
         }
 
         //print(queuedFrame, EventHandler.shared.alvrInitialized, streamingActiveForFrame)
@@ -1579,20 +1579,12 @@ class RealityKitClientSystemCorrectlyAssociated : System {
                 needsPipelineRebuild = true
             }
             
-            if let videoFormat = EventHandler.shared.videoFormat {
-                let nextYuvTransform = VideoHandler.getYUVTransformForVideoFormat(videoFormat)
-                if nextYuvTransform != renderer.currentYuvTransform {
-                    needsPipelineRebuild = true
-                }
-                renderer.currentYuvTransform = nextYuvTransform
-                let colour = VideoHandler.getColourSelectionForVideoFormat(videoFormat)
-                if colour.isPQ != renderer.currentHdrPQ {
-                    needsPipelineRebuild = true
-                }
-                renderer.currentHdrPQ = colour.isPQ
-                renderer.currentGamutTransform = colour.sourceToOutput
+            // Any change of the frame's colour state, gamut alone included, rebuilds synchronously below. SDR keeps
+            // the previous constants (StreamColourState: identity gamut on RealityKit); PQ on RealityKit is UNPROVEN.
+            if let queuedFrame, let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: renderer.isRealityKit), renderer.videoPipelinesNeedBuild(for: colour) {
+                needsPipelineRebuild = true
             }
-            
+
             if needsPipelineRebuild {
                 self.renderer.rebuildRenderPipelines()
                 self.currentRenderColorFormat = self.renderer.currentRenderColorFormat

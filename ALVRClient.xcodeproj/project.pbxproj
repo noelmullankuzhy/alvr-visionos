@@ -122,6 +122,7 @@
 		C5E590352B6379ED00328ED6 /* Renderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Renderer.swift; sourceTree = "<group>"; };
 		C5E590372B6379ED00328ED6 /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		C5E590392B6379ED00328ED6 /* ShaderTypes.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ShaderTypes.h; sourceTree = "<group>"; };
+		D63A0E022C00000100630006 /* VideoColour.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = VideoColour.h; sourceTree = "<group>"; };
 		C5E5903B2B6379ED00328ED6 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		C5E5903D2B6379EE00328ED6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		C5E5903F2B6379EE00328ED6 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -279,6 +280,7 @@
 				9ED257162B8062A1008DC22F /* Settings.swift */,
 				C5E590372B6379ED00328ED6 /* Shaders.metal */,
 				C5E590392B6379ED00328ED6 /* ShaderTypes.h */,
+				D63A0E022C00000100630006 /* VideoColour.h */,
 				D61E6FDF2B71CE080076031A /* VideoHandler.swift */,
 				E78D482C2EBA7504000F77D7 /* AV1Parser.swift */,
 				E78D482E2EBA76B8000F77D7 /* NALParser.swift */,

@@ -3,13 +3,17 @@
 //
 //  HDR10 (PQ, BT.2020) display maths, GM decision 63 h2 (pure Foundation/simd, tests/swift/HDRPipelineTests.swift).
 //
-//  PQ shader path (Shaders.metal videoFrameFragmentShader_YpCbCrBiPlanar with HDR_PQ): explicit 10-bit planes ->
-//  yuvToRGB (BT.2020 NCL, limited) -> R'G'B' -> ST 2084 EOTF -> absolute nits -> / reference white (SDR white = 1.0,
-//  linear BT.2020) -> sourceToOutput (output primaries) -> rollOff above the EDR headroom -> rgba16Float drawable.
+//  PQ shader path (Shaders.metal videoFrameFragmentShader_YpCbCrBiPlanar with HDR_PQ, maths in VideoColour.h):
+//  explicit 10-bit planes -> yuvToRGB (BT.2020 NCL, limited) -> R'G'B' -> ST 2084 EOTF -> absolute nits -> / reference
+//  white (SDR white = 1.0, linear BT.2020) -> sourceToOutput (BT.2020 -> Display P3) -> rollOff above the EDR headroom
+//  -> rgba16Float drawable as extended-range linear Display P3 (decision 63c (2), Apple's EDR path, WWDC23 10089).
+//  CompositorServices exposes no drawable colour space setting, so the P3 interpretation is unproven until the headset
+//  run. RealityKit path (renderColorFormatHDR texture): UNPROVEN, its interpretation of the texture is not documented.
 //
 //  EDR headroom: visionOS has no public query. UIScreen.currentEDRHeadroom is API_UNAVAILABLE(visionos), and
 //  CompositorServices (LayerRenderer) and RealityKit expose no headroom (checked against the visionOS 27 SDK). The
-//  renderer therefore uses assumedHeadroom, overridable with UserDefaults ALVRHDRHeadroom. The device has to measure it.
+//  renderer therefore uses assumedHeadroom 2.0, overridable with UserDefaults ALVRHDRHeadroom, until the headset run
+//  measures it.
 //
 
 import Foundation
@@ -20,7 +24,7 @@ enum HDRPipeline {
     static let referenceWhiteNits: Double = 203
 
     // Assumed display headroom (peak / SDR white) until the device measures it; ALVRHDRHeadroom overrides it.
-    static let assumedHeadroom: Float = 4
+    static let assumedHeadroom: Float = 2
     static let headroomDefaultsKey = "ALVRHDRHeadroom"
 
     static func headroom(defaultsValue: Double) -> Float {
@@ -61,10 +65,11 @@ enum HDRPipeline {
         return rgb * (rollOff(m, headroom: headroom) / m)
     }
 
-    // PQ needs the explicit 10-bit plane path (the private *_sRGB YCbCr samplers apply the sRGB EOTF themselves).
-    // transfer is the CMFormatDescription TransferFunction extension value.
-    static func requiresExplicitPlanes(transfer: String?) -> Bool {
-        transfer == "SMPTE_ST_2084_PQ"
+    // PQ with the HDR setting on needs the explicit 10-bit plane path (the private *_sRGB YCbCr samplers apply the
+    // sRGB EOTF themselves); HDR off keeps the decoder's default output. transfer is the CMFormatDescription
+    // TransferFunction extension value.
+    static func requiresExplicitPlanes(transfer: String?, hdrEnabled: Bool) -> Bool {
+        hdrEnabled && transfer == "SMPTE_ST_2084_PQ"
     }
 
     // Swift mirror of the video fragment shader for the Metal renderer (no chroma key): sample = float4(Y, Cb, Cr, 1).
@@ -110,13 +115,81 @@ enum HDRPipeline {
     }
 }
 
-// Probe cadence: at most one sample per 250 ms, measured from the last sample taken.
+// Colour state of one stream (decision 63c (4)): a pure function of the frame's own format description (selection),
+// the plane depth its decoded pixel format binds at (nil for the private sampler formats), the HDR setting and the
+// renderer. Never mutated; Renderer publishes it together with the pipelines built from it (VideoPipelineSlot).
+struct StreamColourState: Equatable {
+    let selection: ColourSelection
+    // HDR_PQ shader path on explicit 10-bit planes.
+    let hdrPQ: Bool
+    // PQ stream with HDR on whose decoded format is not explicit 10-bit planes (the decoder ignored the request):
+    // HDR is refused for the stream, which then takes the HDR-off path (decision 63c (3)).
+    let pqRefused: Bool
+    // GAMUT_TO_OUTPUT constants.
+    let gamutToOutput: simd_float3x3
+
+    var yuvToRGB: simd_float4x4 { selection.yuvToRGB }
+    // Plane policy for binding: 10-bit biplanar buffers as r16Unorm/rg16Unorm instead of the *_sRGB private format.
+    var explicitPlanes: Bool { hdrPQ }
+
+    init(selection: ColourSelection, planeBitDepth: Int?, hdrEnabled: Bool, realityKit: Bool) {
+        self.selection = selection
+        let pq = hdrEnabled && selection.isPQ
+        pqRefused = pq && planeBitDepth != 10
+        hdrPQ = pq && !pqRefused
+        // Without the HDR path: the previous SDR constants exactly (RealityKit never set a gamut, and PQ/HLG streams
+        // were not converted).
+        if hdrPQ || (!realityKit && !selection.isPQ) {
+            gamutToOutput = selection.sourceToOutput
+        } else {
+            gamutToOutput = matrix_identity_float3x3
+        }
+    }
+}
+
+// Video pipelines published with the colour state they were built for (decision 63c (4)). A frame draws only with
+// pipelines built for its own state; a build for a state no longer requested is dropped.
+final class VideoPipelineSlot<Pipelines> {
+    private let lock = NSLock()
+    private var requested: StreamColourState?
+    private var published: (colour: StreamColourState, pipelines: Pipelines)?
+
+    var requestedColour: StreamColourState? { lock.withLock { requested } }
+
+    // Records the state the next build uses; true when it changed (the caller rebuilds).
+    func request(_ colour: StreamColourState) -> Bool {
+        lock.withLock {
+            if requested == colour { return false }
+            requested = colour
+            return true
+        }
+    }
+
+    func publish(_ pipelines: Pipelines, builtFor colour: StreamColourState) -> Bool {
+        lock.withLock {
+            guard requested == colour else { return false }
+            published = (colour, pipelines)
+            return true
+        }
+    }
+
+    func pipelines(for colour: StreamColourState) -> Pipelines? {
+        lock.withLock { published?.colour == colour ? published?.pipelines : nil }
+    }
+}
+
+// Probe cadence: at most one sample per 250 ms, measured from the last sample taken, on a monotonic clock
+// (monotonicMs); a clock that steps back restarts the cadence instead of stalling it.
 struct HDRProbeClock {
     static let intervalMs = 250
     private var lastMs: Int?
 
+    static func monotonicMs(uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Int {
+        Int(uptime * 1000)
+    }
+
     mutating func shouldSample(nowMs: Int) -> Bool {
-        if let last = lastMs, nowMs - last < HDRProbeClock.intervalMs { return false }
+        if let last = lastMs, nowMs >= last, nowMs - last < HDRProbeClock.intervalMs { return false }
         lastMs = nowMs
         return true
     }

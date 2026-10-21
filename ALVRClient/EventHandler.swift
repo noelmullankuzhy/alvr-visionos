@@ -548,7 +548,9 @@ class EventHandler: ObservableObject {
         }
 
         if let vtDecompressionSession = self.vtDecompressionSession {
-            VideoHandler.feedVideoIntoDecoder(decompressionSession: vtDecompressionSession, nals: nal, timestamp: timestamp, videoFormat: self.videoFormat!, codec: currentCodec) { [self] imageBuffer in
+            // The stream this frame was decoded for: its colour state is derived from it, not from a later videoFormat.
+            let frameVideoFormat = self.videoFormat!
+            VideoHandler.feedVideoIntoDecoder(decompressionSession: vtDecompressionSession, nals: nal, timestamp: timestamp, videoFormat: frameVideoFormat, codec: currentCodec) { [self] imageBuffer in
                 guard let imageBuffer = imageBuffer else {
                     //print("Frame not decoded")
                     return
@@ -591,10 +593,10 @@ class EventHandler: ObservableObject {
                     // the next frame is starting, so keep this around for now just in case.
                     if frameQueueLastImageBuffer != nil {
                         //frameQueue.append(QueuedFrame(imageBuffer: frameQueueLastImageBuffer!, timestamp: frameQueueLastTimestamp))
-                        frameQueue.append(QueuedFrame(imageBuffer: imageBuffer, timestamp: timestamp, viewParamsValid: false, viewParams: viewParamsDummy))
+                        frameQueue.append(QueuedFrame(imageBuffer: imageBuffer, timestamp: timestamp, viewParamsValid: false, viewParams: viewParamsDummy, videoFormat: frameVideoFormat))
                     }
                     else {
-                        frameQueue.append(QueuedFrame(imageBuffer: imageBuffer, timestamp: timestamp, viewParamsValid: false, viewParams: viewParamsDummy))
+                        frameQueue.append(QueuedFrame(imageBuffer: imageBuffer, timestamp: timestamp, viewParamsValid: false, viewParams: viewParamsDummy, videoFormat: frameVideoFormat))
                     }
                     // TODO: make this configurable
                     if frameQueue.count > 2 {
@@ -1051,4 +1053,6 @@ struct QueuedFrame {
     let timestamp: UInt64
     let viewParamsValid: Bool
     let viewParams: [AlvrViewParams]
+    // Format description of the stream the frame was decoded for (VideoHandler.streamColourState).
+    let videoFormat: CMFormatDescription?
 }

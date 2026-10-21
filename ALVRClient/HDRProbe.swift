@@ -26,16 +26,17 @@ final class HDRProbe {
     private var clock = HDRProbeClock()
     private var loggedUnavailable = false
 
-    // Render thread, after the frame's planes are bound.
-    func sample(pixelBuffer: CVPixelBuffer, selection: ColourSelection) {
+    // Render thread, after the frame's planes are bound. Cadence on the monotonic clock; t_ms is wall-clock Unix ms.
+    func sample(pixelBuffer: CVPixelBuffer, colour: StreamColourState) {
+        guard clock.shouldSample(nowMs: HDRProbeClock.monotonicMs()) else { return }
         let nowMs = Int(Date().timeIntervalSince1970 * 1000)
-        guard clock.shouldSample(nowMs: nowMs) else { return }
+        let selection = colour.selection
         let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        guard selection.isPQ, !VideoHandler.isFormatSecret(format), VideoHandler.getPlaneBitDepthForFormat(format) == 10,
-              CVPixelBufferGetPlaneCount(pixelBuffer) == 2 else {
+        // hdrPQ: explicit 10-bit planes, checked against this frame's actual pixel format (StreamColourState).
+        guard colour.hdrPQ, CVPixelBufferGetPlaneCount(pixelBuffer) == 2 else {
             if !loggedUnavailable {
                 loggedUnavailable = true
-                emit("HDRPROBE unavailable transfer=\(selection.transfer.rawValue) pixel_format=\(ColourPipeline.fourCC(format))")
+                emit("HDRPROBE unavailable transfer=\(selection.transfer.rawValue) pixel_format=\(ColourPipeline.fourCC(format)) refused=\(colour.pqRefused)")
             }
             return
         }

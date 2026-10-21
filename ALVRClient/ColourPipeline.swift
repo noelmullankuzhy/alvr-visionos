@@ -185,12 +185,14 @@ enum ColourPipeline {
         let full = fullRange ?? false
         let bits = bitDepth ?? 8
         let planeBits = planeBitDepth ?? bits
-        let gamut = parsedTransfer == .hlg ? matrix_identity_double3x3 : primariesConversion(from: p, to: output.primaries)
+        // PQ outputs extended linear Display P3 whatever the SDR policy (decision 63c (2)).
+        let target = parsedTransfer == .pq ? ColourOutput.p3 : output
+        let gamut = parsedTransfer == .hlg ? matrix_identity_double3x3 : primariesConversion(from: p, to: target.primaries)
         return ColourSelection(
             primaries: p, transfer: parsedTransfer, matrix: m, fullRange: full, bitDepth: bits, planeBitDepth: planeBits,
             primariesAssumed: parsedPrimaries == nil, matrixAssumed: parsedMatrix == nil, rangeAssumed: fullRange == nil,
             yuvToRGB: yuvToRGBMatrix(matrix: m, fullRange: full, bitDepth: planeBits),
-            output: output,
+            output: target,
             sourceToOutput: simd_float3x3(columns: (simd_float3(gamut.columns.0), simd_float3(gamut.columns.1), simd_float3(gamut.columns.2))))
     }
 
