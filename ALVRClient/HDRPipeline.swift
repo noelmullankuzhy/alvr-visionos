@@ -479,6 +479,12 @@ final class StreamImmersionGate {
         start?(fullImmersion)
     }
 
+    // RealityKit resolves its open result asynchronously; failed/cancelled opens never release a pending stream.
+    func openCompleted(succeeded: Bool, fullImmersion: Bool) {
+        if succeeded { opened(fullImmersion: fullImmersion) }
+        else { closed() }
+    }
+
     func closed() {
         lock.lock()
         defer { lock.unlock() }

@@ -151,20 +151,22 @@ struct EntryControls: View {
                         
                         print("Open real immersive space")
                         
-                        EventHandler.streamImmersion.opened(fullImmersion: false)
                         switch await openImmersiveSpace(id: "RealityKitClient") {
                         case .opened:
+                            EventHandler.streamImmersion.openCompleted(succeeded: true, fullImmersion: false)
+                            alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), "STREAMSPACE id=RealityKitClient immersion=mixed")
                             immersiveSpaceIsShown = true
                         case .error, .userCancelled:
                             fallthrough
                         @unknown default:
+                            EventHandler.streamImmersion.openCompleted(succeeded: false, fullImmersion: false)
                             immersiveSpaceIsShown = false
                             showImmersiveSpace = false
                         }
                     }
                     else {
-                        gStore.openedStreamFullImmersion = gStore.settings.streamFullImmersion
-                        await openImmersiveSpace(id: "MetalClient")
+                        let spaceID = gStore.settings.streamFullImmersion ? "MetalClientFull" : "MetalClient"
+                        await openImmersiveSpace(id: spaceID)
                     }
                     VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
                     if gStore.settings.dismissWindowOnEnter {

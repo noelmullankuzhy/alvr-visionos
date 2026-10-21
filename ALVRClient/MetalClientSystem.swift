@@ -26,10 +26,12 @@ class MetalClientSystem {
 
     var renderer: Renderer;
     let layerRenderer: LayerRenderer
+    private let streamingSpace: Bool
 
-    init(_ layerRenderer: LayerRenderer, offlineDiagnostics: Bool = false) {
+    init(_ layerRenderer: LayerRenderer, offlineDiagnostics: Bool = false, streamingSpace: Bool = false) {
         self.renderer = Renderer(layerRenderer, offlineDiagnostics: offlineDiagnostics)
         self.layerRenderer = layerRenderer
+        self.streamingSpace = streamingSpace
     }
 
     func startRenderLoop() {
@@ -44,7 +46,11 @@ class MetalClientSystem {
     }
     
     func renderLoop() {
-        defer { renderer.stopQualitySweep() }
+        var immersionClosed = false
+        defer {
+            if streamingSpace && !immersionClosed { EventHandler.streamImmersion.closed() }
+            renderer.stopQualitySweep()
+        }
     
         layerRenderer.waitUntilRunning()
         
@@ -65,6 +71,11 @@ class MetalClientSystem {
                 connected: EventHandler.shared.connectionState == .connected,
                 streaming: EventHandler.shared.streamingActive) {
             if layerRenderer.state == .invalidated {
+                // Close before the early process exit below, which does not execute defer.
+                if streamingSpace {
+                    EventHandler.streamImmersion.closed()
+                    immersionClosed = true
+                }
                 if renderer.renderOwnership.offlineDiagnostics { break }
                 print("Layer is invalidated")
                 //EventHandler.shared.stop()

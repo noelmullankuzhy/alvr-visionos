@@ -57,9 +57,6 @@ struct ALVRClientApp: App {
     // Triggers body re-evaluation, and the .upper​Limb​Visibility modifiers will pick up the new show​Hands​Overlaid or progressive value live
     @ObservedObject private var observedGStore = ALVRClientApp.gStore
 
-    private var clientImmersionStyle: Binding<ImmersionStyle> {
-        .constant(observedGStore.openedStreamFullImmersion ? .full : .mixed)
-    }
     @State private var realityKitImmersionStyle: ImmersionStyle = ALVRClientApp.gStore.settings.enableProgressive ? .progressive : .mixed
     
     static let shared = ALVRClientApp()
@@ -242,8 +239,7 @@ struct ALVRClientApp: App {
         // Deliberately contains no UI of its own — the input debug window stays
         // open in front of it, which is the whole point of entering from there.
         //
-        // Pinned to .mixed rather than sharing clientImmersionStyle: a .full
-        // space would hide that window.
+        // Pinned to .mixed: a .full space would hide that window.
         ImmersiveSpace(id: "InputDebugSpace") {
             CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
                 let system = MetalClientSystem(layerRenderer)
@@ -266,6 +262,7 @@ struct ALVRClientApp: App {
 
         ImmersiveSpace(id: "RealityKitClient") {
             RealityKitClientView()
+                .onDisappear { EventHandler.streamImmersion.closed() }
         }
         .disablePersistentSystemOverlaysForVisionOS2(shouldDisable: ALVRClientApp.gStore.settings.disablePersistentSystemOverlays ? .hidden : .automatic)
         .immersionStyle(selection: $realityKitImmersionStyle, in: .mixed, .progressive)
@@ -302,15 +299,27 @@ struct ALVRClientApp: App {
         .upperLimbVisibility(.hidden)
 
         ImmersiveSpace(id: "MetalClient") {
-            let fullImmersion = observedGStore.openedStreamFullImmersion
-            CompositorLayer(configuration: ContentStageConfiguration(immersion: fullImmersion ? "full" : "mixed")) { layerRenderer in
-                EventHandler.streamImmersion.opened(fullImmersion: fullImmersion)
-                let system = MetalClientSystem(layerRenderer)
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
+                EventHandler.streamImmersion.opened(fullImmersion: false)
+                alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), "STREAMSPACE id=MetalClient immersion=mixed")
+                let system = MetalClientSystem(layerRenderer, streamingSpace: true)
                 system.startRenderLoop()
             }
         }
         .disablePersistentSystemOverlaysForVisionOS2(shouldDisable: ALVRClientApp.gStore.settings.disablePersistentSystemOverlays ? .hidden : .automatic)
-        .immersionStyle(selection: clientImmersionStyle, in: .mixed, .full)
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
+
+        ImmersiveSpace(id: "MetalClientFull") {
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: "full")) { layerRenderer in
+                EventHandler.streamImmersion.opened(fullImmersion: true)
+                alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), "STREAMSPACE id=MetalClientFull immersion=full")
+                let system = MetalClientSystem(layerRenderer, streamingSpace: true)
+                system.startRenderLoop()
+            }
+        }
+        .disablePersistentSystemOverlaysForVisionOS2(shouldDisable: ALVRClientApp.gStore.settings.disablePersistentSystemOverlays ? .hidden : .automatic)
+        .immersionStyle(selection: .constant(.full), in: .full)
         .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
     }
 }

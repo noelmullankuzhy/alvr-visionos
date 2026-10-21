@@ -86,8 +86,6 @@ extension GlobalSettingsStore {
 }
 
 class GlobalSettingsStore: ObservableObject {
-    // Latched by Entry immediately before opening MetalClient; settings edits do not switch a live space.
-    @Published var openedStreamFullImmersion = false
     @Published var settings: GlobalSettings = GlobalSettings()
     
     init() {
