@@ -34,6 +34,7 @@ struct GlobalSettings: Codable {
     var claimControllerHomeButton: Bool = true
     // Sent as prefer_hdr at ALVR initialisation (GM decision 63); off = SDR request as before.
     var hdrPQ: Bool = false
+    var streamFullImmersion: Bool = false
     // "Diagnostics" (GM decision 65): DIAG lines to alvr_log and Documents/diag; read once at launch.
     var diagnostics: Bool = false
     var captureDiagnosticFrames: Bool = false
@@ -70,6 +71,7 @@ struct GlobalSettings: Codable {
         self.chaperoneDistanceCm = try container.decodeIfPresent(Int.self, forKey: .chaperoneDistanceCm) ?? self.chaperoneDistanceCm
         self.showPerformanceHud = try container.decodeIfPresent(Bool.self, forKey: .showPerformanceHud) ?? self.showPerformanceHud
         self.claimControllerHomeButton = try container.decodeIfPresent(Bool.self, forKey: .claimControllerHomeButton) ?? self.claimControllerHomeButton
+        self.streamFullImmersion = try container.decodeIfPresent(Bool.self, forKey: .streamFullImmersion) ?? self.streamFullImmersion
         self.hdrPQ = try container.decodeIfPresent(Bool.self, forKey: .hdrPQ) ?? self.hdrPQ
         self.renderQualitySweep = try container.decodeIfPresent(Bool.self, forKey: .renderQualitySweep) ?? self.renderQualitySweep
         self.diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? self.diagnostics
@@ -84,6 +86,8 @@ extension GlobalSettingsStore {
 }
 
 class GlobalSettingsStore: ObservableObject {
+    // Latched by Entry immediately before opening MetalClient; settings edits do not switch a live space.
+    @Published var openedStreamFullImmersion = false
     @Published var settings: GlobalSettings = GlobalSettings()
     
     init() {

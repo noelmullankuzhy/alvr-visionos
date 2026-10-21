@@ -106,6 +106,7 @@ class EventHandler: ObservableObject {
     static let shared = EventHandler()
     // The current stream's immutable video inputs and generation (decision 63e (2), (3)), captured at
     // STREAMING_STARTED; the payload is the stream's foveation. Renderer.videoFramePipelines runs under its lock.
+    static let streamImmersion = StreamImmersionGate()
     static let videoStreams = VideoStreamGate<FoveationVars?>()
 
     var outgoingWorker : OutgoingWorker = OutgoingWorker("Outgoing Data")
@@ -240,6 +241,7 @@ class EventHandler: ObservableObject {
     func stop() {
         print("EventHandler.Stop")
         WorldTracker.inputGate.streamStopped()
+        EventHandler.streamImmersion.cancelPendingStream()
         EventHandler.videoStreams.streamStopped()
         StreamTelemetry.shared.streamingStopped()
         streamingActive = false
@@ -891,18 +893,31 @@ class EventHandler: ObservableObject {
                 // setting, headroom and SDR output policy, the server's encoding gamma and the foveation. Decode and
                 // render threads read only these; a setting changed mid-stream applies to the next stream.
                 let foveation = Settings.getAlvrSettings().map { FFR.calculateFoveationVars(alvrEvent: started, foveationSettings: $0.video.foveated_encoding) }
-                let videoStream = EventHandler.videoStreams.streamStarted(
-                    hdrEnabled: ALVRClientApp.gStore.settings.hdrPQ,
-                    headroom: HDRPipeline.headroom(defaultsValue: UserDefaults.standard.double(forKey: HDRPipeline.headroomDefaultsKey)),
-                    output: VideoHandler.colourOutput,
-                    encodingGamma: started.encoding_gamma,
-                    payload: foveation)
-                print("ALVRCOLOUR stream=\(videoStream.generation) hdr_setting=\(videoStream.hdrEnabled) headroom=\(videoStream.headroom) foveation=\(foveation != nil)")
+                let hdrEnabled = ALVRClientApp.gStore.settings.hdrPQ
+                let headroomOverride = UserDefaults.standard.double(forKey: HDRPipeline.headroomDefaultsKey)
+                let whiteOverride = UserDefaults.standard.double(forKey: HDRPipeline.referenceWhiteDefaultsKey)
+                let referenceWhite = HDRPipeline.referenceWhiteNits(defaultsValue: whiteOverride)
+                let output = VideoHandler.colourOutput
+                EventHandler.streamImmersion.whenOpened { fullImmersion in
+                    let videoStream = EventHandler.videoStreams.streamStarted(
+                        hdrEnabled: hdrEnabled,
+                        headroom: HDRPipeline.headroom(defaultsValue: headroomOverride, fullImmersion: fullImmersion),
+                        output: output,
+                        encodingGamma: started.encoding_gamma,
+                        referenceWhiteNits: referenceWhite,
+                        payload: foveation)
+                    let line = "HDRDISPLAY immersion=\(fullImmersion ? "full" : "mixed") headroom=\(videoStream.headroom)"
+                        + " headroom_src=\(headroomOverride >= 1 ? "override" : "measured") ref_white=\(referenceWhite)"
+                        + " ref_src=\(whiteOverride >= 1 ? "override" : "default")"
+                    alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), line)
+                    print("ALVRCOLOUR stream=\(videoStream.generation) hdr_setting=\(videoStream.hdrEnabled) headroom=\(videoStream.headroom) foveation=\(foveation != nil)")
+                }
                 // Choose this stream's interaction profile once from the emulation mode (fixed for the stream), declare it, then open the gate.
                 WorldTracker.shared.startInputStream()
             case ALVR_EVENT_STREAMING_STOPPED.rawValue:
                 print("streaming stopped")
                 WorldTracker.inputGate.streamStopped()
+                EventHandler.streamImmersion.cancelPendingStream()
                 EventHandler.videoStreams.streamStopped()
                 if streamingActive {
                     streamingActive = false

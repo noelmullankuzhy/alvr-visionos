@@ -11,9 +11,9 @@
 //  run. RealityKit path (renderColorFormatHDR texture): UNPROVEN, its interpretation of the texture is not documented.
 //
 //  EDR headroom: visionOS has no public query. UIScreen.currentEDRHeadroom is API_UNAVAILABLE(visionos), and
-//  CompositorServices (LayerRenderer) and RealityKit expose no headroom (checked against the visionOS 27 SDK). The
-//  renderer therefore uses assumedHeadroom 2.0, overridable with UserDefaults ALVRHDRHeadroom, until the headset run
-//  measures it.
+//  CompositorServices (LayerRenderer) and RealityKit expose no headroom (checked against the visionOS 27 SDK).
+//  GM goal log 65i/65n, Noel on device 21 Oct 2026 (relative judgements, no light meter): Metal has no headroom
+//  in mixed; full measured ~1.5x SDR white (10% knee 1.50–1.53 at 21:07; 1%/50% ~1.45–1.5). ALVRHDRHeadroom overrides.
 //
 //  Decision 63e: PQ content is never drawn through the SDR/sRGB path. Any non-packed biplanar Y'CbCr buffer (8- or
 //  10-bit) is bound as raw normalised planes and runs the PQ conversion; other formats are dropped. The HDR setting,
@@ -29,12 +29,18 @@ enum HDRPipeline {
     // hdr.reference_white_nits default shared with the server (decision 63; ITU-R BT.2408): PQ 203 nits = EDR 1.0.
     static let referenceWhiteNits: Double = 203
 
-    // Assumed display headroom (peak / SDR white) until the device measures it; ALVRHDRHeadroom overrides it.
-    static let assumedHeadroom: Float = 2
+    // Measured Metal display headroom (peak / SDR white), available only in full immersion.
+    static let measuredFullImmersionHeadroom: Float = 1.5
     static let headroomDefaultsKey = "ALVRHDRHeadroom"
 
-    static func headroom(defaultsValue: Double) -> Float {
-        defaultsValue >= 1 ? Float(defaultsValue) : assumedHeadroom
+    static func headroom(defaultsValue: Double, fullImmersion: Bool) -> Float {
+        defaultsValue >= 1 ? Float(defaultsValue) : (fullImmersion ? measuredFullImmersionHeadroom : 1)
+    }
+
+    static let referenceWhiteDefaultsKey = "ALVRHDRReferenceWhiteNits"
+
+    static func referenceWhiteNits(defaultsValue: Double) -> Double {
+        defaultsValue >= 1 ? defaultsValue : referenceWhiteNits
     }
 
     // SMPTE ST 2084 constants.
@@ -111,7 +117,7 @@ enum HDRPipeline {
     static func shade(sample: simd_float4, colour: StreamColourState) -> simd_float3 {
         let rgb = colour.yuvToRGB * sample
         if colour.hdrPQ {
-            let scale = Float(10000 / referenceWhiteNits)
+            let scale = Float(10000 / colour.stream.referenceWhiteNits)
             func edr(_ e: Float) -> Float { Float(pqEOTF(Double(e)) / 10000) * scale }
             return rollOff(colour.gamutToOutput * simd_float3(edr(rgb.x), edr(rgb.y), edr(rgb.z)), headroom: colour.headroom)
         }
@@ -123,7 +129,7 @@ enum HDRPipeline {
     }
 
     // Swift mirror of the video fragment shader for the Metal renderer (no chroma key): sample = float4(Y, Cb, Cr, 1).
-    static func shade(sample: simd_float4, selection: ColourSelection, encodingGamma: Float, headroom: Float) -> simd_float3 {
+    static func shade(sample: simd_float4, selection: ColourSelection, encodingGamma: Float, headroom: Float, referenceWhiteNits: Double = HDRPipeline.referenceWhiteNits) -> simd_float3 {
         let rgb = selection.yuvToRGB * sample
         if selection.isPQ {
             let scale = Float(10000 / referenceWhiteNits)
@@ -259,6 +265,17 @@ struct StreamContext: Equatable {
     let headroom: Float
     let output: ColourOutput
     let encodingGamma: Float
+    let referenceWhiteNits: Double
+
+    init(generation: UInt64, hdrEnabled: Bool, headroom: Float, output: ColourOutput, encodingGamma: Float,
+         referenceWhiteNits: Double = HDRPipeline.referenceWhiteNits) {
+        self.generation = generation
+        self.hdrEnabled = hdrEnabled
+        self.headroom = headroom
+        self.output = output
+        self.encodingGamma = encodingGamma
+        self.referenceWhiteNits = referenceWhiteNits
+    }
 }
 
 // How a frame's buffer is bound for the video shader.
@@ -345,10 +362,10 @@ final class VideoStreamGate<Payload> {
 
     // STREAMING_STARTED: captures the stream's inputs once.
     @discardableResult
-    func streamStarted(hdrEnabled: Bool, headroom: Float, output: ColourOutput, encodingGamma: Float, payload: Payload) -> StreamContext {
+    func streamStarted(hdrEnabled: Bool, headroom: Float, output: ColourOutput, encodingGamma: Float, referenceWhiteNits: Double = HDRPipeline.referenceWhiteNits, payload: Payload) -> StreamContext {
         locked("streamStarted") {
             generation += 1
-            let context = StreamContext(generation: generation, hdrEnabled: hdrEnabled, headroom: headroom, output: output, encodingGamma: encodingGamma)
+            let context = StreamContext(generation: generation, hdrEnabled: hdrEnabled, headroom: headroom, output: output, encodingGamma: encodingGamma, referenceWhiteNits: referenceWhiteNits)
             stream = (context, payload)
             return context
         }
@@ -436,5 +453,41 @@ struct HDRProbeClock {
         if let last = lastMs, nowMs >= last, nowMs - last < cadenceMs { return false }
         lastMs = nowMs
         return true
+    }
+}
+
+// A stream can arrive before Enter. Resolve its display inputs only once the streaming space opens.
+// Callbacks run under the lock so a stop cannot race a delayed stream start.
+final class StreamImmersionGate {
+    private let lock = NSLock()
+    private var fullImmersion: Bool?
+    private var pending: ((Bool) -> Void)?
+
+    func whenOpened(_ start: @escaping (Bool) -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        if let fullImmersion { start(fullImmersion) }
+        else { pending = start }
+    }
+
+    func opened(fullImmersion: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.fullImmersion = fullImmersion
+        let start = pending
+        pending = nil
+        start?(fullImmersion)
+    }
+
+    func closed() {
+        lock.lock()
+        defer { lock.unlock() }
+        fullImmersion = nil
+    }
+
+    func cancelPendingStream() {
+        lock.lock()
+        defer { lock.unlock() }
+        pending = nil
     }
 }

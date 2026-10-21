@@ -120,6 +120,7 @@ struct EntryControls: View {
 
                     saveAction()
                     print("Opening Immersive Space")
+                    EventHandler.streamImmersion.closed()
                     if useRealityKit {
                         if !DummyMetalRenderer.haveRenderInfo {
                             var dummySpaceIsOpened = false
@@ -150,6 +151,7 @@ struct EntryControls: View {
                         
                         print("Open real immersive space")
                         
+                        EventHandler.streamImmersion.opened(fullImmersion: false)
                         switch await openImmersiveSpace(id: "RealityKitClient") {
                         case .opened:
                             immersiveSpaceIsShown = true
@@ -161,6 +163,7 @@ struct EntryControls: View {
                         }
                     }
                     else {
+                        gStore.openedStreamFullImmersion = gStore.settings.streamFullImmersion
                         await openImmersiveSpace(id: "MetalClient")
                     }
                     VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)

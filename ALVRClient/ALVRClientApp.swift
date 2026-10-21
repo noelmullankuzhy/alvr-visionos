@@ -57,7 +57,9 @@ struct ALVRClientApp: App {
     // Triggers body re-evaluation, and the .upper​Limb​Visibility modifiers will pick up the new show​Hands​Overlaid or progressive value live
     @ObservedObject private var observedGStore = ALVRClientApp.gStore
 
-    @State private var clientImmersionStyle: ImmersionStyle = .mixed
+    private var clientImmersionStyle: Binding<ImmersionStyle> {
+        .constant(observedGStore.openedStreamFullImmersion ? .full : .mixed)
+    }
     @State private var realityKitImmersionStyle: ImmersionStyle = ALVRClientApp.gStore.settings.enableProgressive ? .progressive : .mixed
     
     static let shared = ALVRClientApp()
@@ -300,14 +302,15 @@ struct ALVRClientApp: App {
         .upperLimbVisibility(.hidden)
 
         ImmersiveSpace(id: "MetalClient") {
-            // clientImmersionStyle starts .mixed and is never reassigned.
-            CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
+            let fullImmersion = observedGStore.openedStreamFullImmersion
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: fullImmersion ? "full" : "mixed")) { layerRenderer in
+                EventHandler.streamImmersion.opened(fullImmersion: fullImmersion)
                 let system = MetalClientSystem(layerRenderer)
                 system.startRenderLoop()
             }
         }
         .disablePersistentSystemOverlaysForVisionOS2(shouldDisable: ALVRClientApp.gStore.settings.disablePersistentSystemOverlays ? .hidden : .automatic)
-        .immersionStyle(selection: $clientImmersionStyle, in: .mixed, .full)
+        .immersionStyle(selection: clientImmersionStyle, in: .mixed, .full)
         .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
     }
 }

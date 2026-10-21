@@ -604,7 +604,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         fragmentConstants.setConstantValue(&gamutTransform.columns.0, type: .float3, index: ALVRFunctionConstant.gamutToOutput_0.rawValue)
         fragmentConstants.setConstantValue(&gamutTransform.columns.1, type: .float3, index: ALVRFunctionConstant.gamutToOutput_1.rawValue)
         fragmentConstants.setConstantValue(&gamutTransform.columns.2, type: .float3, index: ALVRFunctionConstant.gamutToOutput_2.rawValue)
-        var hdrPQScale = Float(10000 / HDRPipeline.referenceWhiteNits)
+        var hdrPQScale = Float(10000 / colour.stream.referenceWhiteNits)
         var headroom = colour.headroom
         fragmentConstants.setConstantValue(&hdrPQ, type: .bool, index: ALVRFunctionConstant.hdrPQ.rawValue)
         fragmentConstants.setConstantValue(&hdrPQScale, type: .float, index: ALVRFunctionConstant.hdrPQScale.rawValue)
