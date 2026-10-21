@@ -189,7 +189,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     //playing with this variable will decide how much the foreground and background blend together
     var chromaKeyLerpDistRange = simd_float2(0.005, 0.1);
     
-    init(_ layerRenderer: LayerRenderer?) {
+    let renderOwnership: MetalRenderOwnership
+
+    init(_ layerRenderer: LayerRenderer?, offlineDiagnostics: Bool = false) {
+        self.renderOwnership = MetalRenderOwnership(offlineDiagnostics: offlineDiagnostics)
         self.layerRenderer = layerRenderer
         let rendererName = layerRenderer == nil ? "realitykit" : "metal"
         StreamTelemetry.shared.updateFormat { $0.renderer = rendererName }
@@ -297,8 +300,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         
         rebuildRenderPipelines()
 
-        EventHandler.shared.handleRenderStarted()
-        EventHandler.shared.renderStarted = true
+        if renderOwnership.publishesRenderStarted {
+            EventHandler.shared.handleRenderStarted()
+            EventHandler.shared.renderStarted = true
+        }
     }
     
     func rebuildRenderPipelines(chromaKey snapshot: ChromaKeySnapshot? = nil) {
@@ -737,9 +742,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     func renderFrame() {
         let chromaKey = ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings)
         frameChromaKey = chromaKey
-        /// Per frame updates hare
-        EventHandler.shared.framesRendered += 1
-        EventHandler.shared.totalFramesRendered += 1
+        if !renderOwnership.offlineDiagnostics {
+            EventHandler.shared.framesRendered += 1
+            EventHandler.shared.totalFramesRendered += 1
+        }
         if diagProbe != nil, let layer = layerRenderer {
             let enabled = ALVRClientApp.gStore.settings.renderQualitySweep
             if enabled && !EventHandler.shared.streamingActive && rqSweep == nil {
@@ -749,7 +755,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             rqSweep?.update(layer: layer, enabled: enabled, streaming: EventHandler.shared.streamingActive)
             if !enabled { rqSweep = nil }
         }
-        var streamingActiveForFrame = EventHandler.shared.streamingActive
+        var streamingActiveForFrame = !renderOwnership.offlineDiagnostics && EventHandler.shared.streamingActive
         var isReprojected = false
         
         var queuedFrame:QueuedFrame? = nil
@@ -768,7 +774,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         let startPollTime = CACurrentMediaTime()
         var selectionSource = FrameSelectionSource.none
         var selectionSkipped = 0
-        if !deadlineSelect {
+        if !renderOwnership.offlineDiagnostics && !deadlineSelect {
         while true {
             sched_yield()
 
@@ -806,7 +812,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             selectionSource = .reuse
         }
         }
-        else {
+        else if !renderOwnership.offlineDiagnostics {
             // Newest decoded frame not newer than this vsync, chosen in one locked step; wait only while
             // renderingDeadline - GPU p95 - margin leaves budget (never past the old 5 ms), else reproject.
             let targetNs = layerClockNs(timing.presentationTime)
@@ -987,9 +993,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         
         //checkEyes(drawable: mainDrawable)
         
-        objc_sync_enter(EventHandler.shared.frameQueueLock)
-        EventHandler.shared.framesSinceLastDecode += 1
-        objc_sync_exit(EventHandler.shared.frameQueueLock)
+        if !renderOwnership.offlineDiagnostics {
+            objc_sync_enter(EventHandler.shared.frameQueueLock)
+            EventHandler.shared.framesSinceLastDecode += 1
+            objc_sync_exit(EventHandler.shared.frameQueueLock)
+        }
         
         if queuedFrame != nil && !queuedFrame!.viewParamsValid {
             print("aaaaaaaa bad view params")
@@ -1004,7 +1012,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         }
         
         // Do NOT move this, just in case, because DeviceAnchor is wonkey and every DeviceAnchor mutates each other.
-        if EventHandler.shared.alvrInitialized && EventHandler.shared.lastIpd != -1 {
+        if !renderOwnership.offlineDiagnostics && EventHandler.shared.alvrInitialized && EventHandler.shared.lastIpd != -1 {
             if #available(visionOS 2.0, *) {
                 if mainDrawable.views.count > 1 {
                     EventHandler.shared.viewTransforms = [fixTransform(mainDrawable.views[0].transform), fixTransform(mainDrawable.views[1].transform)]
@@ -1034,7 +1042,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
 
             WorldTracker.shared.sendTracking(viewTransforms: viewTransforms, viewFovs: viewFovs, targetTimestamp: targetTimestamp, reportedTargetTimestamp: reportedTargetTimestamp, anchorTimestamp: anchorTimestamp, delay: 0.0)
         }
-        else {
+        else if !renderOwnership.offlineDiagnostics {
             EventHandler.shared.sendBootstrapTrackingIfNeeded()
 #if DEBUG_ALVR_TRACKING
             let viewFovs = EventHandler.shared.viewFovs
@@ -1223,8 +1231,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         commandBuffer.commit()
         frame.endSubmission()
         
-        EventHandler.shared.lastQueuedFrame = queuedFrame
-        EventHandler.shared.lastQueuedFramePose = framePreviouslyPredictedPose
+        if !renderOwnership.offlineDiagnostics {
+            EventHandler.shared.lastQueuedFrame = queuedFrame
+            EventHandler.shared.lastQueuedFramePose = framePreviouslyPredictedPose
+        }
     }
     
     // Pulse the wireframe between cyan and blue.

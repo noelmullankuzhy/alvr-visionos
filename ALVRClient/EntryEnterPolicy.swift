@@ -17,3 +17,32 @@ enum EntryEnterPolicy {
         requested && !connected && !streaming
     }
 }
+
+struct OfflineDiagnosticsLifecycle {
+    enum Phase { case idle, offline, dismissing }
+    private(set) var phase = Phase.idle
+    var ownsSpace: Bool { phase != .idle }
+
+    mutating func begin(diagnostics: Bool, connected: Bool, streaming: Bool) -> Bool {
+        guard diagnostics, !ownsSpace,
+              EntryEnterPolicy.keepOffline(requested: true, connected: connected, streaming: streaming) else { return false }
+        phase = .offline
+        return true
+    }
+
+    mutating func connectionArrived(connected: Bool, streaming: Bool) -> Bool {
+        guard phase == .offline, connected || streaming else { return false }
+        phase = .dismissing
+        return true
+    }
+
+    mutating func dismissed() { phase = .idle }
+}
+
+struct MetalRenderOwnership {
+    let offlineDiagnostics: Bool
+    var publishesRenderStarted: Bool { !offlineDiagnostics }
+    func shouldRun(onlineRenderStarted: Bool, connected: Bool = false, streaming: Bool = false) -> Bool {
+        offlineDiagnostics ? !connected && !streaming : onlineRenderStarted
+    }
+}

@@ -266,20 +266,18 @@ struct ALVRClientApp: App {
         // Independent entry for offline diagnostics; the online Enter path is unchanged.
         ImmersiveSpace(id: "MetalDiagnosticsOffline") {
             CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
-                let system = MetalClientSystem(layerRenderer)
+                guard Diag.isOn else { return }
+                let system = MetalClientSystem(layerRenderer, offlineDiagnostics: true)
                 system.startRenderLoop()
-                // connectionState stops publishing once rendering starts. Watch streamingActive
-                // too, while this offline request owns the space. The existing renderer takes
-                // over a new stream normally; clearing the offline flag completes the handoff.
+                // Manual leave releases ownership. Connection dismissal is awaited by the
+                // entry action, which retains ownership until dismissImmersiveSpace returns.
                 Task { @MainActor in
-                    defer { model.isShowingDiagnosticsOffline = false }
                     while layerRenderer.state != .invalidated && !Task.isCancelled {
-                        guard EntryEnterPolicy.keepOffline(requested: model.isShowingDiagnosticsOffline,
-                                connected: EventHandler.shared.connectionState == .connected,
-                                streaming: EventHandler.shared.streamingActive) else { break }
+                        guard model.offlineDiagnostics.phase == .offline else { return }
                         do { try await Task.sleep(nanoseconds: 100_000_000) }
                         catch { break }
                     }
+                    if model.offlineDiagnostics.phase == .offline { model.offlineDiagnostics.dismissed() }
                 }
             }
         }

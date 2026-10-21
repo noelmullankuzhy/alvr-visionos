@@ -31,6 +31,7 @@ struct EntryControls: View {
     }
 
     private func autoEnterIfDue() {
+        guard !model.isShowingDiagnosticsOffline else { return }
         if autoEnter.update(connected: eventHandler.connectionState == .connected, showing: model.isShowingClient) {
             print("ALVRAUTO entering immersive renderer=\(useRealityKit ? "realitykit" : "metal")")
             model.isShowingClient = true
@@ -47,6 +48,7 @@ struct EntryControls: View {
                         .labelStyle(.titleAndIcon)
                         .padding(15)
                 }
+                .disabled(model.isShowingDiagnosticsOffline)
             } else {
                 Label("Connecting...", systemImage: "visionpro")
                     .labelStyle(.titleOnly)
@@ -58,14 +60,25 @@ struct EntryControls: View {
                !eventHandler.streamingActive {
                 Button {
                     Task { @MainActor in
-                        guard !model.isShowingDiagnosticsOffline,
-                              EntryEnterPolicy.keepOffline(requested: true,
+                        guard model.offlineDiagnostics.begin(diagnostics: Diag.isOn,
                                   connected: eventHandler.connectionState == .connected,
                                   streaming: eventHandler.streamingActive) else { return }
-                        model.isShowingDiagnosticsOffline = true
+                        // This manual entry consumes auto-enter for the arriving connection,
+                        // including publication that lands after offline dismissal finishes.
+                        _ = autoEnter.update(connected: true, showing: true)
                         switch await openImmersiveSpace(id: "MetalDiagnosticsOffline") {
-                        case .opened: break
-                        default: model.isShowingDiagnosticsOffline = false
+                        case .opened:
+                            while model.isShowingDiagnosticsOffline {
+                                if model.offlineDiagnostics.connectionArrived(
+                                        connected: eventHandler.connectionState == .connected,
+                                        streaming: eventHandler.streamingActive) {
+                                    await dismissImmersiveSpace()
+                                    model.offlineDiagnostics.dismissed()
+                                    break
+                                }
+                                try? await Task.sleep(nanoseconds: 100_000_000)
+                            }
+                        default: model.offlineDiagnostics.dismissed()
                         }
                     }
                 } label: {

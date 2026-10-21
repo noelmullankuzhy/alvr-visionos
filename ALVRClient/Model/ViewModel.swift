@@ -9,6 +9,7 @@ import SwiftUI
 class ViewModel {
     // Client
     var isShowingClient: Bool = false
-    var isShowingDiagnosticsOffline: Bool = false
+    var offlineDiagnostics = OfflineDiagnosticsLifecycle()
+    var isShowingDiagnosticsOffline: Bool { offlineDiagnostics.ownsSpace }
 
 }
