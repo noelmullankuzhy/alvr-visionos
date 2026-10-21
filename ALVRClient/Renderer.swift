@@ -808,10 +808,13 @@ class Renderer {
                 }
                 
                 // TODO: Fix tangents to fill entire FoV if canting ever becomes more intense like PFD was
-                let tangentsLeft = mainDrawable.gimmeTangents(viewIndex: 0)
-                let tangentsRight = mainDrawable.gimmeTangents(viewIndex: 1)
-                let transformLeft = mainDrawable.views[0].transform
-                let transformRight = mainDrawable.views[1].transform
+                // One view (visionOS simulator): both eyes come from view 0, placed -/+ ipd/2 apart (ViewLayout).
+                let eyeViews = ViewLayout.sourceViewIndices(viewCount: mainDrawable.views.count)
+                let eyeTransforms = ViewLayout.eyeTransforms(viewTransforms: mainDrawable.views.map { $0.transform }, ipd: ipd)
+                let tangentsLeft = mainDrawable.gimmeTangents(viewIndex: eyeViews[0])
+                let tangentsRight = mainDrawable.gimmeTangents(viewIndex: eyeViews[1])
+                let transformLeft = eyeTransforms[0]
+                let transformRight = eyeTransforms[1]
                 let leftAngles = atan(tangentsLeft * settings.fovRenderScale)
                 let rightAngles = mainDrawable.views.count > 1 ? atan(tangentsRight * settings.fovRenderScale) : leftAngles
                 let leftFov = AlvrFov(left: -leftAngles.x, right: leftAngles.y, up: leftAngles.z, down: -leftAngles.w)
@@ -821,7 +824,7 @@ class Renderer {
                 let (rightFovCorrected, tangentsRightCorrected, transformRightCorrected) = mainDrawable._cantedViewToProportionalCircumscribedOrthogonal(fov: rightFov, viewTransform: transformRight, fovPostScale: 1.0)
                 
                 EventHandler.shared.viewFovs = [leftFovCorrected, rightFovCorrected]
-                EventHandler.shared.viewTransforms = [fixTransform(transformLeftCorrected), mainDrawable.views.count > 1 ? fixTransform(transformRightCorrected) : fixTransform(transformLeftCorrected)]
+                EventHandler.shared.viewTransforms = [fixTransform(transformLeftCorrected), fixTransform(transformRightCorrected)]
                 // Wait, is this correct?
                 if mainDrawable.views.count > 1 {
                     EventHandler.shared.sentViewTangents = [tangentsLeftCorrected, tangentsRightCorrected]
@@ -886,7 +889,13 @@ class Renderer {
         // Do NOT move this, just in case, because DeviceAnchor is wonkey and every DeviceAnchor mutates each other.
         if EventHandler.shared.alvrInitialized && EventHandler.shared.lastIpd != -1 {
             if #available(visionOS 2.0, *) {
-                EventHandler.shared.viewTransforms = [fixTransform(mainDrawable.views[0].transform), mainDrawable.views.count > 1 ? fixTransform(mainDrawable.views[1].transform) : fixTransform(mainDrawable.views[0].transform)]
+                if mainDrawable.views.count > 1 {
+                    EventHandler.shared.viewTransforms = [fixTransform(mainDrawable.views[0].transform), fixTransform(mainDrawable.views[1].transform)]
+                }
+                else {
+                    // Same eyes as the view config sent above, so the server and convertSteamVRViewPose agree.
+                    EventHandler.shared.viewTransforms = ViewLayout.eyeTransforms(viewTransforms: mainDrawable.views.map { $0.transform }, ipd: EventHandler.shared.lastIpd).map { fixTransform($0) }
+                }
             }
             // TODO: I suspect Apple changes view transforms every frame to account for pupil swim, figure out how to fit the latest view transforms in?
             // Since pupil swim is purely an axial thing, maybe we can just timewarp the view transforms as well idk
