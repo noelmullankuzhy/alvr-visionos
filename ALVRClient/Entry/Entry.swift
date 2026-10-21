@@ -364,6 +364,16 @@ struct Entry: View {
                             saveAction()
                         }
 
+                        Toggle(isOn: $gStore.settings.eyeDecodeWindows) {
+                            Text("Per-eye decode windows (debug)")
+                            Text("While streaming, opens two windows with the decoded left and right eye images and per-eye frame counters. On by default in the simulator.")
+                                .font(.system(size: 10))
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: gStore.settings.eyeDecodeWindows) {
+                            saveAction()
+                        }
+
                         Toggle(isOn: $hdrProbeEnabled) {
                             Text("HDR probe (log)")
                             Text("Logs decoded HDR samples while streaming. ALVR_HDR_PROBE in the launch environment overrides this setting.")

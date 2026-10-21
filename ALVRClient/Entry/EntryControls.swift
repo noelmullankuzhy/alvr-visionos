@@ -11,6 +11,7 @@ struct EntryControls: View {
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var eventHandler = EventHandler.shared
     @EnvironmentObject var gStore: GlobalSettingsStore
     
@@ -215,6 +216,11 @@ struct EntryControls: View {
                         await openStreamSpace(fullImmersion: gStore.settings.streamFullImmersion)
                     }
                     VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
+                    if gStore.settings.eyeDecodeWindows && eventHandler.streamingActive {
+                        EyeDecodeWindows.shared.start()
+                        // Right opens from the Left window's onAppear, so it can be placed beside it.
+                        openWindow(id: EyeDecodeWindows.windowIDs[0])
+                    }
                     if gStore.settings.dismissWindowOnEnter {
                         dismissWindow(id: "Entry")
                     }

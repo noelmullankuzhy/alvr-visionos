@@ -41,6 +41,17 @@ struct GlobalSettings: Codable {
     var renderQualitySweep: Bool = false
     // Corner chart (decision 65, CornerChartMode raw value): with Diagnostics on and no stream; read at renderer start.
     var cornerChart: String = CornerChartMode.off.rawValue
+    // Two windows with the decoded left and right eye images and per-eye counters (EyeDecodeWindows.swift).
+    var eyeDecodeWindows: Bool = GlobalSettings.eyeDecodeWindowsDefault
+
+    // On in the simulator, where there is no headset to judge decoding by; off on device.
+    static let eyeDecodeWindowsDefault: Bool = {
+#if targetEnvironment(simulator)
+        return true
+#else
+        return false
+#endif
+    }()
 
     init() {}
     
@@ -77,6 +88,7 @@ struct GlobalSettings: Codable {
         self.diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? self.diagnostics
         self.captureDiagnosticFrames = try container.decodeIfPresent(Bool.self, forKey: .captureDiagnosticFrames) ?? self.captureDiagnosticFrames
         self.cornerChart = try container.decodeIfPresent(String.self, forKey: .cornerChart) ?? self.cornerChart
+        self.eyeDecodeWindows = try container.decodeIfPresent(Bool.self, forKey: .eyeDecodeWindows) ?? self.eyeDecodeWindows
     }
 }
 

@@ -1990,6 +1990,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         if HDRProbe.enabled {
             HDRProbe.shared.sample(pixelBuffer: pixelBuffer, colour: colour)
         }
+        EyeDecodeWindows.shared.tap(pixelBuffer: pixelBuffer, colour: colour, timestampNs: queuedFrame.timestamp)
         
         // Snoop for pixel formats
         /*for idx in 620..<0xFFFF {
