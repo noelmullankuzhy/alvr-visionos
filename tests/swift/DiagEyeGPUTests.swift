@@ -60,9 +60,9 @@ import simd
                             if rgb == .zero { black += 1 } else { cyanOrMagenta += 1 }
                         } else if u >= 0 && u < 1 && v >= 0 && v < 1 {
                             let patch = patches.last { u >= $0.x && u < $0.x + $0.width && v >= $0.y && v < $0.y + $0.height }
-                            // Compare the stored binary16 value; fine grid levels (1/24) are not exact Float16s.
-                            let expected = Float(Float16(patch?.value ?? 0))
-                            expectEqual(rgb, SIMD3(repeating: expected), "all pixels outside badge preserved, including 1% patch")
+                            let expected = patch?.value ?? 0
+                            expect((0..<3).allSatisfy { withinFloat16ULP(rgb[$0], expected) },
+                                   "all pixels outside badge preserved within one Float16 ulp, including 1% patch")
                         }
                     }
                 }

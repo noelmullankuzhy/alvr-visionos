@@ -36,6 +36,9 @@ import Foundation
                 let snake = row * 5 + (row % 2 == 0 ? col : 4 - col)
                 let expected = range == .fine ? 1 + Double(snake) / 24 : 0.5 + Double(snake) / 10
                 expect(abs(Double(grid.entries[i].value) - expected) < 1e-6, "snake range")
+                if range == .coarse {
+                    expectEqual(grid.entries[i].value, Float(5 + snake) / 10, "coarse values match decimal tenths without accumulation")
+                }
                 expectEqual(mirrored.entries[i].value, grid.entries[24 - i].value, "mirror reverses all 25")
             }
             expectEqual(Diag.line(topic: "edr", tMs: 1, fields: grid.fields(grid.entries[0], layout: .gridTen, immersion: "full")),

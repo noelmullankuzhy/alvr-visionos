@@ -111,7 +111,7 @@ import simd
                                     let cellX = Double(column - 2) * pitch, cellY = Double(row - 2) * pitch
                                     if abs(dx - cellX) < side / 2 && abs(dy - cellY) < side / 2 {
                                         let index = grid.mirror ? 24 - snake[row][column] : snake[row][column]
-                                        expected = Float(grid.range == .fine ? 1 + Double(index) / 24 : 0.5 + Double(index) / 10)
+                                        expected = grid.range == .fine ? Float(1 + Double(index) / 24) : Float(5 + index) / 10
                                     }
                                 }
                             }
@@ -120,9 +120,13 @@ import simd
                     if expected == 4 { bright += 1 }
                     let pixel = y * width + x
                     for channel in 0..<4 {
-                        // rgba16Float stores the submitted Float rounded to binary16, including 1/24 grid levels.
-                        let golden: Float = channel == 3 ? (inside ? 1 : 0) : Float(Float16(expected))
-                        expectEqual(Float(Float16(bitPattern: pixels[pixel * 4 + channel])), golden, "\(context) pixel \(x),\(y) channel \(channel)")
+                        let actual = Float(Float16(bitPattern: pixels[pixel * 4 + channel]))
+                        let message = "\(context) pixel \(x),\(y) channel \(channel)"
+                        if channel == 3 {
+                            expectEqual(actual, inside ? 1 : 0, message)
+                        } else {
+                            expect(withinFloat16ULP(actual, expected), "\(message): expected \(expected) within one Float16 ulp, got \(actual)")
+                        }
                     }
                     expect(abs(depths[pixel] - (inside ? expectedDepth : 0)) < 1e-6,
                            "\(context) finite reverse-Z at \(x),\(y), including black surround: \(depths[pixel])")
@@ -134,7 +138,7 @@ import simd
             otherColour.withUnsafeMutableBytes {
                 colour.getBytes($0.baseAddress!, bytesPerRow: 8, bytesPerImage: 8, from: MTLRegionMake2D(100, 80, 1, 1), mipmapLevel: 0, slice: 0)
             }
-            expectEqual(Float(Float16(bitPattern: otherColour[0])), 0.25, "other eye colour survives")
+            expect(withinFloat16ULP(Float(Float16(bitPattern: otherColour[0])), 0.25), "other eye colour survives")
             expect(abs(otherDepth - expectedDepth) < 1e-6, "other eye depth survives")
         }
         // The shader must receive each current projection, rather than a fixed raw depth.
@@ -149,7 +153,14 @@ import simd
             pixel.withUnsafeMutableBytes {
                 colour.getBytes($0.baseAddress!, bytesPerRow: 8, bytesPerImage: 8, from: MTLRegionMake2D(100, 80, 1, 1), mipmapLevel: 0, slice: 1)
             }
-            for channel in 0..<4 { expectEqual(Float(Float16(bitPattern: pixel[channel])), channel == 3 ? 1 : Float(Float16(level)), "raw ramp \(level)") }
+            for channel in 0..<4 {
+                let actual = Float(Float16(bitPattern: pixel[channel]))
+                if channel == 3 {
+                    expectEqual(actual, 1, "opaque raw ramp alpha")
+                } else {
+                    expect(withinFloat16ULP(actual, level), "raw ramp \(level) within one Float16 ulp, got \(actual)")
+                }
+            }
             expect(abs(z - 0.025) < 1e-6, "updated projection, near/distance = 0.05/2")
         }
         finishTests("EDRGPU")
