@@ -20,7 +20,8 @@ func testPathId(_ path: String) -> UInt64 {
     return h
 }
 
-func makeGate(_ rec: Recorder) -> ControllerInputGate {
+func makeGate(_ rec: Recorder, onAnnounce: ((ControllerInputProfile) -> Void)? = nil,
+              beforeLock: ((String) -> Void)? = nil) -> ControllerInputGate {
     var names: [UInt64: String] = [:]
     for path in ControllerInputGate.knownPaths {
         names[testPathId(path)] = path
@@ -32,8 +33,20 @@ func makeGate(_ rec: Recorder) -> ControllerInputGate {
             rec.delivered.append((path, value))
             rec.events.append("deliver \(path)")
         },
-        announce: { profile in rec.events.append("announce \(profile)") },
-        log: { rec.logs.append($0) })
+        announce: { profile in
+            rec.events.append("announce \(profile)")
+            onAnnounce?(profile)
+        },
+        log: { rec.logs.append($0) },
+        beforeLock: beforeLock)
+}
+
+// Options (right Button Menu) held: PSVR2 maps it to menu only, Quest Touch also to system.
+func optionsHeld() -> PSVR2SenseElements {
+    var e = PSVR2SenseElements()
+    e.menu = true
+    e.menuTouched = true
+    return e
 }
 
 func id(_ path: String) -> UInt64 { testPathId(path) }
@@ -58,10 +71,11 @@ enum ControllerInputGateTests {
         expect(!gate.send(id("/user/hand/right/input/a/click"), .binary(true)), "startup: send before declaration refused")
         expect(rec.events.isEmpty, "startup: nothing delivered or announced before the stream starts")
 
-        // A profile change before any stream does not declare anything.
-        gate.profileChanged(profile: .psvr2Sense)
-        expect(gate.declaredProfile == nil, "profile change while not streaming keeps the gate shut")
+        // A controller change before any stream does not declare anything.
+        gate.controllersChanged(profile: .psvr2Sense)
+        expect(gate.declaredProfile == nil, "controller change while not streaming keeps the gate shut")
         expect(rec.events.isEmpty, "no announce while not streaming")
+        expect(rec.logs.isEmpty, "no log while not streaming")
 
         // Stream start: the declaration goes out first, then inputs flow.
         gate.streamStarted(profile: .psvr2Sense)
@@ -87,11 +101,26 @@ enum ControllerInputGateTests {
         expect(!gate.send(id("/user/hand/right/input/menu/click"), .binary(true)), "Quest: right menu/click outside the set")
         expect(gate.send(id("/user/hand/right/input/system/click"), .binary(true)), "Quest: right system/click inside the set")
 
-        // Mid-stream profile change re-declares and switches the set.
-        gate.profileChanged(profile: .psvr2Sense)
-        expectEqual(gate.declaredProfile, .psvr2Sense, "mid-stream change switches profile")
-        expectEqual(rec.events.last, "announce psvr2Sense", "mid-stream change announced")
-        expect(gate.send(id("/user/hand/right/input/menu/click"), .binary(true)), "PSVR2 after change: right menu/click delivered")
+        // A mid-stream controller change never switches the stream's profile; it is logged once.
+        let questStream = gate.currentStream
+        let announcesBefore = rec.events.filter { $0.hasPrefix("announce") }.count
+        let logsBefore = rec.logs.count
+        gate.controllersChanged(profile: .psvr2Sense)
+        gate.controllersChanged(profile: .psvr2Sense)
+        expectEqual(gate.currentStream, questStream, "mid-stream change keeps the stream's profile and generation")
+        expectEqual(rec.events.filter { $0.hasPrefix("announce") }.count, announcesBefore, "mid-stream change not announced")
+        expectEqual(rec.logs.count, logsBefore + 1, "mid-stream change logged once")
+        expect(!gate.send(id("/user/hand/right/input/menu/click"), .binary(true)), "still Quest after change: right menu/click dropped")
+        gate.controllersChanged(profile: .questTouch)
+        expectEqual(rec.logs.count, logsBefore + 1, "a change back to the stream's profile is not logged")
+
+        // Each stream gets a new generation; the next stream picks the profile afresh.
+        gate.streamStopped()
+        let next = gate.streamStarted(profile: .psvr2Sense)
+        expectEqual(next.generation, (questStream?.generation ?? 0) + 1, "next stream, next generation")
+        expectEqual(gate.declaredProfile, .psvr2Sense, "next stream declares the new controllers")
+        gate.controllersChanged(profile: .questTouch)
+        expectEqual(rec.logs.count, logsBefore + 2, "the new stream logs its own mid-stream change once")
 
         // Out-of-set paths are logged once per profile, not per frame.
         let rec2 = Recorder()
@@ -184,6 +213,123 @@ enum ControllerInputGateTests {
         expect(!noTriggers.contains { $0.path.contains("/trigger/") }, "pinch suppresses gamepad triggers")
     }
 
+    // Race (a), reconnect: frames between STOPPED and the next STARTED are dropped unmapped; frames after STARTED are
+    // mapped with the new stream's profile, under its generation, after its declaration.
+    static func reconnectInterleaving() {
+        let rec = Recorder()
+        let gate = makeGate(rec)
+        var mappedWith: [ControllerInputProfile] = []
+        func frame() -> Bool {
+            gate.send { profile in
+                mappedWith.append(profile)
+                return PSVR2SenseInputs.inputs(isLeft: false, elements: optionsHeld(), profile: profile,
+                                               homeButtonReachesApp: false, includeTrigger: true)
+            }
+        }
+
+        expect(!frame(), "startup: frame dropped")
+        let first = gate.streamStarted(profile: .questTouch)
+        expect(frame(), "stream 1: frame delivered")
+        expectEqual(deliveredValue(rec, "/user/hand/right/input/system/click"), .binary(true), "stream 1 (Quest): Options drives system")
+
+        gate.streamStopped()
+        expect(gate.currentStream == nil, "STOPPED closes the generation")
+        let delivered = rec.delivered.count
+        let mapped = mappedWith.count
+        for _ in 0..<3 {
+            expect(!frame(), "between STOPPED and STARTED: frame dropped")
+        }
+        expectEqual(rec.delivered.count, delivered, "nothing delivered between STOPPED and STARTED")
+        expectEqual(mappedWith.count, mapped, "nothing even mapped between STOPPED and STARTED")
+
+        let second = gate.streamStarted(profile: .psvr2Sense)
+        expectEqual(second.generation, first.generation + 1, "reconnect opens a new generation")
+        let eventsBefore = rec.events.count
+        expect(frame(), "stream 2: frame delivered")
+        expectEqual(mappedWith.last, .psvr2Sense, "stream 2 frame mapped with the new profile")
+        let stream2 = Array(rec.delivered.suffix(rec.delivered.count - delivered))
+        expectEqual(stream2.first { $0.0 == "/user/hand/right/input/system/click" }?.1, .binary(false), "stream 2 (PSVR2): Options is not PS")
+        expectEqual(stream2.first { $0.0 == "/user/hand/right/input/menu/click" }?.1, .binary(true), "stream 2 (PSVR2): Options -> menu")
+        expectEqual(Array(rec.events.prefix(eventsBefore).suffix(1)), ["announce psvr2Sense"], "stream 2 declared before its first frame")
+
+        // A STARTED with no STOPPED before it (stalled STOPPED) still opens a new generation and re-declares.
+        let third = gate.streamStarted(profile: .questTouch)
+        expectEqual(third.generation, second.generation + 1, "STARTED over an open stream: new generation")
+        expectEqual(rec.events.last, "announce questTouch", "STARTED over an open stream re-declares")
+        expect(frame(), "stream 3: frame delivered")
+        expectEqual(mappedWith.last, .questTouch, "stream 3 frame mapped with its own profile")
+    }
+
+    // Race (b): a frame mapped under one profile is never delivered under another. Driven with the gate's beforeLock
+    // hook and semaphores (no sleeps): each side holds the critical section until the other side has entered the gate.
+    static func frameNeverCrossesProfiles() {
+        // 1. A Quest frame is mid-map when a reconnect to PSVR2 begins: the whole frame is delivered first.
+        let reconnectEntered = DispatchSemaphore(value: 0)
+        let reconnectDone = DispatchSemaphore(value: 0)
+        let rec = Recorder()
+        let gate = makeGate(rec, beforeLock: { entry in
+            if entry == "streamStopped" { reconnectEntered.signal() }
+        })
+        gate.streamStarted(profile: .questTouch)
+        var mappedWith: ControllerInputProfile?
+        var reconnectWasWaiting = false
+        let sent = gate.send { profile in
+            mappedWith = profile
+            Thread.detachNewThread {
+                gate.streamStopped()
+                gate.streamStarted(profile: .psvr2Sense)
+                reconnectDone.signal()
+            }
+            reconnectWasWaiting = reconnectEntered.wait(timeout: .now() + 10) == .success
+            return PSVR2SenseInputs.inputs(isLeft: false, elements: optionsHeld(), profile: profile,
+                                           homeButtonReachesApp: false, includeTrigger: true)
+        }
+        expect(reconnectDone.wait(timeout: .now() + 10) == .success, "reconnect completed")
+        expect(reconnectWasWaiting, "the reconnect entered the gate while the frame was being mapped")
+        expect(sent, "the frame in flight is delivered")
+        expectEqual(mappedWith, .questTouch, "the frame was mapped with the Quest stream's profile")
+        let announcePsvr2 = rec.events.firstIndex(of: "announce psvr2Sense") ?? -1
+        let lastDelivery = rec.events.lastIndex { $0.hasPrefix("deliver") } ?? Int.max
+        expect(announcePsvr2 > lastDelivery, "every delivery of the Quest frame precedes the PSVR2 declaration")
+        expectEqual(deliveredValue(rec, "/user/hand/right/input/system/click"), .binary(true), "Quest frame: Options -> system (Quest stream)")
+        expect(rec.delivered.allSatisfy { ControllerInputProfile.questTouch.buttonSet.contains($0.0) }, "Quest frame filtered by the Quest set")
+        expectEqual(gate.declaredProfile, .psvr2Sense, "PSVR2 declared afterwards")
+
+        // 2. A frame arrives while the PSVR2 declaration is in progress: it waits and is mapped with PSVR2.
+        let frameEntered = DispatchSemaphore(value: 0)
+        let frameDone = DispatchSemaphore(value: 0)
+        let rec2 = Recorder()
+        var frameWasWaiting = false
+        final class Mapped { var profile: ControllerInputProfile? }
+        let mapped2 = Mapped()
+        var gate2: ControllerInputGate!
+        gate2 = makeGate(rec2, onAnnounce: { profile in
+            guard profile == .psvr2Sense else { return }
+            let g = gate2!
+            Thread.detachNewThread {
+                g.send { profile in
+                    mapped2.profile = profile
+                    return PSVR2SenseInputs.inputs(isLeft: false, elements: optionsHeld(), profile: profile,
+                                                   homeButtonReachesApp: false, includeTrigger: true)
+                }
+                frameDone.signal()
+            }
+            frameWasWaiting = frameEntered.wait(timeout: .now() + 10) == .success
+        }, beforeLock: { entry in
+            if entry == "send" { frameEntered.signal() }
+        })
+        gate2.streamStarted(profile: .questTouch)
+        gate2.streamStopped()
+        gate2.streamStarted(profile: .psvr2Sense)
+        expect(frameDone.wait(timeout: .now() + 10) == .success, "frame completed")
+        expect(frameWasWaiting, "the frame entered the gate during the PSVR2 declaration")
+        expectEqual(mapped2.profile, .psvr2Sense, "the frame was mapped with the new stream's profile")
+        expectEqual(rec2.events.first { $0.hasPrefix("deliver") || $0 == "announce psvr2Sense" }, "announce psvr2Sense",
+                    "the declaration precedes the frame's deliveries")
+        expectEqual(deliveredValue(rec2, "/user/hand/right/input/system/click"), .binary(false), "PSVR2 frame: Options is not PS")
+        expectEqual(deliveredValue(rec2, "/user/hand/right/input/menu/click"), .binary(true), "PSVR2 frame: Options -> menu")
+    }
+
     // Every alvr_send_button call in the app goes through the gate's delivery (one choke point).
     static func singleChokePoint() {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -206,6 +352,8 @@ enum ControllerInputGateTests {
         gateStateMachine()
         pinch()
         genericGamepad()
+        reconnectInterleaving()
+        frameNeverCrossesProfiles()
         singleChokePoint()
         finishTests("ControllerInputGateTests")
     }
