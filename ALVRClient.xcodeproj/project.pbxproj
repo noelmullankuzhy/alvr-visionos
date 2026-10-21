@@ -82,6 +82,7 @@
 		D65D2E012C00000100650003 /* BrightnessDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */; };
 		D66000000000000000000002 /* MaxSweep.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66000000000000000000001 /* MaxSweep.swift */; };
 		D66000000000000000000012 /* RQRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66000000000000000000011 /* RQRenderer.swift */; };
+		D66000000000000000000042 /* RQPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66000000000000000000041 /* RQPipeline.swift */; };
 		D66000000000000000000022 /* CodecSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D66000000000000000000021 /* CodecSupport.swift */; };
 		D66000000000000000000032 /* codec-audit.json in Resources */ = {isa = PBXBuildFile; fileRef = D66000000000000000000031 /* codec-audit.json */; };
 /* End PBXBuildFile section */
@@ -208,6 +209,7 @@
 		D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/BrightnessDiagnostics.swift; sourceTree = "<group>"; };
 		D66000000000000000000001 /* MaxSweep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/MaxSweep.swift; sourceTree = "<group>"; };
 		D66000000000000000000011 /* RQRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/RQRenderer.swift; sourceTree = "<group>"; };
+		D66000000000000000000041 /* RQPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/RQPipeline.swift; sourceTree = "<group>"; };
 		D66000000000000000000021 /* CodecSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/CodecSupport.swift; sourceTree = "<group>"; };
 		D66000000000000000000031 /* codec-audit.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Diagnostics/codec-audit.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -303,6 +305,7 @@
 				D66000000000000000000031 /* codec-audit.json */,
 				D66000000000000000000021 /* CodecSupport.swift */,
 				D66000000000000000000011 /* RQRenderer.swift */,
+				D66000000000000000000041 /* RQPipeline.swift */,
 				D66000000000000000000001 /* MaxSweep.swift */,
 				D65D0E022C00000100650004 /* DiagProbes.swift */,
 				D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */,
@@ -544,6 +547,7 @@
 				D65D0E012C00000100650001 /* Diag.swift in Sources */,
 				D66000000000000000000022 /* CodecSupport.swift in Sources */,
 				D66000000000000000000012 /* RQRenderer.swift in Sources */,
+				D66000000000000000000042 /* RQPipeline.swift in Sources */,
 				D66000000000000000000002 /* MaxSweep.swift in Sources */,
 				D65D0E012C00000100650003 /* DiagProbes.swift in Sources */,
 				D65D2E012C00000100650003 /* BrightnessDiagnostics.swift in Sources */,
