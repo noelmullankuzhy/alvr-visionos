@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/Diagnostics/DiagMeasurements.swift
+// SOURCES: ALVRClient/Diagnostics/DiagMeasurements.swift ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/DiagNetSink.swift
 import Foundation
 
 @main enum DecodeNetTests {
@@ -53,6 +53,26 @@ import Foundation
         expectEqual(net.loss, 1, "interior gap")
         expectEqual(net.spreads.count, 1, "incomplete frame excluded")
         expectEqual(net.percentile([1,2,3,4,5], 0.99), 5, "tail nearest rank")
+        // Gate must exclude all resources when off, stop synchronously on stream start,
+        // and let a cancelled older decode finish without stopping a newer run.
+        var starts = 0, stops = 0
+        expect(!DiagWorkGate.start { starts += 1; return { stops += 1 } }, "off cannot start")
+        expectEqual(starts, 0, "off does not evaluate resource creation")
+        Diag.start(enabled: true, directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), console: nil)
+        let old = UUID(), current = UUID()
+        expect(DiagWorkGate.start(id: old) { starts += 1; return { stops += 1 } }, "idle start")
+        expect(!DiagWorkGate.start { starts += 1; return {} }, "one diagnostic run at a time")
+        DiagWorkGate.setStreaming(true)
+        expectEqual(stops, 1, "stream transition closes sink before returning")
+        expect(!DiagWorkGate.start { starts += 1; return {} }, "active stream refuses start")
+        DiagWorkGate.setStreaming(false)
+        expect(DiagWorkGate.start(id: current) { return { stops += 1 } }, "idle again")
+        DiagWorkGate.finish(old)
+        expect(!DiagWorkGate.start { return {} }, "old completion cannot release newer owner")
+        DiagWorkGate.stop()
+        expectEqual(stops, 2, "new run still owns its stop action")
+        DiagWorkGate.stop()
+        expectEqual(stops, 2, "stop is idempotent")
         finishTests("DecodeNet")
     }
 }
