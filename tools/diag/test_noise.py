@@ -25,6 +25,8 @@ class NoiseTests(unittest.TestCase):
         self.assertEqual(clip['fps'], fps)
         self.assertEqual(clip['achievedBitrate'], clip['bitrate'])
         self.assertEqual(clip['overload'], stress)
+        self.assertGreaterEqual(clip['droppedFrames'], 0)
+        self.assertEqual(clip['frames'] + clip['droppedFrames'], clip['requestedFrames'])
         return clip
 
     def test_stress_option(self):
@@ -39,6 +41,8 @@ class NoiseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='diag-target-') as scratch:
             clip = self.generate(scratch, 'target', '3648x2912', 90, bitrate)
             self.assertEqual(clip['rateMode'], 'targeted')
+            self.assertEqual(clip['droppedFrames'], 0)
+            self.assertEqual(clip['frames'], 180)
             self.assertEqual(clip['bitrateTolerance'], 0.15)
             self.assertLessEqual(abs(clip['achievedBitrate'] / bitrate - 1), 0.15)
             self.assertGreaterEqual(clip['noiseAmplitude'], 0)
