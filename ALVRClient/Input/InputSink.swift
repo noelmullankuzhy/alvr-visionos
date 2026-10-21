@@ -51,12 +51,24 @@ final class ALVRInputSink: InputSink {
                 AlvrButtonValue.__Unnamed_union___Anonymous_field1.__Unnamed_struct___Anonymous_field1(scalar: val)))
     }
 
+    // Through the gate like every other controller input (WorldTracker.inputGate).
     func send(pathId: UInt64, bool: Bool) {
-        alvr_send_button(pathId, Self.boolVal(bool))
+        WorldTracker.inputGate.send(pathId, .binary(bool))
     }
 
     func send(pathId: UInt64, scalar: Float) {
-        alvr_send_button(pathId, Self.scalarVal(scalar))
+        WorldTracker.inputGate.send(pathId, .scalar(scalar))
+    }
+
+    /// The gate's delivery: the only alvr_send_button call in the app.
+    static func deliver(_ pathId: UInt64, _ value: ButtonInputValue) {
+        switch value {
+        case .binary(let val): button(pathId, boolVal(val))
+        case .scalar(let val): button(pathId, scalarVal(val))
+        }
+        func button(_ pathId: UInt64, _ value: AlvrButtonValue) {
+            alvr_send_button(pathId, value)
+        }
     }
 
     func announceProfile(deviceId: UInt64, profilePathId: UInt64) {

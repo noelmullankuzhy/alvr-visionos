@@ -22,6 +22,14 @@ enum ControllerInputProfile: Equatable {
 
     static let psvr2ProfilePath = "/interaction_profiles/sony/playstation_vr2_sense_controller"
 
+    /// What alvr_send_active_interaction_profile declares for this profile.
+    var profilePath: String {
+        switch self {
+        case .questTouch: return "/interaction_profiles/oculus/touch_controller"
+        case .psvr2Sense: return ControllerInputProfile.psvr2ProfilePath
+        }
+    }
+
     static func active(emulationMode: String, psvr2Connected: Bool) -> ControllerInputProfile {
         emulationMode == "PSVR2Sense" && psvr2Connected ? .psvr2Sense : .questTouch
     }
@@ -81,8 +89,8 @@ struct PSVR2SenseElements {
 
 enum PSVR2SenseInputs {
     /// Every path for one hand. Under PSVR2 the result is exactly that hand's
-    /// half of the PSVR2 button_set; under Quest Touch run it through
-    /// ButtonPathFilter. `includeTrigger` is false while pinch emulation owns
+    /// half of the PSVR2 button_set; under Quest Touch ControllerInputGate
+    /// drops the paths outside the Quest set. `includeTrigger` is false while pinch emulation owns
     /// the trigger click/value.
     static func inputs(isLeft: Bool, elements e: PSVR2SenseElements, profile: ControllerInputProfile,
                        homeButtonReachesApp: Bool, includeTrigger: Bool) -> [ButtonInput] {
@@ -125,25 +133,5 @@ enum PSVR2SenseInputs {
         send("menu/click", e.menu)
         send("system/click", e.home || (menuIsSystem && e.menu))
         return out
-    }
-}
-
-/// Keeps only the paths in the active profile's button_set and reports each
-/// dropped path once per profile, not every frame.
-struct ButtonPathFilter {
-    private var reported: Set<String> = []
-
-    mutating func admit(_ inputs: [ButtonInput], profile: ControllerInputProfile) -> (send: [ButtonInput], newlyDropped: [String]) {
-        let set = profile.buttonSet
-        var send: [ButtonInput] = []
-        var newlyDropped: [String] = []
-        for input in inputs {
-            if set.contains(input.path) {
-                send.append(input)
-            } else if reported.insert("\(profile):\(input.path)").inserted {
-                newlyDropped.append(input.path)
-            }
-        }
-        return (send, newlyDropped)
     }
 }
