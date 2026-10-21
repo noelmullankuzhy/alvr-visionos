@@ -72,6 +72,7 @@ final class EDRRenderer {
     let badge: DiagEyeRenderer?
     let runID = EDRSession.shared.currentRun
     private var anchorMissingLogged = false
+    private var shiftedViews = Set<String>()
     let immersion: String
     init(_ layer: LayerRenderer, immersion: String) throws {
         self.layer = layer
@@ -122,6 +123,12 @@ final class EDRRenderer {
                 let projection = drawable.computeProjection(viewIndex: index)
                 let centre = EDRView.centre(projectionX: Double(projection.columns.2.x),
                                             projectionY: Double(projection.columns.2.y))
+                let shiftKey = "\(snapshot.layout.rawValue):\(snapshot.grid.borders):\(index)"
+                if let fields = snapshot.shiftFields(centre: centre, aspect: map.viewport.width / map.viewport.height,
+                                                     pixelHeight: map.viewport.height, view: index, immersion: immersion),
+                   shiftedViews.insert(shiftKey).inserted {
+                    Diag.log("edr", fields)
+                }
                 let patches = snapshot.patches(centre: centre, aspect: map.viewport.width / map.viewport.height,
                                                pixelHeight: map.viewport.height)
                 drawing.encode(buffer: buffer, colour: drawable.colorTextures[map.textureIndex],

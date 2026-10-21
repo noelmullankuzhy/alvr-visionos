@@ -36,19 +36,49 @@ enum EDRLayout: String, CaseIterable {
     }
     func patches(value: Float, centre: SIMD2<Double> = SIMD2(0.5, 0.5), aspect: Double = 1,
                  grid: EDRGrid = EDRGrid(), pixelHeight: Double = 1000) -> [Patch] {
+        let offset = shift(centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight)
+        let patches = rawPatches(value: value, centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight)
+        guard offset != .zero else { return patches }
+        return patches.map { patch in
+            let x = patch.x + offset.x, y = patch.y + offset.y
+            return Patch(x: x, y: y, width: (patch.x + patch.width + offset.x) - x,
+                         height: (patch.y + patch.height + offset.y) - y, value: patch.value)
+        }
+    }
+    // Include the grid's address labels when fitting the cluster to each eye's viewport.
+    func shift(centre: SIMD2<Double>, aspect: Double, grid: EDRGrid, pixelHeight: Double) -> SIMD2<Double> {
+        guard pairArea != nil || gridArea != nil else { return .zero }
+        var bounds = rawPatches(value: 1, centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight)
+        if gridArea != nil { bounds += grid.labels(patches: bounds) }
+        func inward(_ low: Double, _ high: Double) -> Double {
+            // A tiny inward margin protects bounds from floating-point translation roundoff.
+            if low < 0 { return -low + 1e-12 }
+            if high > 1 { return 1 - high - 1e-12 }
+            return 0
+        }
+        return SIMD2(inward(bounds.map(\.x).min()!, bounds.map { $0.x + $0.width }.max()!),
+                     inward(bounds.map(\.y).min()!, bounds.map { $0.y + $0.height }.max()!))
+    }
+    private func rawPatches(value: Float, centre: SIMD2<Double>, aspect: Double,
+                            grid: EDRGrid, pixelHeight: Double) -> [Patch] {
         if let area = pairArea {
             let w = sqrt(area / 2 / aspect), h = w * aspect
             return [Patch(x: centre.x - 1.5 * w, y: centre.y - h / 2, width: w, height: h, value: 1),
                     Patch(x: centre.x + 0.5 * w, y: centre.y - h / 2, width: w, height: h, value: value)]
         }
         if let area = gridArea {
-            // Twenty-five lit squares plus four 2-physical-pixel seams per axis.
+            // Shared boundaries tile the cluster exactly; optional seams retain the original lit area.
             let w = sqrt(area / 25 / aspect), h = w * aspect
-            let pitchX = w + 2 / (pixelHeight * aspect), pitchY = h + 2 / pixelHeight
+            let gap = grid.borders ? 2 / pixelHeight : 0
+            let pitchX = w + gap / aspect, pitchY = h + gap
+            let left = centre.x - 2 * pitchX - w / 2
+            let top = centre.y - 2 * pitchY - h / 2
             return grid.entries.enumerated().map { i, entry in
-                Patch(x: centre.x + Double(i % 5 - 2) * pitchX - w / 2,
-                      y: centre.y + Double(i / 5 - 2) * pitchY - h / 2,
-                      width: w, height: h, value: entry.value)
+                let column = Double(i % 5), row = Double(i / 5)
+                let x = left + column * pitchX, y = top + row * pitchY
+                let right = left + (column + 1) * pitchX - gap / aspect
+                let bottom = top + (row + 1) * pitchY - gap
+                return Patch(x: x, y: y, width: right - x, height: bottom - y, value: entry.value)
             }
         }
 
@@ -68,6 +98,18 @@ enum EDRLayout: String, CaseIterable {
     }
 }
 
+enum EDRControl { case gridOptions, steps, navigation, mark, answers, gridHint }
+
+func edrVisibleControls(layout: EDRLayout, running: Bool) -> Set<EDRControl> {
+    var controls: Set<EDRControl> = layout.gridArea != nil ? [.gridOptions] : [.steps]
+    if running {
+        if layout.gridArea != nil { controls.insert(.gridHint) }
+        else if layout.isComparison { controls.insert(.answers) }
+        else { controls.formUnion([.navigation, .mark]) }
+    }
+    return controls
+}
+
 // Normalized top-left viewport coordinates of the projection's tangent origin.
 enum EDRView {
     static func centre(left: Double, right: Double, top: Double, bottom: Double) -> SIMD2<Double> {
@@ -83,7 +125,7 @@ enum EDRImmersion: String, CaseIterable {
     static let defaultStyle = EDRImmersion.full
 }
 
-enum EDRGridRange: String, CaseIterable { case fine, coarse }
+enum EDRGridRange: String, CaseIterable { case fine, coarse, knee }
 
 struct EDRGrid {
     struct Entry: Equatable {
@@ -92,17 +134,23 @@ struct EDRGrid {
     }
     var range = EDRGridRange.fine
     var mirror = false
+    var borders = false
     var entries: [Entry] {
         (0..<25).map { i in
             let row = i / 5, column = i % 5
             let snake = row * 5 + (row % 2 == 0 ? column : 4 - column)
             let index = mirror ? 24 - snake : snake
-            let value = range == .fine ? 1 + Double(index) / 24 : 0.5 + Double(index) / 10
+            let value: Double
+            switch range {
+            case .fine: value = 1 + Double(index) / 24
+            case .coarse: value = 0.5 + Double(index) / 10
+            case .knee: value = 1.30 + Double(index) / 60
+            }
             return Entry(cell: "\(String(UnicodeScalar(65 + row)!))\(column + 1)", value: Float(value))
         }
     }
     func fields(_ entry: Entry, layout: EDRLayout, immersion: String) -> KeyValuePairs<String, Any> {
-        ["grid": layout.rawValue, "range": range.rawValue, "mirror": mirror ? 1 : 0,
+        ["grid": layout.rawValue, "range": range.rawValue, "mirror": mirror ? 1 : 0, "borders": borders ? 1 : 0,
          "cell": entry.cell, "value": entry.value, "immersion": immersion]
     }
     // Small 3x5 glyphs outside the cluster, rendered through the same raw-value pipeline.
@@ -163,6 +211,11 @@ struct EDRFrame {
     let step: EDRStep
     let layout: EDRLayout
     let grid: EDRGrid
+    func shiftFields(centre: SIMD2<Double>, aspect: Double, pixelHeight: Double,
+                     view: Int, immersion: String) -> KeyValuePairs<String, Any>? {
+        guard layout.shift(centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight) != .zero else { return nil }
+        return ["layout": layout.rawValue, "shifted": 1, "view": view, "immersion": immersion]
+    }
     func patches(centre: SIMD2<Double>, aspect: Double, pixelHeight: Double) -> [EDRLayout.Patch] {
         let patches = layout.patches(value: step.value, centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight)
         return layout.gridArea == nil ? patches : patches + grid.labels(patches: patches)
@@ -207,13 +260,13 @@ final class EDRSession {
         lock.lock(); defer { lock.unlock() }
         return presented?.0.value
     }
-    func configure(layout: EDRLayout, automatic: Bool, sustained: Bool, fine: Bool = false, gridRange: EDRGridRange = .fine, mirror: Bool = false) {
+    func configure(layout: EDRLayout, automatic: Bool, sustained: Bool, fine: Bool = false, gridRange: EDRGridRange = .fine, mirror: Bool = false, borders: Bool = false) {
         lock.lock(); defer { lock.unlock() }
         let changedLayout = self.layout != layout
         self.layout = layout
         step.selectFine(fine)
-        let changedGrid = changedLayout || grid.range != gridRange || grid.mirror != mirror
-        grid = EDRGrid(range: gridRange, mirror: mirror)
+        let changedGrid = changedLayout || grid.range != gridRange || grid.mirror != mirror || grid.borders != borders
+        grid = EDRGrid(range: gridRange, mirror: mirror, borders: borders)
         if changedGrid {
             gridNeedsLog = true
             if presented != nil {

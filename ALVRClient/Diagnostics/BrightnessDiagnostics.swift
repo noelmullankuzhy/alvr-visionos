@@ -99,6 +99,7 @@ private struct BrightnessControls: View {
     @State private var fine = false
     @State private var gridRange = EDRGridRange.fine
     @State private var mirror = false
+    @State private var borders = false
     @State private var automatic = false
     @State private var sustained = false
     @State private var busy = false
@@ -106,7 +107,7 @@ private struct BrightnessControls: View {
     private func configure() {
         EDRSession.shared.setImmersion(edr.immersion.rawValue)
         EDRSession.shared.configure(layout: layout, automatic: automatic, sustained: sustained,
-                                    fine: fine, gridRange: gridRange, mirror: mirror)
+                                    fine: fine, gridRange: gridRange, mirror: mirror, borders: borders)
     }
     private func enter(_ id: String) {
         busy = true
@@ -126,75 +127,145 @@ private struct BrightnessControls: View {
             busy = false
         }
     }
-    var body: some View {
-        VStack(spacing: 12) {
+    private var running: Bool { pq.space == "EDRDiagnostic" }
+    private var visible: Set<EDRControl> { edrVisibleControls(layout: layout, running: running) }
+    private func stop() {
+        pq.stop()
+        Task { if pq.space != nil { await dismissSpace(); pq.space = nil } }
+    }
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
             Text("EDR ramp").font(.title2)
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                let value = layout.gridArea != nil ? gridRange.rawValue :
+                    EDRSession.shared.currentValue.map { "Value: \($0)" } ?? "Awaiting first frame"
+                Text("\(running ? "Running" : "Idle") · \(edr.immersion.rawValue.capitalized) · \(layout.rawValue) · \(value)")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+    }
+    private var displaySection: some View {
+        Section {
             Picker("Immersion", selection: $edr.immersion) {
                 Text("Full").tag(EDRImmersion.full)
                 Text("Mixed").tag(EDRImmersion.mixed)
-            }.disabled(pq.space != nil)
-            if layout.gridArea == nil {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    Text(EDRSession.shared.currentValue.map { "Submitted EDR value: \($0)" } ?? "Start the ramp to begin")
+            }.pickerStyle(.segmented).disabled(pq.space != nil)
+        } header: {
+            Text("Display")
+        } footer: {
+            Text("Choose the surroundings before starting the diagnostic.")
+        }
+    }
+    private var patternSection: some View {
+        Section {
+            Picker("Layout", selection: $layout) {
+                Section("Ramp") {
+                    ForEach([EDRLayout.onePercent, .tenPercent, .full, .checkerboard], id: \.self) { Text($0.rawValue).tag($0) }
                 }
-            }
-            Picker("Layout", selection: $layout) { ForEach(EDRLayout.allCases, id: \.self) { Text($0.rawValue) } }
-            if layout.gridArea != nil {
-                Picker("Grid range", selection: $gridRange) {
-                    ForEach(EDRGridRange.allCases, id: \.self) { Text($0.rawValue) }
+                Section("Compare") {
+                    ForEach([EDRLayout.split, .pairOne, .pairFive, .pairTwenty], id: \.self) { Text($0.rawValue).tag($0) }
                 }
+                Section("Grid") {
+                    ForEach([EDRLayout.gridOne, .gridTen, .gridFifty], id: \.self) { Text($0.rawValue).tag($0) }
+                }
+            }.pickerStyle(.menu)
+            if visible.contains(.gridOptions) {
+                Picker("Range", selection: $gridRange) {
+                    ForEach([EDRGridRange.coarse, .fine, .knee], id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented)
                 Toggle("Mirror", isOn: $mirror)
-                Text("Close one eye. Compare neighbouring cells; rows A–E, columns 1–5.").font(.caption)
-            } else {
+                Toggle("Borders", isOn: $borders)
+            }
+            if visible.contains(.steps) {
                 Picker("Steps", selection: $fine) {
-                    Text("Default").tag(false)
+                    Text("Standard").tag(false)
                     Text("Fine").tag(true)
+                }.pickerStyle(.segmented)
+                Toggle("Automatic", isOn: $automatic)
+                if automatic { Toggle("Sustained", isOn: $sustained) }
+            }
+        } header: {
+            Text("Pattern")
+        } footer: {
+            Text(layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70." :
+                    "Automatic advances every 4 seconds, or 60 seconds with Sustained.")
+        }
+    }
+    private var primarySection: some View {
+        Section {
+            HStack {
+                Button("Start") { enter("EDRDiagnostic") }.buttonStyle(.borderedProminent)
+                Button("Stop") { stop() }
+            }
+        }
+    }
+    private var runningSection: some View {
+        Section {
+            if visible.contains(.navigation) {
+                HStack {
+                    Button("Back") { EDRSession.shared.back() }
+                    Button("Next") { EDRSession.shared.next() }
                 }
             }
-            if layout.gridArea == nil {
-                Toggle("Automatic steps every 4 seconds", isOn: $automatic)
-                Toggle("Sustained: hold each automatic step for 60 seconds", isOn: $sustained)
+            if visible.contains(.mark) {
+                Button("Brightness stopped increasing here") { EDRSession.shared.mark() }
             }
-            HStack {
-                Button("EDR ramp") { enter("EDRDiagnostic") }
-                Button("Back") { EDRSession.shared.back() }.disabled(pq.space != "EDRDiagnostic" || layout.gridArea != nil)
-                Button("Next (or pinch the ramp)") { EDRSession.shared.next() }.disabled(pq.space != "EDRDiagnostic" || layout.gridArea != nil)
-            }
-            if layout.isComparison {
+            if visible.contains(.answers) {
                 HStack {
                     Button("Right brighter") { EDRSession.shared.answer(.brighter) }
                     Button("Same") { EDRSession.shared.answer(.same) }
                     Button("Right darker") { EDRSession.shared.answer(.darker) }
-                }.disabled(pq.space != "EDRDiagnostic")
-                Text("Close one eye. Compare right with the fixed 1.0 reference on the left; answer after each change.").font(.caption)
-            } else if layout.gridArea == nil {
-                Button("Brightness stopped increasing here") { EDRSession.shared.mark() }.disabled(pq.space != "EDRDiagnostic")
+                }
             }
-            Divider()
-            Text("PQ player").font(.title2)
+            if visible.contains(.gridHint) {
+                Text("Tell the GM the first cell that stops getting brighter").font(.caption)
+            }
+        } header: {
+            Text("While running")
+        } footer: {
+            Text(layout.gridArea != nil ? "Close one eye and compare neighbouring cells, A–E and 1–5." :
+                    layout.isComparison ? "Close one eye and compare right with the fixed 1.0 reference on the left." :
+                    "Pinch the ramp or tap Next to advance; mark where brightness stops increasing.")
+        }
+    }
+    private var pqSection: some View {
+        Section {
             Picker("Clip", selection: $pq.selected) {
                 ForEach(pq.clips, id: \.self) { Text($0.lastPathComponent).tag(Optional($0)) }
             }.disabled(pq.space != nil)
-            if pq.clips.isEmpty { Text("Copy PQ clips to Documents/diag-clips, then Reload clips.") }
+            if pq.clips.isEmpty { Text("Copy PQ clips to Documents/diag-clips, then Reload.").font(.caption) }
             HStack {
-                Button("Reload clips") { pq.refresh() }.disabled(pq.space != nil)
+                Button("Reload") { pq.refresh() }.disabled(pq.space != nil)
                 Button("Play in window") { pq.play(immersive: false) }.disabled(pq.space != nil || pq.selected == nil)
                 Button("Play immersive") { enter("PQDiagnostic") }.disabled(pq.selected == nil)
             }
-            if pq.space == nil { VideoPlayer(player: pq.player).frame(width: 640, height: 360) }
-            Button("Stop / exit diagnostic") {
-                pq.stop()
-                Task { if pq.space != nil { await dismissSpace(); pq.space = nil } }
-            }
-            Text(error).font(.caption)
+            if pq.space == nil { VideoPlayer(player: pq.player).frame(height: 240) }
+        } header: {
+            Text("HDR video (PQ)")
+        } footer: {
+            Text("The split clip shows two halves for a side-by-side brightness comparison.")
         }
-        .padding().disabled(busy)
+    }
+    var body: some View {
+        Form {
+            header
+            displaySection
+            patternSection
+            primarySection
+            if running { runningSection }
+            pqSection
+            if !error.isEmpty { Text(error).font(.caption) }
+        }
+        .formStyle(.grouped)
+        .frame(width: 520)
+        .disabled(busy)
         .onAppear { pq.refresh(); configure() }
         .onChange(of: edr.immersion) { configure() }
         .onChange(of: layout) { configure() }
         .onChange(of: fine) { configure() }
         .onChange(of: gridRange) { configure() }
         .onChange(of: mirror) { configure() }
+        .onChange(of: borders) { configure() }
         .onChange(of: automatic) { configure() }
         .onChange(of: sustained) { configure() }
         .onDisappear { pq.stop(); Task { if pq.space != nil { await dismissSpace(); pq.space = nil } } }
