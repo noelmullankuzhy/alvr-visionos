@@ -9,7 +9,7 @@
 //   d-pad up or right / down or left: ring out / in; A: record; B: back.
 // Logs once: per view eye, tangents, drawable size (corner), the visible-area API result (corner api=unavailable);
 // per record: corner eye pos_deg ring_pct tan_x tan_y; per eye completed: corner_summary with the visible tangent
-// polygon and the boundary shape (CornerShape) with its raw numbers.
+// octagon area with its four raw side and cut percentages.
 //
 
 import Foundation
@@ -30,6 +30,9 @@ final class CornerChartRenderer {
     private var vertexBuffer: MTLBuffer?
     private var vertexCount = 0
     private var geometryKey = ""
+    private var rateParameters: MTLBuffer?
+    private var previousRateData: Data?
+    private var loggedStrokeEyes: Set<CornerEye> = []
     private var pinches: [AnyHashable: (start: Double, right: Bool)] = [:]
     private var padHeld: [CornerChartSession.Action: Bool] = [:]
 
@@ -135,17 +138,59 @@ final class CornerChartRenderer {
             }
             Diag.log("corner", CornerChart.apiFields)
         }
-        let key = "\(session.statusText)|\(views.map { "\($0.t)\($0.vp.width)x\($0.vp.height)" })"
-        if key != geometryKey {
+        // Compare the live map's parameter bytes: stable foveation should reuse geometry, while a changed
+        // frame map must resample its local scales. Object identity alone would miss equivalent recycled maps.
+        var rateData: Data?
+        var forceRebuild = false
+        if let map = rasterizationRateMap {
+            let size = map.parameterDataSizeAndAlign.size
+            if rateParameters == nil || rateParameters!.length < size {
+                rateParameters = map.device.makeBuffer(length: size, options: .storageModeShared)
+            }
+            if let buffer = rateParameters {
+                map.copyParameterData(buffer: buffer, offset: 0)
+                rateData = Data(bytes: buffer.contents(), count: size)
+            } else { forceRebuild = true }
+        }
+        let key = "\(session.statusText)|\(views.map { "\($0.t)\($0.vp)" })|\(rasterizationRateMap?.screenSize.width ?? 0)x\(rasterizationRateMap?.screenSize.height ?? 0)"
+        if forceRebuild || rateData != previousRateData || key != geometryKey {
+            previousRateData = rateData
             geometryKey = key
             var vertices: [SIMD4<Float>] = []
             for (eye, v, t, vp) in views where session.lit(eye) {
                 let selected = session.eye == eye ? (session.spoke, session.pct) : nil
-                for q in CornerChart.geometry(t, eye: eye, widthPx: vp.width, heightPx: vp.height, selected: selected, status: session.statusText) {
-                    let r = q.rect
-                    for (x, y) in [(r.x0, r.y0), (r.x1, r.y0), (r.x0, r.y1), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)] {
-                        vertices += [SIMD4<Float>(Float(x), Float(y), Float(v), 0), q.color]
+                let layer = drawable.views[v].textureMap.sliceIndex
+                var minStroke = Double.infinity, maxStroke = 0.0
+                let scale: CornerChart.LocalScale = { x, y in
+                    var sx = 1.0, sy = 1.0
+                    if let map = rasterizationRateMap {
+                        // Metal screen coordinates start at top left; the chart uses NDC y up.
+                        let px = Float(vp.originX + (x + 1) * vp.width / 2)
+                        let py = Float(vp.originY + (1 - y) * vp.height / 2)
+                        let x0 = max(0, px - 1), x1 = min(Float(map.screenSize.width), px + 1)
+                        let y0 = max(0, py - 1), y1 = min(Float(map.screenSize.height), py + 1)
+                        let l = map.physicalCoordinates(screenCoordinates: MTLCoordinate2D(x: x0, y: py), layer: layer)
+                        let r = map.physicalCoordinates(screenCoordinates: MTLCoordinate2D(x: x1, y: py), layer: layer)
+                        let top = map.physicalCoordinates(screenCoordinates: MTLCoordinate2D(x: px, y: y0), layer: layer)
+                        let bottom = map.physicalCoordinates(screenCoordinates: MTLCoordinate2D(x: px, y: y1), layer: layer)
+                        sx = max(0.001, Double((r.x - l.x) / (x1 - x0)))
+                        sy = max(0.001, Double((bottom.y - top.y) / (y1 - y0)))
                     }
+                    let stroke = CornerChart.strokePx((sx, sy))
+                    minStroke = min(minStroke, stroke); maxStroke = max(maxStroke, stroke)
+                    return (sx, sy)
+                }
+                for q in CornerChart.geometry(t, eye: eye, widthPx: vp.width, heightPx: vp.height,
+                                              selected: selected, status: session.statusText, localScale: scale) {
+                    let points = q.vertices
+                    for i in [0, 1, 2, 1, 3, 2] {
+                        vertices += [SIMD4<Float>(Float(points[i].x), Float(points[i].y), Float(v), 0), q.color]
+                    }
+                }
+                if loggedStrokeEyes.insert(eye).inserted {
+                    Diag.log("corner", ["eye": eye.rawValue, "view": v,
+                                        "stroke_min_logical_px": String(format: "%.4f", minStroke),
+                                        "stroke_max_logical_px": String(format: "%.4f", maxStroke)])
                 }
             }
             vertexCount = vertices.count / 2
@@ -162,7 +207,9 @@ final class CornerChartRenderer {
         pass.depthAttachment.texture = drawable.depthTextures[0]
         pass.depthAttachment.loadAction = .clear
         pass.depthAttachment.storeAction = .store
-        pass.depthAttachment.clearDepth = 0.0
+        // Non-zero, as the streaming pass clears: the chart writes no depth, and a depth-0 chart was not shown
+        // on device in mixed immersion (21 Oct; only the depth-writing eye badges were).
+        pass.depthAttachment.clearDepth = 0.000000001
         pass.rasterizationRateMap = rasterizationRateMap
         pass.renderTargetArrayLength = viewports.count
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }

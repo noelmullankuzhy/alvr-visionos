@@ -382,13 +382,16 @@ def corner_rows(records):
                 marks[(eye, angle)] = record
         if record['topic'] == 'corner_summary':
             radii = f.get('r', '').split(',')
-            for spoke, radius in enumerate(radii if len(radii) == 16 else []):
-                angle = spoke * 22.5
+            octagon = f.get('shape') == 'octagon'
+            angles = range(0, 360, 45) if octagon else [k * 22.5 for k in range(16)] if len(radii) == 16 else []
+            for spoke, angle in enumerate(angles):
                 mark = marks.get((eye, angle))
                 rows.append(dict(eye=eye, pos_deg=fmt(angle),
                                  ring_pct=mark['fields'].get('ring_pct') if mark else None,
-                                 radius=radius, shape=f.get('shape'),
+                                 kind=mark['fields'].get('kind') if mark else None,
+                                 radius=None if octagon else radii[spoke], shape=f.get('shape'),
                                  superellipse_n=f.get('superellipse_n'), area_frac=f.get('area_frac'),
+                                 sides=f.get('sides'), cuts=f.get('cuts'), visible_area_frac=f.get('visible_area_frac'),
                                  summary_source=record['source'],
                                  mark_source=mark['source'] if mark else None))
             # A completed walk must not supply rings for a later partial walk.
@@ -522,7 +525,7 @@ def generate(directory, sender_path=None):
     selected = topics('corner', 'corner_summary')
     lines += section(SECTIONS[9], selected)
     lines += ['Per-spoke radii are the logged normalised r entries, ordered 0–337.5 degrees in 22.5-degree steps. No missing rings are inferred.', '']
-    lines += table(corner_rows(records), ('eye', 'pos_deg', 'ring_pct', 'radius', 'shape', 'superellipse_n', 'area_frac', 'mark_source', 'summary_source')) + ['']
+    lines += table(corner_rows(records), ('eye', 'pos_deg', 'ring_pct', 'radius', 'shape', 'superellipse_n', 'area_frac', 'kind', 'sides', 'cuts', 'visible_area_frac', 'mark_source', 'summary_source')) + ['']
     lines += measurements(selected, ('eye', 'pos_deg', 'ring_pct', 'r', 'shape', 'superellipse_n', 'area_frac')) + ['']
     selected = topics('eye_badge', 'diag')
     known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag'}
