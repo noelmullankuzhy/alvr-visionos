@@ -2539,6 +2539,7 @@ class WorldTracker {
                 print("ALVRSIM using fallback head pose")
             }
             sendFakeTracking(viewFovs: viewFovs, targetTimestamp: reportedTargetTimestamp, includeViewParams: false)
+            EventHandler.shared.noteRenderPoseSent(real: false)
 #endif
             // Prevent audio crackling issues
             if sentPoses > 30 {
@@ -3429,6 +3430,7 @@ class WorldTracker {
             }
         }
 
+        EventHandler.shared.noteRenderPoseSent(real: true)
         EventHandler.shared.outgoingWorker.enqueue {
             // Old API, currently in master/v20
             //alvr_send_tracking(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], [UnsafePointer(eyeGazeLeftPtr), UnsafePointer(eyeGazeRightPtr)])

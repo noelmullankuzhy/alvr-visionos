@@ -65,3 +65,109 @@ struct StreamBootstrap {
         return "ALVRBOOT first_frame_queued_ms=\(ms)"
     }
 }
+
+/// The render loops send head poses only while their layer runs: from the moment a renderer exists
+/// (EventHandler.renderStarted, never cleared) until a space's layer runs, while it is paused, and while a
+/// space opens or switches, nothing else did, so the server (and the game) starved. The event thread asks this
+/// whether to send a keepalive pose: only when no render loop has sent one for staleAfter, then every interval.
+struct PoseKeepalive {
+    static let staleAfter = 0.2
+    static let interval = StreamBootstrap.fakeTrackingInterval
+    private static let slack = 0.001
+
+    struct Send: Equatable {
+        let startsEpisode: Bool
+    }
+
+    private var lastRenderSent: Double? = nil
+    private var lastKeepaliveSent: Double? = nil
+    private var episodeSends = 0
+
+    /// Event thread: non-nil when a keepalive pose should be sent now.
+    mutating func shouldSend(now: Double) -> Send? {
+        if let last = lastRenderSent, now - last < PoseKeepalive.staleAfter - PoseKeepalive.slack {
+            return nil
+        }
+        if let last = lastKeepaliveSent, now - last < PoseKeepalive.interval - PoseKeepalive.slack {
+            return nil
+        }
+        lastKeepaliveSent = now
+        episodeSends += 1
+        return Send(startsEpisode: episodeSends == 1)
+    }
+
+    /// A render loop sent a pose (real, or bootstrap fake). Returns the keepalive sends of the episode it ends.
+    mutating func renderSent(now: Double) -> Int? {
+        lastRenderSent = now
+        guard episodeSends > 0 else { return nil }
+        defer {
+            episodeSends = 0
+            lastKeepaliveSent = nil
+        }
+        return episodeSends
+    }
+}
+
+/// Opens the streaming space without a silent failure. visionOS has one immersive space slot, so a full open that
+/// fails is retried once after dismissing whatever holds it, then falls back to the mixed space. A mixed open is
+/// unchanged (one try); the caller logs every result and, while an open is pending, every pendingLogInterval.
+enum StreamSpaceOpen {
+    static let mixedID = "MetalClient"
+    static let fullID = "MetalClientFull"
+    static let pendingLogInterval = 5.0
+
+    enum Step: Equatable {
+        case done
+        case giveUp
+        case dismissThenOpen(String)
+        case open(String)
+    }
+
+    static func spaceID(fullImmersion: Bool) -> String {
+        fullImmersion ? fullID : mixedID
+    }
+
+    /// The next step after attempt `attempt` (1 = first) to open `id`.
+    static func next(after id: String, opened: Bool, attempt: Int) -> Step {
+        if opened { return .done }
+        guard id == fullID else { return .giveUp }
+        return attempt == 1 ? .dismissThenOpen(fullID) : .open(mixedID)
+    }
+}
+
+/// DIAG stream_start lines: ms since the stream's connect (STREAMING_STARTED) for the space request, its open
+/// result, the layer running or pausing, the first decoded frame and the first poses, so a device run shows where
+/// the start time goes. `once` lines log at most once per connection (keyed by event and fields).
+struct StreamStartTiming {
+    enum Event: String {
+        case connect
+        case spaceRequested = "space_requested"
+        case spaceOpenPending = "space_open_pending"
+        case spaceOpenResult = "space_open_result"
+        case layerRunning = "layer_running"
+        case layerPaused = "layer_paused"
+        case firstDecodedFrame = "first_decoded_frame"
+        case firstPoseSent = "first_pose_sent"
+        case poseKeepalive = "pose_keepalive"
+    }
+
+    private var connectTime: Double? = nil
+    private var logged = Set<String>()
+
+    mutating func disconnected() {
+        connectTime = nil
+    }
+
+    mutating func line(_ event: Event, now: Double, fields: [(String, String)] = [], once: Bool = false) -> String? {
+        if event == .connect {
+            connectTime = now
+            logged.removeAll()
+        }
+        let pairs = fields.map { "\($0.0)=\($0.1)" }
+        if once && !logged.insert(([event.rawValue] + pairs).joined(separator: " ")).inserted {
+            return nil
+        }
+        let since = connectTime.map { String(Int(((now - $0) * 1000).rounded())) } ?? "na"
+        return (["DIAG stream_start event=\(event.rawValue) since_connect_ms=\(since)"] + pairs).joined(separator: " ")
+    }
+}

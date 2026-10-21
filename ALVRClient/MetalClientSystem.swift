@@ -46,8 +46,10 @@ class MetalClientSystem {
     func renderLoop() {
         defer { renderer.stopQualitySweep() }
     
+        // Poses meanwhile come from the event thread's keepalive (EventHandler.sendPoseKeepaliveIfStale).
         layerRenderer.waitUntilRunning()
-        
+        logLayer(.layerRunning)
+
         layerRenderer.onSpatialEvent = { eventCollection in
             for event in eventCollection {
                 self.renderer.cornerChart?.spatialEvent(event)
@@ -81,7 +83,9 @@ class MetalClientSystem {
                 break
             } else if layerRenderer.state == .paused {
                 renderer.stopQualitySweep()
+                logLayer(.layerPaused)
                 layerRenderer.waitUntilRunning()
+                logLayer(.layerRunning)
                 //EventHandler.shared.handleHeadsetRemovedOrReentry()
                 continue
             } else {
@@ -90,5 +94,10 @@ class MetalClientSystem {
                 }
             }
         }
+    }
+
+    private func logLayer(_ event: StreamStartTiming.Event) {
+        guard !renderer.renderOwnership.offlineDiagnostics else { return }
+        EventHandler.shared.logStreamStart(event, [("immersion", renderer.displayFullImmersion ? "full" : "mixed")])
     }
 }

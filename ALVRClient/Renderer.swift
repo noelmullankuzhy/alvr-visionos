@@ -192,7 +192,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     
     let renderOwnership: MetalRenderOwnership
     let displayHeadroom: Float
-    private let displayFullImmersion: Bool
+    let displayFullImmersion: Bool
     private let displayHeadroomSource: String
 
     init(_ layerRenderer: LayerRenderer?, offlineDiagnostics: Bool = false, displayFullImmersion: Bool = false) {
