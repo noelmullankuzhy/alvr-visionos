@@ -83,46 +83,153 @@ DIAG diag t_ms=31 file_recovered=true dropped_lines=7
         self.assertIn('diag-a.log:6', out)
         self.assertIn('x&#124;y', out)
 
-    def test_m8_knee_boundaries_and_step_alignment(self):
-        lines = []
-        senders = []
-        for i, (rate, loss, tail) in enumerate([(50, 1, 10), (100, 1, 10.001),
-                                                (150, 2, 9), (200, 0, 9)]):
-            # Interval and final records belong to one step, not two steps.
-            for summary in ('false', 'true'):
-                lines.append('DIAG net t_ms={} mode=udp summary={} seconds=2 bytes=1000 '
-                             'mbps={} loss={} reorder=3 jitter_ms=0.2 '
-                             'frame_complete=100 spread_p99_ms={}\n'.format(
-                                 i * 10 + (summary == 'true'), summary, rate - 1, loss, tail))
-            senders.append(json.dumps(dict(mode='udp', requested_mbps=rate, fps=100,
-                                           packets=1000, payload_mbps=rate)))
-        out = self.render(''.join(lines), '\n'.join(senders))
-        self.assertIn('Knee: 200 Mb/s', out)
-        self.assertIn('loss=0.1%', out)
-        self.assertIn('loss=0.2%', out)
-        self.assertIn('completion_p99_ms=10.001', out)
-        self.assertIn('sender.jsonl:4', out)
-        self.assertIn('Step 4', out)
-        self.assertNotIn('Step 5', out)
+    @staticmethod
+    def ladder(steps, packets=1000, fps=100):
+        metadata = dict(start_wall=1792589933.874, host='headset', port=9944,
+                        fps=fps, packet_size=1200)
+        records = [metadata]
+        for start, duration, rate in steps:
+            records.append(dict(t_start_s=start, mbps_req=rate, sent_mbps=rate - 1,
+                                late_frames=0, send_errors=0, frames=round(duration * fps),
+                                elapsed_s=duration))
+        records.append(dict(total_s=steps[-1][0] + steps[-1][1], packets=packets,
+                            frames=sum(row['frames'] for row in records[1:])))
+        return '\n'.join(json.dumps(row) for row in records)
 
-    def test_m8_missing_denominator_fps_incomplete_and_nan(self):
-        line = ('DIAG net t_ms=1 mode=udp summary=true seconds=1 mbps=49 loss=0 '
-                'spread_p99_ms=nan frame_complete=0\n')
-        out = self.render(line)
-        self.assertIn('Knee: no data', out)
-        self.assertIn('loss=no data', out)
-        self.assertIn('frame_period_ms=no data', out)
-        out = self.render(line, '{"mode":"udp","mbps":50,"fps":90,"packets":100}\n')
-        self.assertIn('Knee: no data', out)
-        out = self.render(line.replace('summary=true', 'summary=false').replace('nan', '1'),
-                          '{"mode":"udp","mbps":50,"fps":90,"packets":100}\n')
-        self.assertIn('incomplete run', out)
+    @staticmethod
+    def sink(end, byte_count, loss, reorder, tail=1, summary=False, listener_idle=5):
+        return ('DIAG net t_ms={} mode=udp summary={} seconds={} active_seconds={} '
+                'bytes={} mbps=999 loss={} reorder={} duplicates=0 stale=0 invalid=0 '
+                'foreign=0 frame_complete={} jitter_ms=0.2 hist_overflow=0 '
+                'spread_p99_ms={}\n').format(
+                    round((listener_idle + end) * 1000), str(summary).lower(),
+                    listener_idle + end, end, byte_count, loss, reorder, round(end * 100), tail)
+
+    def test_actual_sender_sample_is_accepted(self):
+        path = SCRIPT.with_name('fixtures') / 'netladder-sample.jsonl'
+        records, bad = report.read_sender(path)
+        self.assertEqual(bad, [])
+        self.assertEqual(len(records), 5)
+        self.assertEqual([row['fields'].get('mbps_req') for row in records[1:-1]], [100, 200, 300])
+        out = self.render('', path.read_text())
+        self.assertIn('Step 3', out)
+        self.assertIn('malformed sender lines skipped=0', out)
+        self.assertIn('62640', out)
+        self.assertIn('1792589933.8743958', out)
+
+    def test_continuous_ladder_differences_counters_and_aligns_time(self):
+        # Five seconds of listener idle must not shift step 1 to step 3.
+        sender = self.ladder([(0, 2, 50), (2, 2, 100)])
+        lines = (self.sink(1, 5000000, 1, 2) + self.sink(2, 10000000, 3, 5) +
+                 self.sink(3, 20000000, 4, 6) + self.sink(4, 30000000, 7, 10) +
+                 self.sink(4, 30000000, 7, 10, summary=True))
+        out = self.render(lines, sender)
+        first = out.split('### Step 1')[1].split('### Step 2')[0]
+        second = out.split('### Step 2')[1].split('Knee:')[0]
+        self.assertIn('requested=50 Mb/s', first)
+        self.assertIn('received=40 Mb/s', first)
+        self.assertIn('loss_delta=3', first)
+        self.assertIn('reorder_delta=5', first)
+        self.assertIn('requested=100 Mb/s', second)
+        self.assertIn('received=80 Mb/s', second)
+        self.assertIn('loss_delta=4', second)
+        self.assertIn('reorder_delta=5', second)
+        self.assertIn('completion_p99_ms=no data', second)
+        self.assertIn('loss_pct=no data', second)
+        self.assertIn('jitter_ms=no data', second)
+        self.assertNotIn('Step 3', out)
         self.assertIn('Knee: no data', out)
 
-    def test_sender_malformed_and_unmatched(self):
-        out = self.render('', 'garbage\n[]\n{"fps": NaN}\n{"mode":"udp","mbps":50}\n')
-        self.assertIn('malformed sender lines skipped=3', out)
-        self.assertIn('Unmatched sender steps: 1', out)
+    def test_crossing_intervals_are_not_prorated(self):
+        lines = (self.sink(1, 5000000, 1, 2) + self.sink(2, 10000000, 3, 5) +
+                 self.sink(3, 20000000, 4, 6) + self.sink(4, 30000000, 7, 10, summary=True))
+        out = self.render(lines, self.ladder([(0, 1.5, 50), (1.5, 2.5, 100)]))
+        self.assertIn('crosses step boundary', out)
+        self.assertIn('coverage_s=0..1', out)
+        self.assertIn('coverage_s=2..4', out)
+        self.assertIn('whole_step=false', out)
+        self.assertIn('Knee: no data', out)
+
+    def test_m8_knee_loss_threshold_in_isolation(self):
+        # A single-step ladder has the footer packet denominator and a matching
+        # cumulative percentile scope. Keep the other criterion passing.
+        for loss, expected in [(0, '50 Mb/s'), (1, '50 Mb/s'), (2, 'no data')]:
+            with self.subTest(loss=loss):
+                out = self.render(self.sink(2, 10000000, loss, 0, tail=1, summary=True),
+                                  self.ladder([(0, 2, 50)]))
+                self.assertIn('Knee: ' + expected, out)
+
+    def test_m8_knee_deadline_threshold_in_isolation(self):
+        # Zero loss, 100 Hz: <=10 ms passes; 10.001 ms alone must fail.
+        for tail, expected in [(9, '50 Mb/s'), (10, '50 Mb/s'), (10.001, 'no data')]:
+            with self.subTest(tail=tail):
+                out = self.render(self.sink(2, 10000000, 0, 0, tail=tail, summary=True),
+                                  self.ladder([(0, 2, 50)]))
+                self.assertIn('Knee: ' + expected, out)
+
+    def test_missing_data_and_ambiguous_runs_do_not_pass(self):
+        sender = self.ladder([(0, 2, 50)])
+        baseline = self.sink(2, 10000000, 0, 0, summary=True)
+        for line in [baseline.replace('spread_p99_ms=1', 'spread_p99_ms=nan'),
+                     baseline.replace('hist_overflow=0', 'hist_overflow=1'),
+                     baseline.replace('summary=true', 'summary=false'),
+                     baseline.replace('frame_complete=200', 'frame_complete=0'),
+                     baseline.replace('active_seconds=2', 'active_seconds=unavailable'),
+                     baseline + baseline]:
+            with self.subTest(line=line):
+                self.assertIn('Knee: no data', self.render(line, sender))
+        self.assertIn('Knee: no data', self.render(baseline, sender.replace('"send_errors": 0', '"send_errors": 1')))
+        self.assertIn('Knee: no data', self.render(baseline, '\n'.join(sender.splitlines()[:-1])))
+        self.assertIn('Knee: no data', self.render(baseline))
+
+    def test_sender_malformed_and_wrong_schema(self):
+        sender = self.ladder([(0, 2, 50)])
+        out = self.render('', sender + '\ngarbage\n[]\n{"fps": NaN}\n{"mode":"udp","mbps":50}\n')
+        self.assertIn('malformed sender lines skipped=4', out)
+        self.assertIn('sender alignment disabled', out)
+
+    def test_ladder_sender_schedule_and_json_without_network(self):
+        from unittest import mock
+        import contextlib
+        import io
+        ladder_path = SCRIPT.with_name('netprobe-ladder.py')
+        ladder_spec = importlib.util.spec_from_file_location('netprobe_ladder', ladder_path)
+        ladder = importlib.util.module_from_spec(ladder_spec)
+        ladder_spec.loader.exec_module(ladder)
+        clock, sent, sent_at = [0.0], [], []
+        sock = mock.MagicMock()
+        sock.__enter__.return_value = sock
+
+        def send(data):
+            sent.append(data)
+            sent_at.append(clock[0])
+            return len(data)
+
+        sock.send.side_effect = send
+        output = io.StringIO()
+        with mock.patch.object(ladder.socket, 'socket', return_value=sock) as factory, \
+                mock.patch.object(ladder.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(ladder.time, 'monotonic_ns', side_effect=lambda: round(clock[0] * 1e9)), \
+                mock.patch.object(ladder.time, 'time', return_value=123), \
+                mock.patch.object(ladder.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(ladder.main(['headset', '9944', '0.032,0.064', '1', '4', '1200']), 0)
+        factory.assert_called_once()
+        sock.connect.assert_called_once_with(('headset', 9944))
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(rows[0], dict(start_wall=123, host='headset', port=9944, fps=4, packet_size=1200))
+        self.assertEqual([row['t_start_s'] for row in rows[1:-1]], [0, 0.75])
+        self.assertEqual([row['frames'] for row in rows[1:-1]], [4, 4])
+        self.assertEqual([row['elapsed_s'] for row in rows[1:-1]], [0.75, 0.75])
+        self.assertEqual([row['mbps_req'] for row in rows[1:-1]], [0.032, 0.064])
+        self.assertTrue(all(row['send_errors'] == 0 and row['late_frames'] == 0 for row in rows[1:-1]))
+        self.assertEqual(rows[-1], dict(total_s=1.5, packets=12, frames=8))
+        self.assertEqual(rows[1]['sent_mbps'], round(4000 * 8 / 0.75 / 1e6, 1))
+        self.assertEqual(rows[2]['sent_mbps'], round(8000 * 8 / 0.75 / 1e6, 1))
+        headers = [ladder.np.HEADER.unpack(data[:28]) for data in sent]
+        self.assertEqual([h[1] for h in headers], list(range(12)))
+        self.assertEqual([h[3] for h in headers], [0, 1, 2, 3, 4, 4, 5, 5, 6, 6, 7, 7])
+        self.assertEqual(sent_at, [0, 0.25, 0.5, 0.75, 0.75, 0.75, 1, 1, 1.25, 1.25, 1.5, 1.5])
 
     def test_decode_no_false_pass_and_aggregate_sessions(self):
         template = ('DIAG decode t_ms=1 clip=a sessions=2 mode=paced width=10 height=20 '
@@ -155,7 +262,7 @@ DIAG diag t_ms=31 file_recovered=true dropped_lines=7
                  'DIAG edr t_ms=3 mark=true value=2 layout=10%\n'
                  'DIAG net t_ms=4 mode=udp summary=true mbps=50 loss=0 '
                  'frame_complete=100 spread_p99_ms=1\n')
-        out = self.render(lines, 'broken\n{"mode":"udp","mbps":100,"fps":100,"packets":100}\n')
+        out = self.render(lines, 'broken\n' + self.ladder([(0, 2, 50)]))
         self.assertIn('Threshold diag-a.log:3: value=2 layout=10% hold_s=no data', out)
         self.assertIn('Knee: no data', out)
         self.assertIn('sender alignment disabled', out)
