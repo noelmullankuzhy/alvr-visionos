@@ -93,6 +93,7 @@ directory, checks both manifests against the files' actual format descriptions
 count), then removes the clips. It fails when encoding or inspection fails.
 The same checker can inspect full runs:
 `swift tools/diag/check-clips.swift /tmp/avp-hevc/hevc-manifest.json /tmp/avp-pq/pq-manifest.json`.
+
 If the execution sandbox blocks the default Swift module cache, set
 `CLANG_MODULE_CACHE_PATH` to a writable scratch directory; smoke does this itself.
 
@@ -106,3 +107,57 @@ Run the smoke command above outside that restricted environment before use.
 The required visionOS Xcode build was attempted; it fails on missing provisioning
 profiles and the absent `ALVRClient/ALVRClientCore.xcframework` (the initial default
 DerivedData location was also unwritable). No app files were changed.
+
+## M2 / M3 brightness diagnostics
+
+```sh
+sh tools/diag/push-clips.sh 'DEVICE NAME OR ID' /tmp/avp-pq
+```
+
+Copies the directory contents into `Documents/diag-clips` in the installed
+`uk.lumenio.alvr` app's data container, preserving existing files. Enable
+Diagnostics and restart (or launch with `ALVR_DIAG=1`), then open **Brightness
+diagnostics (EDR ramp / PQ player)** under Advanced Settings, without a stream.
+The controls are absent when diagnostics is off. Keep the controls window to
+the side of the measurement area; both diagnostic spaces use mixed immersion.
+Exit a diagnostic before entering a stream. Stop/exit also releases the player.
+
+**EDR ramp:** unfoveated, per-eye `rgba16Float`, extended-linear Display P3.
+The separate fragment writes neutral values directly, with opaque alpha and
+no app shoulder or gamut/transfer conversion. Patches and their opaque black
+surround both write finite reverse-Z depth for a two-metre view plane, derived
+from each drawable view's current scene-aware projection (see
+[WWDC24 10092](https://developer.apple.com/videos/play/wwdc2024/10092/)).
+Pixels outside the view's viewport remain transparent with zero depth.
+Layout areas are fractions of
+each eye's drawable viewport, not calibrated fractions of the visible optical
+field. Centre patches have a black surround; split has unity on the left;
+checkerboard is 8×8 with equal black/bright areas. Pinch the ramp or tap Next
+to advance through 0/0.25/0.5/1/1.25/1.5/1.75/2/2.5/4, looping. Automatic mode
+holds each submitted level for 4 seconds, or 60 seconds with Sustained selected.
+Manual Next overrides the timer. Changing settings restarts that level's timer;
+late frames advance once instead of skipping unpresented levels. The mark
+button records the most recently submitted value/layout as a visual threshold.
+
+`Diag.log` keeps decision 65's timestamp-first format and key/value fields:
+
+```text
+DIAG edr t_ms=1234 step=9 value=4.000 layout=10% mode=auto hold_s=60
+DIAG edr t_ms=5678 mark=true value=4.000 layout=10%
+DIAG pq t_ms=9000 path=window clip=pq-steps.mov current_s=2.000 step=1 rate=1.000 waiting=none
+```
+
+**PQ player:** choose the generated `steps` clip, then Play in window (AVKit
+VideoPlayer) or Play immersive (RealityKit VideoPlayerComponent). Each launch
+starts the same selected file from time zero; only one presentation is active.
+Logs include clip/path, `eligibleForHDRPlayback`, `availableHDRModes` (deprecated
+but recorded as requested), actual item format transfer/primaries, status/error,
+and media time/rate/waiting reason every 250 ms. Status and metadata errors carry
+the originating item's immutable clip/path, including late callbacks after a
+new playback begins. `step` is zero based at 2-second
+boundaries for filenames containing `steps`, with step 6 held past 14 seconds,
+matching the generator. Other clips log step -1; use media time and their own
+manifest. These are media-clock samples, not measured photon presentation times.
+Record headset brightness, OS/model, ambient light, fit and thermal/power state
+alongside logs. Device photometry or Noel's visual comparison remains necessary
+to establish actual brightness; playback eligibility does not measure headroom.

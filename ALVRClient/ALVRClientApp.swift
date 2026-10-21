@@ -161,6 +161,7 @@ struct ALVRClientApp: App {
         }
         .windowStyle(.plain)
         .windowResizability(.contentSize)
+
         .onChange(of: scenePhase) {
             switch scenePhase {
             case .background:
@@ -206,6 +207,26 @@ struct ALVRClientApp: App {
             InputDebugView()
         }
         .windowResizability(.contentSize)
+
+        WindowGroup(id: "BrightnessDiagnostics") {
+            BrightnessDiagnostics()
+        }
+        .windowResizability(.contentSize)
+
+        ImmersiveSpace(id: "EDRDiagnostic") {
+            CompositorLayer(configuration: EDRConfiguration()) { layer in
+                guard Diag.isOn else { return }
+                do { try EDRRenderer(layer).start() }
+                catch { Diag.log("edr", ["error": error.localizedDescription]) }
+            }
+        }
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        .upperLimbVisibility(.hidden)
+
+        ImmersiveSpace(id: "PQDiagnostic") {
+            PQImmersiveView()
+        }
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
 
         // Offline test space: the real Metal renderer, entered with no streamer
         // connected, which is the state that already draws the room wireframe.
