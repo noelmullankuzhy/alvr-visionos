@@ -104,6 +104,9 @@ final class OutgoingWorker {
 
 class EventHandler: ObservableObject {
     static let shared = EventHandler()
+    // The current stream's immutable video inputs and generation (decision 63e (2), (3)), captured at
+    // STREAMING_STARTED; the payload is the stream's foveation. Renderer.videoFramePipelines runs under its lock.
+    static let videoStreams = VideoStreamGate<FoveationVars?>()
 
     var outgoingWorker : OutgoingWorker = OutgoingWorker("Outgoing Data")
     var trackingWorker : OutgoingWorker = OutgoingWorker("Tracking Worker")
@@ -194,7 +197,7 @@ class EventHandler: ObservableObject {
                 refreshRates = [120, 100, 96, 90]
             }
 
-            let capabilities = AlvrClientCapabilities(default_view_width: UInt32(renderWidth*2), default_view_height: UInt32(renderHeight*2), refresh_rates: refreshRates, refresh_rates_count: UInt64(refreshRates.count), foveated_encoding: true, encoder_high_profile: true, encoder_10_bits: true, encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1), prefer_10bit: true, prefer_full_range: true, preferred_encoding_gamma: 1.5, prefer_hdr: false)
+            let capabilities = AlvrClientCapabilities(default_view_width: UInt32(renderWidth*2), default_view_height: UInt32(renderHeight*2), refresh_rates: refreshRates, refresh_rates_count: UInt64(refreshRates.count), foveated_encoding: true, encoder_high_profile: true, encoder_10_bits: true, encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1), prefer_10bit: true, prefer_full_range: true, preferred_encoding_gamma: 1.5, prefer_hdr: ALVRClientApp.gStore.settings.hdrPQ)
             alvr_initialize(/*capabilities=*/capabilities)
             alvr_initialize_logging()
             alvr_set_decoder_input_callback(nil, { data in return EventHandler.shared.handleNals(frameData: data) })
@@ -232,6 +235,7 @@ class EventHandler: ObservableObject {
     func stop() {
         print("EventHandler.Stop")
         WorldTracker.inputGate.streamStopped()
+        EventHandler.videoStreams.streamStopped()
         StreamTelemetry.shared.streamingStopped()
         streamingActive = false
         vtDecompressionSession = nil
@@ -548,7 +552,10 @@ class EventHandler: ObservableObject {
         }
 
         if let vtDecompressionSession = self.vtDecompressionSession {
-            VideoHandler.feedVideoIntoDecoder(decompressionSession: vtDecompressionSession, nals: nal, timestamp: timestamp, videoFormat: self.videoFormat!, codec: currentCodec) { [self] imageBuffer in
+            // The stream this frame was decoded for: its colour state is derived from it, not from a later videoFormat.
+            let frameVideoFormat = self.videoFormat!
+            let frameStream = EventHandler.videoStreams.currentStream
+            VideoHandler.feedVideoIntoDecoder(decompressionSession: vtDecompressionSession, nals: nal, timestamp: timestamp, videoFormat: frameVideoFormat, codec: currentCodec) { [self] imageBuffer in
                 guard let imageBuffer = imageBuffer else {
                     //print("Frame not decoded")
                     return
@@ -591,10 +598,10 @@ class EventHandler: ObservableObject {
                     // the next frame is starting, so keep this around for now just in case.
                     if frameQueueLastImageBuffer != nil {
                         //frameQueue.append(QueuedFrame(imageBuffer: frameQueueLastImageBuffer!, timestamp: frameQueueLastTimestamp))
-                        frameQueue.append(QueuedFrame(imageBuffer: imageBuffer, timestamp: timestamp, viewParamsValid: false, viewParams: viewParamsDummy))
+                        frameQueue.append(QueuedFrame(imageBuffer: imageBuffer, timestamp: timestamp, viewParamsValid: false, viewParams: viewParamsDummy, videoFormat: frameVideoFormat, stream: frameStream))
                     }
                     else {
-                        frameQueue.append(QueuedFrame(imageBuffer: imageBuffer, timestamp: timestamp, viewParamsValid: false, viewParams: viewParamsDummy))
+                        frameQueue.append(QueuedFrame(imageBuffer: imageBuffer, timestamp: timestamp, viewParamsValid: false, viewParams: viewParamsDummy, videoFormat: frameVideoFormat, stream: frameStream))
                     }
                     // TODO: make this configurable
                     if frameQueue.count > 2 {
@@ -875,11 +882,23 @@ class EventHandler: ObservableObject {
                     sendBootstrapTrackingIfNeeded()
                 }
                 Settings.clearSettingsCache()
+                // This stream's video inputs, captured once into a new generation (decision 63e (2), (3)): the HDR
+                // setting, headroom and SDR output policy, the server's encoding gamma and the foveation. Decode and
+                // render threads read only these; a setting changed mid-stream applies to the next stream.
+                let foveation = Settings.getAlvrSettings().map { FFR.calculateFoveationVars(alvrEvent: started, foveationSettings: $0.video.foveated_encoding) }
+                let videoStream = EventHandler.videoStreams.streamStarted(
+                    hdrEnabled: ALVRClientApp.gStore.settings.hdrPQ,
+                    headroom: HDRPipeline.headroom(defaultsValue: UserDefaults.standard.double(forKey: HDRPipeline.headroomDefaultsKey)),
+                    output: VideoHandler.colourOutput,
+                    encodingGamma: started.encoding_gamma,
+                    payload: foveation)
+                print("ALVRCOLOUR stream=\(videoStream.generation) hdr_setting=\(videoStream.hdrEnabled) headroom=\(videoStream.headroom) foveation=\(foveation != nil)")
                 // Choose this stream's interaction profile once from the emulation mode (fixed for the stream), declare it, then open the gate.
                 WorldTracker.shared.startInputStream()
             case ALVR_EVENT_STREAMING_STOPPED.rawValue:
                 print("streaming stopped")
                 WorldTracker.inputGate.streamStopped()
+                EventHandler.videoStreams.streamStopped()
                 if streamingActive {
                     streamingActive = false
                     stop()
@@ -1051,4 +1070,8 @@ struct QueuedFrame {
     let timestamp: UInt64
     let viewParamsValid: Bool
     let viewParams: [AlvrViewParams]
+    // Format description of the stream the frame was decoded for (VideoHandler.streamColourState).
+    let videoFormat: CMFormatDescription?
+    // That stream's context (decision 63e (2)); nil for a frame fed before any stream started.
+    let stream: StreamContext?
 }

@@ -330,16 +330,16 @@ enum ColourPipelineTests {
         expect(ColourPipeline.select(primaries: nil, transfer: nil, matrix: nil, fullRange: true, bitDepth: 8).fullRange, "full range flag")
         expectEqual(ColourPipeline.select(primaries: nil, transfer: nil, matrix: nil, fullRange: nil, bitDepth: nil).bitDepth, 8, "absent bit depth -> 8")
 
-        // Transfers: SDR transfers convert the gamut in linear light (when the output primaries differ); PQ/HLG keep
-        // the previous (identity) behaviour.
+        // Transfers: SDR transfers and PQ convert the gamut in linear light (when the output primaries differ); HLG
+        // keeps the previous (identity) behaviour. PQ matrices: tests/swift/HDRPipelineTests.swift.
         expectEqual(ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8).transfer, .sRGB, "sRGB transfer")
         expectEqual(ColourPipeline.select(primaries: nil, transfer: "ITU_R_709_2", matrix: nil, fullRange: true, bitDepth: 8).transfer, .bt709, "709 transfer")
         let pq = ColourPipeline.select(primaries: "ITU_R_2020", transfer: "SMPTE_ST_2084_PQ", matrix: "ITU_R_2020", fullRange: false, bitDepth: 10)
         expectEqual(pq.transfer, .pq, "PQ transfer")
-        expect(!pq.convertsGamut, "PQ path does not convert gamut")
-        expect(pq.sourceToOutput == matrix_identity_float3x3, "PQ gamut matrix is identity")
+        expect(pq.convertsGamut, "PQ path converts BT.2020 to the output primaries")
         let pqP3 = ColourPipeline.select(primaries: "ITU_R_2020", transfer: "SMPTE_ST_2084_PQ", matrix: "ITU_R_2020", fullRange: false, bitDepth: 10, output: .p3)
-        expect(!pqP3.convertsGamut, "PQ path does not convert gamut with P3 output either")
+        expect(pqP3.convertsGamut, "PQ path converts BT.2020 to P3 output")
+        expect(!ColourPipeline.select(primaries: nil, transfer: "ITU_R_2100_HLG", matrix: nil, fullRange: true, bitDepth: 10).convertsGamut, "HLG path does not convert gamut")
         expectEqual(ColourPipeline.select(primaries: nil, transfer: "ITU_R_2100_HLG", matrix: nil, fullRange: true, bitDepth: 10).transfer, .hlg, "HLG transfer")
         expect(ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8, output: .p3).convertsGamut, "sRGB transfer converts gamut to P3")
         expect(ColourPipeline.select(primaries: "P3_D65", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8, output: .p3).sourceToOutput == matrix_identity_float3x3, "P3 source -> P3 identity")

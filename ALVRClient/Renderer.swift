@@ -106,9 +106,10 @@ class Renderer {
     var metalTextureCache: CVMetalTextureCache!
     let mtlVertexDescriptor: MTLVertexDescriptor
     let mtlVertexDescriptorNoUV: MTLVertexDescriptor
-    var videoFramePipelineState_YpCbCrBiPlanar: MTLRenderPipelineState!
-    var videoFramePipelineState_SecretYpCbCrFormats: MTLRenderPipelineState!
-    var videoFrameDepthPipelineState: MTLRenderPipelineState!
+    // Video frame pipelines (explicit planes, private formats), published with the stream colour state and generation
+    // they were built for (decisions 63c (4), 63e (3)); a frame draws only with pipelines built for its own state.
+    let videoFramePipelines = VideoPipelineSlot<FoveationVars?, (biplanar: MTLRenderPipelineState, secret: MTLRenderPipelineState)>(gate: EventHandler.videoStreams)
+var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var fullscreenQuadBuffer:MTLBuffer!
     var unitVectorXYZBuffer:MTLBuffer!
     /// Steam Controller body wireframe. Built on first use rather than at init,
@@ -137,7 +138,6 @@ class Renderer {
     var hudQuadBuffer: MTLBuffer!
     var depthStateAlwaysNoWrite: MTLDepthStencilState!
     var performanceHudRenderer: PerformanceHudRenderer?
-    var encodingGamma: Float = 1.0
     var lastReconfigureTime: Double = 0.0
     
     var drawPlanesWithInformedColors: Bool = false
@@ -157,8 +157,8 @@ class Renderer {
     // Opt-in deadline-budgeted frame selection (UserDefaults ALVRDeadlineSelect); off keeps the 5 ms poll.
     let deadlineSelect = UserDefaults.standard.bool(forKey: FramePacing.defaultsKey)
     let gpuTimes = GpuTimeEstimator()
-    var currentYuvTransform: simd_float4x4 = matrix_identity_float4x4
-    var currentGamutTransform: simd_float3x3 = matrix_identity_float3x3
+    var lastVideoPipelineRequestTime: Double = 0.0
+    var loggedPQBindFailures = Set<OSType>()
     
     // Was curious if it improved; it's still juddery.
     var useApplesReprojection = false
@@ -197,7 +197,6 @@ class Renderer {
 #endif
         }
 
-        encodingGamma = EventHandler.shared.encodingGamma
         hdrEnabled = EventHandler.shared.enableHdr
         if hdrEnabled {
             currentRenderColorFormat = renderColorFormatHDR
@@ -207,7 +206,7 @@ class Renderer {
             currentRenderColorFormat = renderColorFormatSDR
             currentDrawableRenderColorFormat = renderColorFormatSDR
         }
-        
+
         self.device = layerRenderer?.device ?? MTLCreateSystemDefaultDevice()!
         self.commandQueue = self.device.makeCommandQueue()!
 
@@ -294,7 +293,6 @@ class Renderer {
     func rebuildRenderPipelines() {
         print("rebuildRenderPipelines")
 
-        encodingGamma = EventHandler.shared.encodingGamma
         hdrEnabled = EventHandler.shared.enableHdr
         if hdrEnabled {
             currentRenderColorFormat = renderColorFormatHDR
@@ -317,30 +315,19 @@ class Renderer {
         // until used, and the first IPD report after streaming goes active
         // re-enters this function (see the `lastIpd == -1` branch in
         // renderFrame) and builds them for real.
-        guard let settings = Settings.getAlvrSettings(),
-              let streamEvent = EventHandler.shared.streamEvent else {
+        guard Settings.getAlvrSettings() != nil, EventHandler.shared.streamEvent != nil else {
             print("rebuildRenderPipelines: no stream yet, deferring video pipelines")
             return
         }
 
-        let foveationVars = FFR.calculateFoveationVars(alvrEvent: streamEvent.STREAMING_STARTED, foveationSettings: settings.video.foveated_encoding)
-        videoFramePipelineState_YpCbCrBiPlanar = try! buildRenderPipelineForVideoFrameWithDevice(
-                            device: device,
-                            mtlVertexDescriptor: mtlVertexDescriptor,
-                            colorFormat: layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat,
-                            viewCount: layerRenderer?.properties.viewCount ?? renderViewCount,
-                            foveationVars: foveationVars,
-                            variantName: "YpCbCrBiPlanar"
-        )
-        videoFramePipelineState_SecretYpCbCrFormats = try! buildRenderPipelineForVideoFrameWithDevice(
-                            device: device,
-                            mtlVertexDescriptor: mtlVertexDescriptor,
-                            colorFormat: layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat,
-                            viewCount: layerRenderer?.properties.viewCount ?? renderViewCount,
-                            foveationVars: foveationVars,
-                            variantName: "SecretYpCbCrFormats"
-        )
-        
+        // Both variants are built from one snapshot of one stream generation (decision 63e (3)): the requested colour
+        // state (with that stream's encoding gamma and headroom) and the foveation captured at its STREAMING_STARTED.
+        // A build that finishes after the stream stopped or restarted is discarded by publish. None is requested
+        // until the first frame (its bind requests one).
+        if let inputs = videoFramePipelines.buildInputs() {
+            buildVideoFramePipelines(colour: inputs.colour, foveationVars: inputs.payload)
+        }
+
         do {
             pipelineState = try Renderer.buildRenderPipelineWithDevice(device: device,
                                                                        mtlVertexDescriptor: mtlVertexDescriptor,
@@ -352,7 +339,7 @@ class Renderer {
         } catch {
             fatalError("Unable to compile render pipeline state.  Error info: \(error)")
         }
-        
+
         self.videoFrameDepthPipelineState = try! Renderer.buildRenderPipelineForVideoFrameDepthWithDevice(
                 device: self.device,
                 mtlVertexDescriptor: self.mtlVertexDescriptor,
@@ -360,6 +347,35 @@ class Renderer {
                 depthFormat: layerRenderer?.configuration.depthFormat ?? renderDepthFormat,
                 viewCount: layerRenderer?.properties.viewCount ?? renderViewCount
         )
+    }
+
+    // Both video variants from one generation's snapshot (rebuildRenderPipelines), published together with it.
+    private func buildVideoFramePipelines(colour: StreamColourState, foveationVars: FoveationVars?) {
+        guard let foveationVars else {
+            print("rebuildRenderPipelines: stream \(colour.stream.generation) started without settings, no video pipelines")
+            return
+        }
+        let biplanar = try! buildRenderPipelineForVideoFrameWithDevice(
+                            device: device,
+                            mtlVertexDescriptor: mtlVertexDescriptor,
+                            colorFormat: layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat,
+                            viewCount: layerRenderer?.properties.viewCount ?? renderViewCount,
+                            foveationVars: foveationVars,
+                            colour: colour,
+                            variantName: "YpCbCrBiPlanar"
+        )
+        let secret = try! buildRenderPipelineForVideoFrameWithDevice(
+                            device: device,
+                            mtlVertexDescriptor: mtlVertexDescriptor,
+                            colorFormat: layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat,
+                            viewCount: layerRenderer?.properties.viewCount ?? renderViewCount,
+                            foveationVars: foveationVars,
+                            colour: colour,
+                            variantName: "SecretYpCbCrFormats"
+        )
+        if !videoFramePipelines.publish((biplanar, secret), builtFor: colour) {
+            print("rebuildRenderPipelines: discarded video pipelines for stream \(colour.stream.generation) (stale)")
+        }
     }
 
     // Vertex descriptor with float3 position and float2 UVs
@@ -521,12 +537,24 @@ class Renderer {
         return try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
     
+    // True when a video pipeline build should start for the frame's colour state: the state changed, or its build has
+    // not been published within 1 s (a rebuild deferred before the stream existed).
+    func videoPipelinesNeedBuild(for colour: StreamColourState) -> Bool {
+        let now = CACurrentMediaTime()
+        if videoFramePipelines.request(colour) || (videoFramePipelines.pipelines(for: colour) == nil && now - lastVideoPipelineRequestTime > 1.0) {
+            lastVideoPipelineRequestTime = now
+            return true
+        }
+        return false
+    }
+
     // Video frame renderer, incl my own YCbCr stage and/or Apple's 48 private YCbCr texture formats.
     func buildRenderPipelineForVideoFrameWithDevice(device: MTLDevice,
                                                           mtlVertexDescriptor: MTLVertexDescriptor,
                                                           colorFormat: MTLPixelFormat,
                                                           viewCount: Int,
                                                           foveationVars: FoveationVars,
+                                                          colour: StreamColourState,
                                                           variantName: String) throws -> MTLRenderPipelineState {
         
 
@@ -549,14 +577,23 @@ class Renderer {
         fragmentConstants.setConstantValue(&chromaKeyColorLinear, type: .float3, index: ALVRFunctionConstant.chromaKeyColor.rawValue)
         fragmentConstants.setConstantValue(&chromaKeyLerpDistRange, type: .float2, index: ALVRFunctionConstant.chromaKeyLerpDistRange.rawValue)
         fragmentConstants.setConstantValue(&isRealityKit, type: .bool, index: ALVRFunctionConstant.realityKitEnabled.rawValue)
+        var encodingGamma = colour.encodingGamma
         fragmentConstants.setConstantValue(&encodingGamma, type: .float, index: ALVRFunctionConstant.encodingGamma.rawValue)
-        fragmentConstants.setConstantValue(&currentYuvTransform.columns.0, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform0.rawValue)
-        fragmentConstants.setConstantValue(&currentYuvTransform.columns.1, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform1.rawValue)
-        fragmentConstants.setConstantValue(&currentYuvTransform.columns.2, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform2.rawValue)
-        fragmentConstants.setConstantValue(&currentYuvTransform.columns.3, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform3.rawValue)
-        fragmentConstants.setConstantValue(&currentGamutTransform.columns.0, type: .float3, index: ALVRFunctionConstant.gamutToOutput_0.rawValue)
-        fragmentConstants.setConstantValue(&currentGamutTransform.columns.1, type: .float3, index: ALVRFunctionConstant.gamutToOutput_1.rawValue)
-        fragmentConstants.setConstantValue(&currentGamutTransform.columns.2, type: .float3, index: ALVRFunctionConstant.gamutToOutput_2.rawValue)
+        var yuvTransform = colour.yuvToRGB
+        var gamutTransform = colour.gamutToOutput
+        var hdrPQ = colour.hdrPQ
+        fragmentConstants.setConstantValue(&yuvTransform.columns.0, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform0.rawValue)
+        fragmentConstants.setConstantValue(&yuvTransform.columns.1, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform1.rawValue)
+        fragmentConstants.setConstantValue(&yuvTransform.columns.2, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform2.rawValue)
+        fragmentConstants.setConstantValue(&yuvTransform.columns.3, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform3.rawValue)
+        fragmentConstants.setConstantValue(&gamutTransform.columns.0, type: .float3, index: ALVRFunctionConstant.gamutToOutput_0.rawValue)
+        fragmentConstants.setConstantValue(&gamutTransform.columns.1, type: .float3, index: ALVRFunctionConstant.gamutToOutput_1.rawValue)
+        fragmentConstants.setConstantValue(&gamutTransform.columns.2, type: .float3, index: ALVRFunctionConstant.gamutToOutput_2.rawValue)
+        var hdrPQScale = Float(10000 / HDRPipeline.referenceWhiteNits)
+        var headroom = colour.headroom
+        fragmentConstants.setConstantValue(&hdrPQ, type: .bool, index: ALVRFunctionConstant.hdrPQ.rawValue)
+        fragmentConstants.setConstantValue(&hdrPQScale, type: .float, index: ALVRFunctionConstant.hdrPQScale.rawValue)
+        fragmentConstants.setConstantValue(&headroom, type: .float, index: ALVRFunctionConstant.edrHeadroom.rawValue)
 
         let fragmentFunction = try library?.makeFunction(name: "videoFrameFragmentShader_" + variantName, constantValues: fragmentConstants)
 
@@ -837,7 +874,7 @@ class Renderer {
         
         if queuedFrame != nil && !queuedFrame!.viewParamsValid /*&& EventHandler.shared.lastSubmittedTimestamp != queuedFrame!.timestamp*/ {
             alvr_report_compositor_start(queuedFrame!.timestamp, nalViewsPtr)
-            queuedFrame = QueuedFrame(imageBuffer: queuedFrame!.imageBuffer, timestamp: queuedFrame!.timestamp, viewParamsValid: true, viewParams: [nalViewsPtr[0], nalViewsPtr[1]])
+            queuedFrame = QueuedFrame(imageBuffer: queuedFrame!.imageBuffer, timestamp: queuedFrame!.timestamp, viewParamsValid: true, viewParams: [nalViewsPtr[0], nalViewsPtr[1]], videoFormat: queuedFrame!.videoFormat, stream: queuedFrame!.stream)
         }
 
         if EventHandler.shared.alvrInitialized && streamingActiveForFrame {
@@ -898,28 +935,18 @@ class Renderer {
                 EventHandler.shared.sendRealViewParams(ipd: ipd)
             }
             
+            // Encoding gamma travels with the stream's colour state (a new stream is a new state, so it rebuilds below).
             var needsPipelineRebuild = false
-            if EventHandler.shared.encodingGamma != encodingGamma {
-                needsPipelineRebuild = true
-            }
-            
+
             if CACurrentMediaTime() - lastReconfigureTime > 1.0 && (settings.chromaKeyEnabled != chromaKeyEnabled || settings.chromaKeyColorR != chromaKeyColor.x || settings.chromaKeyColorG != chromaKeyColor.y || settings.chromaKeyColorB != chromaKeyColor.z || settings.chromaKeyDistRangeMin != chromaKeyLerpDistRange.x || settings.chromaKeyDistRangeMax != chromaKeyLerpDistRange.y) {
                 lastReconfigureTime = CACurrentMediaTime()
                 needsPipelineRebuild = true
             }
             
-            if let videoFormat = EventHandler.shared.videoFormat {
-                let colour = VideoHandler.getColourSelectionForVideoFormat(videoFormat)
-                let nextYuvTransform = colour.yuvToRGB
-                if nextYuvTransform != currentYuvTransform {
-                    needsPipelineRebuild = true
-                }
-                currentYuvTransform = nextYuvTransform
-                let nextGamutTransform = colour.sourceToOutput
-                if nextGamutTransform != currentGamutTransform {
-                    needsPipelineRebuild = true
-                }
-                currentGamutTransform = nextGamutTransform
+            // Any change of the frame's colour state (yuv, gamut, PQ) rebuilds; until the matching pipelines are
+            // published the frame is not drawn (beginRenderStreamingFrame).
+            if let queuedFrame, let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit), videoPipelinesNeedBuild(for: colour) {
+                needsPipelineRebuild = true
             }
 
             if needsPipelineRebuild {
@@ -1808,20 +1835,43 @@ class Renderer {
         let pixelBuffer = queuedFrame.imageBuffer
         let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let formatStr = VideoHandler.coreVideoPixelFormatToStr[format, default: "unknown"]
-        VideoHandler.boundPixelFormat = format
-        if let videoFormat = EventHandler.shared.videoFormat {
-            VideoHandler.logColourSelectionOnce(videoFormat: videoFormat, pixelFormat: format)
+        // The frame's own colour state and the pipelines built for exactly it (decision 63c (4)); otherwise request
+        // them and skip this frame rather than draw it with another state's constants. PQ in a format with no raw
+        // plane binding is dropped (decision 63e (1), logged once by VideoHandler).
+        guard let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit), !colour.dropFrames else {
+            renderEncoder.endEncoding()
+            return nil
+        }
+        guard let pipelines = videoFramePipelines.pipelines(for: colour) else {
+            if videoPipelinesNeedBuild(for: colour) {
+                let rebuildThread = Thread {
+                    self.rebuildRenderPipelines()
+                }
+                rebuildThread.name = "Rebuild Render Pipelines Thread"
+                rebuildThread.start()
+            }
+            renderEncoder.endEncoding()
+            return nil
         }
 
-        if VideoHandler.isFormatSecret(format) {
-            renderEncoder.setRenderPipelineState(videoFramePipelineState_SecretYpCbCrFormats)
+        // PQ: raw normalised planes of the frame's own depth on the explicit (PQ) shader, never a private *_sRGB
+        // format (decision 63e (1)). SDR: bound as before.
+        let textureTypes: [MTLPixelFormat]
+        switch colour.binding {
+        case .explicitPlanes(let bits):
+            renderEncoder.setRenderPipelineState(pipelines.biplanar)
+            textureTypes = bits == 8 ? [MTLPixelFormat.r8Unorm, MTLPixelFormat.rg8Unorm] : [MTLPixelFormat.r16Unorm, MTLPixelFormat.rg16Unorm]
+        case .decoderDefault, .drop:
+            if VideoHandler.isFormatSecret(format) {
+                renderEncoder.setRenderPipelineState(pipelines.secret)
+            }
+            else {
+                renderEncoder.setRenderPipelineState(pipelines.biplanar)
+            }
+            textureTypes = VideoHandler.getTextureTypesForFormat(format)
         }
-        else {
-            renderEncoder.setRenderPipelineState(videoFramePipelineState_YpCbCrBiPlanar)
-        }
-        
+
         //print("Pixel format \(formatStr) (\(format))")
-        let textureTypes = VideoHandler.getTextureTypesForFormat(CVPixelBufferGetPixelFormatType(pixelBuffer))
         StreamTelemetry.shared.noteDecoderOutput(pixelFormat: format, lumaTextureFormat: textureTypes[0].rawValue, chromaTextureFormat: textureTypes[1].rawValue, name: formatStr)
 
         for i in 0...1 {
@@ -1838,6 +1888,15 @@ class Renderer {
                     nil, metalTextureCache, pixelBuffer, nil, textureTypes[i],
                     width, height, i, &textureOut);
             
+            if err != 0, colour.hdrPQ {
+                // A PQ plane the cache cannot expose raw: drop the frame rather than draw it another way.
+                if !loggedPQBindFailures.contains(format) {
+                    loggedPQBindFailures.insert(format)
+                    print("ALVRCOLOUR pq_dropped pixel_format=\(ColourPipeline.fourCC(format)) plane=\(i) err=\(err): raw plane binding failed, frames dropped")
+                }
+                renderEncoder.endEncoding()
+                return nil
+            }
             if err != 0 {
                 fatalError("CVMetalTextureCacheCreateTextureFromImage \(err)")
             }
@@ -1848,6 +1907,9 @@ class Renderer {
                 print("NO COMPRESSION ON VT FRAME!!!! AAAAAAAAA go file feedback again :(")
             }
             renderEncoder.setFragmentTexture(metalTexture, index: i)
+        }
+        if HDRProbe.enabled {
+            HDRProbe.shared.sample(pixelBuffer: pixelBuffer, colour: colour)
         }
         
         // Snoop for pixel formats

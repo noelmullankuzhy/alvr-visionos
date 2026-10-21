@@ -167,9 +167,7 @@ public extension LayerRenderer.Drawable {
             // TODO: make this work
             //let renderTangents: [simd_float4] = [simd_float4(1.73205, 1.0, 1.0, 1.19175), simd_float4(1.0, 1.73205, 1.0, 1.19175)]
             //return renderTangents[viewIndex]
-            let res = self._extractFrustumTangents(mat)
-            print("tangents", res)
-            return res
+            return self._extractFrustumTangents(mat)
         }
         else {
             return self.views[viewIndex].tangents

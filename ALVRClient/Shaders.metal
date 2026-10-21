@@ -9,6 +9,8 @@
 
 // Including header shared between this Metal shader code and Swift/C code executing Metal API commands
 #import "ShaderTypes.h"
+// Video colour conversion (sRGB EOTF, encoding gamma, ST 2084, EDR roll-off), shared with the macOS GPU golden test
+#include "VideoColour.h"
 
 using namespace metal;
 
@@ -125,6 +127,11 @@ constant float4 ENCODING_YUV_TRANSFORM_3 [[ function_constant(ALVRFunctionConsta
 constant float3 GAMUT_TO_OUTPUT_0 [[ function_constant(ALVRFunctionConstantGamutToOutput_0) ]];
 constant float3 GAMUT_TO_OUTPUT_1 [[ function_constant(ALVRFunctionConstantGamutToOutput_1) ]];
 constant float3 GAMUT_TO_OUTPUT_2 [[ function_constant(ALVRFunctionConstantGamutToOutput_2) ]];
+// PQ (SMPTE ST 2084) stream, HDRPipeline.swift: HDR_PQ_SCALE = 10000 / reference white nits, so PQ reference white is
+// EDR 1.0; EDR_HEADROOM is the roll-off target (assumed: visionOS has no headroom query, see HDRPipeline.swift).
+constant bool HDR_PQ [[ function_constant(ALVRFunctionConstantHdrPQ) ]];
+constant float HDR_PQ_SCALE [[ function_constant(ALVRFunctionConstantHdrPQScale) ]];
+constant float EDR_HEADROOM [[ function_constant(ALVRFunctionConstantEdrHeadroom) ]];
 
 float2 TextureToEyeUV(float2 textureUV, bool isRightEye) {
     // flip distortion horizontally for right eye
@@ -227,28 +234,6 @@ vertex ColorInOut videoFrameVertexShader(ushort vertexID [[vertex_id]],
     return videoFrameVertexShaderCommon(vertexID, which, uniforms.projectionMatrix, uniforms.modelViewMatrixFrame, uniforms.tangents);
 }
 
-// sRGB EOTF extended to negative and >1 inputs by odd symmetry (as extended sRGB does): f(-x) = -f(x).
-// Out-of-range values come from limited-range codes outside 64..940 and 4:2:0 chroma at saturated edges; they stay
-// unclipped, and pow only ever sees non-negative bases, so no NaN reaches the gamut matrix.
-// Mirrored by ColourPipeline.srgbEOTF (tests/swift/ColourPipelineTests.swift).
-float3 NonlinearToLinearRGB(float3 color) {
-    const float DIV12 = 1. / 12.92;
-    const float DIV1 = 1. / 1.055;
-    const float THRESHOLD = 0.04045;
-    const float3 GAMMA = float3(2.4);
-
-    float3 magnitude = abs(color);
-    float3 lowValues = magnitude * DIV12;
-    float3 highValues = pow((magnitude + 0.055) * DIV1, GAMMA);
-    return sign(color) * select(highValues, lowValues, magnitude < THRESHOLD);
-}
-
-// Inverse of the server's encoding gamma, odd-symmetric like the EOTF above (pow on |x| only).
-// Mirrored by ColourPipeline.encodingGammaToLinear.
-float3 EncodingNonlinearToLinearRGB(float3 color, float gamma) {
-    return sign(color) * pow(abs(color), float3(gamma));
-}
-
 half colorclose_hsv(half3 hsv, half3 keyHsv, half2 tol)
 {
     // Saturation or value too low, don't consider it at all.
@@ -291,15 +276,20 @@ half3 rgb2hsv(half3 rgb) {
 
 // color_in: sRGB-EOTF-decoded RGB in the stream's primaries, still carrying the server's encoding gamma.
 // All maths in float; half only for the chroma-key mask and the final write.
+half4 videoFrameFragmentShader_output(float3 linearSource);
+
 half4 videoFrameFragmentShader_common(float3 color_in) {
     float3 linearSource = EncodingNonlinearToLinearRGB(color_in, ENCODING_GAMMA);
-    float3 color = linearSource;
-    // Output primaries follow ColourOutput: extended linear sRGB by default (measured in the simulator), Display P3
-    // opt-in. RealityKit's interpretation of its texture is UNVERIFIED, so that path keeps the unconverted output.
-    if (!REALITYKIT_ENABLED) {
-        const float3x3 gamutToOutput = float3x3(GAMUT_TO_OUTPUT_0, GAMUT_TO_OUTPUT_1, GAMUT_TO_OUTPUT_2);
-        color = gamutToOutput * linearSource;
-    }
+    return videoFrameFragmentShader_output(linearSource);
+}
+
+// linearSource: linear light in the stream's primaries (EDR units for PQ: 1.0 = reference white).
+half4 videoFrameFragmentShader_output(float3 linearSource) {
+    // SDR output primaries follow ColourOutput: extended linear sRGB by default (measured in the simulator), Display P3
+    // opt-in. RealityKit's interpretation of its texture is UNVERIFIED, so that path keeps the unconverted output for
+    // SDR. PQ is always converted to extended linear Display P3 (decision 63c); on RealityKit that is UNPROVEN.
+    const float3x3 gamutToOutput = float3x3(GAMUT_TO_OUTPUT_0, GAMUT_TO_OUTPUT_1, GAMUT_TO_OUTPUT_2);
+    float3 color = VideoLinearToOutput(linearSource, gamutToOutput, !REALITYKIT_ENABLED || HDR_PQ, HDR_PQ, EDR_HEADROOM);
 
     half4 colorOut = half4(half3(color), 1.0);
     if (CHROMAKEY_ENABLED) {
@@ -347,10 +337,8 @@ fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]
         ENCODING_YUV_TRANSFORM_3
     );
 
-    float3 rgb_uncorrect = (transform * ycbcr).rgb;
-    float3 color = NonlinearToLinearRGB(rgb_uncorrect);
-
-    return videoFrameFragmentShader_common(color);
+    // SDR: sRGB EOTF and encoding gamma; PQ: ST 2084 -> EDR (VideoColour.h).
+    return videoFrameFragmentShader_output(VideoYCbCrToLinear(ycbcr, transform, HDR_PQ, HDR_PQ_SCALE, ENCODING_GAMMA));
 }
 
 // Private (*_sRGB) YCbCr texture formats: the sampler itself applies YCbCr->RGB (matrix/range from the buffer, by the

@@ -168,7 +168,15 @@ struct VideoHandler {
         //}
         
         let videoDecoderSpecification:[NSString: AnyObject] = [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder:kCFBooleanTrue]
-        let destinationImageBufferAttributes:[NSString: AnyObject] = [kCVPixelBufferMetalCompatibilityKey: true as NSNumber, kCVPixelBufferPoolMinimumBufferCountKey: 3 as NSNumber]
+        var destinationImageBufferAttributes:[NSString: AnyObject] = [kCVPixelBufferMetalCompatibilityKey: true as NSNumber, kCVPixelBufferPoolMinimumBufferCountKey: 3 as NSNumber]
+        // PQ: request uncompressed 10-bit biplanar output, so the explicit shader path decodes PQ (the private *_sRGB
+        // samplers would apply the sRGB EOTF) and HDRProbe can read the codes. Costs a copy; SDR streams are untouched.
+        // The decoder may ignore the request: streamColourState checks every frame's actual format (8-bit planes are
+        // still PQ-converted, other formats dropped).
+        if HDRPipeline.requiresExplicitPlanes(transfer: videoFormat!.extensions[kCMFormatDescriptionExtension_TransferFunction] as? String) {
+            let pixelFormat = getIsFullRangeForVideoFormat(videoFormat!) ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            destinationImageBufferAttributes[kCVPixelBufferPixelFormatTypeKey] = pixelFormat as NSNumber
+        }
         // TODO come back to this maybe idk
         //if pixelFormat != nil {
         //    destinationImageBufferAttributes[kCVPixelBufferPixelFormatTypeKey] = pixelFormat! as NSNumber
@@ -821,7 +829,7 @@ struct VideoHandler {
         }
     }
     private static var loggedUnknownFormats = Set<OSType>()
-    
+
     static func isFormatSecret(_ format: OSType) -> Bool
     {
         switch(format) {
@@ -871,32 +879,46 @@ struct VideoHandler {
     }
     
     // Primaries, transfer, matrix, range and bit depth, each read from its own format description extension.
-    // The YCbCr matrix's code depth follows the planes actually bound (boundPixelFormat), not BitsPerComponent.
-    // Cached per (format description, pixel format) so the per-frame callers do not rebuild it.
-    static func getColourSelectionForVideoFormat(_ videoFormat: CMFormatDescription) -> ColourSelection {
-        let pixelFormat = boundPixelFormat
-        if let cached = cachedColourSelection, cached.videoFormat === videoFormat, cached.pixelFormat == pixelFormat {
-            return cached.selection
-        }
+    // The YCbCr matrix's code depth follows the planes the frame's own pixel format binds at, not BitsPerComponent.
+    static func getColourSelectionForVideoFormat(_ videoFormat: CMFormatDescription, planeBitDepth: Int?, output: ColourOutput) -> ColourSelection {
         let exts = videoFormat.extensions
         func string(_ key: CFString) -> String? { (exts[key] as? NSString).map { $0 as String } }
         func number(_ key: CFString) -> NSNumber? { exts[key] as? NSNumber }
-        let selection = ColourPipeline.select(
+        return ColourPipeline.select(
             primaries: string(kCMFormatDescriptionExtension_ColorPrimaries),
             transfer: string(kCMFormatDescriptionExtension_TransferFunction),
             matrix: string(kCMFormatDescriptionExtension_YCbCrMatrix),
             fullRange: number(kCMFormatDescriptionExtension_FullRangeVideo).map { $0.boolValue },
             bitDepth: number(kCMFormatDescriptionExtension_BitsPerComponent)?.intValue,
-            planeBitDepth: pixelFormat.flatMap(getPlaneBitDepthForFormat),
-            output: colourOutput)
-        cachedColourSelection = (videoFormat, pixelFormat, selection)
-        return selection
+            planeBitDepth: planeBitDepth,
+            output: output)
     }
-    // Drawable primaries policy, read once per launch: extended linear sRGB unless ALVRDisplayP3Output is set.
+    // Drawable primaries policy for SDR, read once per launch: extended linear sRGB unless ALVRDisplayP3Output is set.
     static let colourOutput = ColourOutput(displayP3Default: UserDefaults.standard.bool(forKey: ColourOutput.displayP3DefaultsKey))
-    // Pixel format of the decoded buffer the renderer last bound; nil until the first frame.
-    static var boundPixelFormat: OSType? = nil
-    private static var cachedColourSelection: (videoFormat: CMFormatDescription, pixelFormat: OSType?, selection: ColourSelection)? = nil
+
+    // Colour state of the frame's own stream: its format description, its decoded buffer's actual pixel format (the
+    // decoder may ignore the explicit 10-bit request) and the stream context captured at STREAMING_STARTED (decision
+    // 63e (2): no UI setting is read here). Cached per (stream, format description, pixel format, renderer) under a
+    // lock; renderer threads only read the immutable result. nil for a frame decoded before any stream started.
+    static func streamColourState(for frame: QueuedFrame, realityKit: Bool) -> StreamColourState? {
+        guard let videoFormat = frame.videoFormat, let stream = frame.stream else { return nil }
+        let pixelFormat = CVPixelBufferGetPixelFormatType(frame.imageBuffer)
+        colourStateLock.lock()
+        defer { colourStateLock.unlock() }
+        if let cached = cachedColourState, cached.stream == stream, cached.videoFormat === videoFormat, cached.pixelFormat == pixelFormat, cached.realityKit == realityKit {
+            return cached.state
+        }
+        let transfer = videoFormat.extensions[kCMFormatDescriptionExtension_TransferFunction] as? String
+        // PQ binds raw planes of any depth or nothing (decision 63e (1)); SDR binds as before.
+        let planeBitDepth = HDRPipeline.requiresExplicitPlanes(transfer: transfer) ? HDRPipeline.pqPlaneBitDepth(pixelFormat: pixelFormat) : getPlaneBitDepthForFormat(pixelFormat)
+        let state = StreamColourState(selection: getColourSelectionForVideoFormat(videoFormat, planeBitDepth: planeBitDepth, output: stream.output),
+                                      planeBitDepth: planeBitDepth, stream: stream, realityKit: realityKit)
+        cachedColourState = (stream, videoFormat, pixelFormat, realityKit, state)
+        logColourState(state, pixelFormat: pixelFormat)
+        return state
+    }
+    private static let colourStateLock = NSLock()
+    private static var cachedColourState: (stream: StreamContext, videoFormat: CMFormatDescription, pixelFormat: OSType, realityKit: Bool, state: StreamColourState)? = nil
 
     // Code depth of the planes getTextureTypesForFormat binds: r8Unorm holds 8-bit codes, r16Unorm the CV 10-bit
     // biplanar formats (10 bits in the MSBs of 16). nil for the private formats, whose sampler does its own YCbCr.
@@ -908,27 +930,30 @@ struct VideoHandler {
         }
     }
 
-    static func getYUVTransformForVideoFormat(_ videoFormat: CMFormatDescription) -> simd_float4x4 {
-        return getColourSelectionForVideoFormat(videoFormat).yuvToRGB
-    }
-
-    // One `ALVRCOLOUR ...` line whenever the stream's colour selection or the shader path changes.
+    // One `ALVRCOLOUR ...` line whenever the stream's colour state or the shader path changes (under colourStateLock),
+    // so the PQ precision warning and the dropped-frames line are logged once per stream and format.
     private static var lastColourLogLine: String? = nil
-    private static var lastColourLogKey: (CMFormatDescription, OSType)? = nil
-    static func logColourSelectionOnce(videoFormat: CMFormatDescription, pixelFormat: OSType) {
-        if let key = lastColourLogKey, key.0 === videoFormat, key.1 == pixelFormat {
-            return
+    private static func logColourState(_ state: StreamColourState, pixelFormat: OSType) {
+        let path: String
+        switch state.binding {
+        case .drop: path = "dropped"
+        case .explicitPlanes: path = "explicit"
+        case .decoderDefault: path = isFormatSecret(pixelFormat) ? "secret" : "explicit"
         }
-        lastColourLogKey = (videoFormat, pixelFormat)
-        let path = isFormatSecret(pixelFormat) ? "secret" : "explicit"
-        let selection = getColourSelectionForVideoFormat(videoFormat)
-        let line = selection.logLine(path: path) + " plane_bits=\(selection.planeBitDepth) pixel_format=\(ColourPipeline.fourCC(pixelFormat))"
+        let hdr = state.hdrPQ ? (state.stream.hdrEnabled ? "pq" : "pq_sdr_range") : state.dropFrames ? "dropped" : "off"
+        let line = state.selection.logLine(path: path) + " plane_bits=\(state.selection.planeBitDepth) pixel_format=\(ColourPipeline.fourCC(pixelFormat)) hdr=\(hdr) stream=\(state.stream.generation)"
         if line != lastColourLogLine {
             lastColourLogLine = line
             print(line)
+            if state.lowPrecisionPQ {
+                print("ALVRCOLOUR pq_8bit pixel_format=\(ColourPipeline.fourCC(pixelFormat)): the decoder returned 8-bit planes for a PQ stream; drawn on the PQ path at reduced precision (banding likely)")
+            }
+            if state.dropFrames {
+                print("ALVRCOLOUR pq_dropped pixel_format=\(ColourPipeline.fourCC(pixelFormat)): no raw plane binding for this PQ format, so its frames are dropped")
+            }
         }
     }
-    
+
     static func currentKeyWindow() -> UIWindow? {
         UIApplication.shared.connectedScenes
             .filter({ $0.activationState == .foregroundActive })

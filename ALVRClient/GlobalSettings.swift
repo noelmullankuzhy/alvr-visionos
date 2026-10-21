@@ -32,6 +32,8 @@ struct GlobalSettings: Codable {
     var chaperoneDistanceCm: Int = 0
     var showPerformanceHud: Bool = false
     var claimControllerHomeButton: Bool = true
+    // Sent as prefer_hdr at ALVR initialisation (GM decision 63); off = SDR request as before.
+    var hdrPQ: Bool = false
     
     init() {}
     
@@ -62,6 +64,7 @@ struct GlobalSettings: Codable {
         self.chaperoneDistanceCm = try container.decodeIfPresent(Int.self, forKey: .chaperoneDistanceCm) ?? self.chaperoneDistanceCm
         self.showPerformanceHud = try container.decodeIfPresent(Bool.self, forKey: .showPerformanceHud) ?? self.showPerformanceHud
         self.claimControllerHomeButton = try container.decodeIfPresent(Bool.self, forKey: .claimControllerHomeButton) ?? self.claimControllerHomeButton
+        self.hdrPQ = try container.decodeIfPresent(Bool.self, forKey: .hdrPQ) ?? self.hdrPQ
     }
 }
 
