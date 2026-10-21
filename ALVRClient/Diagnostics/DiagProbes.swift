@@ -6,7 +6,8 @@
 //   layer's supported colour/depth formats and layouts, the chosen ones, foveation and render quality per configuration.
 // - m5 / m5_view / m5_vrr (Metal renderer, 1 s): per view texture size/array length/slice, viewport, projection
 //   tangents; per rate map screenSize and physicalSize per layer; renderQuality vs configured max (26+).
-// - m6 (1 s): requested vs achieved frame interval, drawable vs predicted presentation, fresh vs repeated, missed.
+// - m6 (1 s): requested vs drawable target interval, target minus predicted presentation (actual photon time
+//   unavailable), fresh/repeated/blank encoded source IDs, GPU end after rendering deadline, callback after target.
 // - m9 (5 s): thermal state, os_proc_available_memory, phys_footprint, Metal allocation and working set, GPU p50/p95.
 // An API the running OS lacks is logged as "unavailable", never estimated.
 //
@@ -112,74 +113,114 @@ enum DiagProbes {
     }
 }
 
-// One per Metal renderer; Renderer creates it only when Diag.isOn.
+// One per Metal renderer; Renderer creates it only when Diag.isOn. The render thread appends to the cadence buffers,
+// checks the schedules and, when one is due, copies plain values; formatting, percentiles and resource queries run
+// in Diag.background.
 final class DiagRenderProbe {
+    private struct ViewSnap {
+        let drawable, view, texture, slice, width, height, arrayLength: Int
+        let format: MTLPixelFormat?
+        let viewport: MTLViewport
+        let tangents: simd_float4
+    }
+
+    private struct MapSnap {
+        let drawable, map: Int
+        let screen: MTLSize
+        let physical: [MTLSize]
+    }
+
     let cadence = DiagCadence()
-    private var lastM5Ms = Int.min
-    private var lastM9Ms = Int.min
+    private let device: MTLDevice
+    private var m5 = DiagSchedule(periodMs: 1000, fireOnFirst: true)
+    private var m6 = DiagSchedule(periodMs: 1000, fireOnFirst: false)
+    private var m9 = DiagSchedule(periodMs: 5000, fireOnFirst: true)
 
-    // Render thread, once per frame after the drawables are queried.
-    func frame(layerRenderer: LayerRenderer, drawables: [LayerRenderer.Drawable], predicted: LayerRenderer.Frame.Timing, fresh: Bool, device: MTLDevice) {
+    init(device: MTLDevice) {
+        self.device = device
+    }
+
+    // Render thread, after the frame's drawables are encoded. sourceId: timestamp of the video frame encoded into
+    // them, nil when no video was drawn (idle, or the frame was rejected).
+    func frame(layerRenderer: LayerRenderer, drawables: [LayerRenderer.Drawable], predicted: LayerRenderer.Frame.Timing, sourceId: UInt64?) {
         guard let main = drawables.first else { return }
-        cadence.frame(presentNs: Self.ns(main.frameTiming.presentationTime), predictedNs: Self.ns(predicted.presentationTime), fresh: fresh)
+        let offset = Int64(Self.ns(LayerRenderer.Clock().now)) - Int64(CACurrentMediaTime() * Double(NSEC_PER_SEC))
+        cadence.frame(targetNs: Self.ns(main.frameTiming.presentationTime), predictedNs: Self.ns(predicted.presentationTime),
+                      sourceId: sourceId, clockOffsetNs: offset)
         let now = Diag.monotonicMs()
-        if let window = cadence.drain(nowMs: now, requestedHz: Double(refreshRate)) {
-            Diag.log("m6", DiagCadence.fields(window))
+        if m6.due(nowMs: now) {
+            let raw = cadence.take()
+            let hz = Double(refreshRate)
+            Diag.background { Diag.log("m6", DiagCadence.fields(DiagCadence.window(raw, requestedHz: hz))) }
         }
-        if now - lastM5Ms >= 1000 || now < lastM5Ms {
-            lastM5Ms = now
-            logDrawables(layerRenderer, drawables)
+        if m5.due(nowMs: now) {
+            snapshotDrawables(layerRenderer, drawables)
         }
-        if now - lastM9Ms >= 5000 || now < lastM9Ms {
-            lastM9Ms = now
-            let gpu = cadence.drainGpu()
-            let available = os_proc_available_memory()
-            Diag.log("m9", ["thermal": Diag.thermalName(ProcessInfo.processInfo.thermalState),
-                            "available_memory": available, "phys_footprint": DiagProbes.physFootprint().map { "\($0)" } ?? "unavailable",
-                            "metal_allocated": device.currentAllocatedSize, "metal_recommended_working_set": device.recommendedMaxWorkingSetSize,
-                            "gpu_p50_ms": gpu.map { $0.p50 as Any } ?? "unavailable", "gpu_p95_ms": gpu.map { $0.p95 as Any } ?? "unavailable"])
+        if m9.due(nowMs: now) {
+            let gpu = cadence.takeGpu()
+            let device = device
+            Diag.background {
+                let summary = DiagStats.summary(gpu)
+                Diag.log("m9", ["thermal": Diag.thermalName(ProcessInfo.processInfo.thermalState),
+                                "available_memory": os_proc_available_memory(), "phys_footprint": DiagProbes.physFootprint().map { "\($0)" } ?? "unavailable",
+                                "metal_allocated": device.currentAllocatedSize, "metal_recommended_working_set": device.recommendedMaxWorkingSetSize,
+                                "gpu_p50_ms": summary.map { $0.p50 as Any } ?? "unavailable", "gpu_p95_ms": summary.map { $0.p95 as Any } ?? "unavailable",
+                                "gpu_samples": gpu.count])
+            }
         }
     }
 
-    // Command buffer completion.
-    func completed(_ commandBuffer: MTLCommandBuffer, vsyncNs: UInt64, completionNs: UInt64) {
-        let gpuNs = commandBuffer.gpuEndTime > commandBuffer.gpuStartTime ? UInt64((commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * Double(NSEC_PER_SEC)) : 0
-        cadence.completed(gpuNs: gpuNs, late: FramePacing.isLate(vsyncNs: vsyncNs, completionNs: completionNs))
+    // Command buffer completion: host-clock GPU times and callback time against the frame's layer-clock deadline/target.
+    func completed(_ commandBuffer: MTLCommandBuffer, renderingDeadline: LayerRenderer.Clock.Instant, targetNs: UInt64, callbackHostNs: UInt64) {
+        cadence.completed(gpuStartHostNs: UInt64(max(commandBuffer.gpuStartTime, 0) * Double(NSEC_PER_SEC)),
+                          gpuEndHostNs: UInt64(max(commandBuffer.gpuEndTime, 0) * Double(NSEC_PER_SEC)),
+                          renderingDeadlineNs: Self.ns(renderingDeadline), targetNs: targetNs, callbackHostNs: callbackHostNs)
     }
 
-    private func logDrawables(_ layerRenderer: LayerRenderer, _ drawables: [LayerRenderer.Drawable]) {
-        var quality = "unavailable"
-        var maxQuality = "unavailable"
+    private func snapshotDrawables(_ layerRenderer: LayerRenderer, _ drawables: [LayerRenderer.Drawable]) {
+        var quality: Float?
+        var maxQuality: Float?
 #if XCODE_BETA_26
         if #available(visionOS 26.0, *) {
-            quality = String(format: "%.3f", layerRenderer.renderQuality.rawValue)
-            maxQuality = String(format: "%.3f", layerRenderer.configuration.maxRenderQuality.rawValue)
+            quality = layerRenderer.renderQuality.rawValue
+            maxQuality = layerRenderer.configuration.maxRenderQuality.rawValue
         }
 #endif
-        Diag.log("m5", ["drawables": drawables.count, "render_quality": quality, "max_render_quality": maxQuality,
-                        "foveation": layerRenderer.configuration.isFoveationEnabled])
+        let foveation = layerRenderer.configuration.isFoveationEnabled
+        var views: [ViewSnap] = []
+        var maps: [MapSnap] = []
         for (d, drawable) in drawables.enumerated() {
             for (v, view) in drawable.views.enumerated() {
                 let map = view.textureMap
                 let texture = Int(map.textureIndex) < drawable.colorTextures.count ? drawable.colorTextures[Int(map.textureIndex)] : nil
-                let vp = map.viewport
-                let t = drawable.gimmeTangents(viewIndex: v)
-                Diag.log("m5_view", ["drawable": d, "view": v, "texture": map.textureIndex, "slice": map.sliceIndex,
-                                     "tex_w": texture?.width ?? 0, "tex_h": texture?.height ?? 0, "tex_array": texture?.arrayLength ?? 0,
-                                     "tex_format": texture.map { DiagProbes.formatName($0.pixelFormat) } ?? "unavailable",
+                views.append(ViewSnap(drawable: d, view: v, texture: Int(map.textureIndex), slice: Int(map.sliceIndex),
+                                      width: texture?.width ?? 0, height: texture?.height ?? 0, arrayLength: texture?.arrayLength ?? 0,
+                                      format: texture?.pixelFormat, viewport: map.viewport, tangents: drawable.gimmeTangents(viewIndex: v)))
+            }
+            for (m, rateMap) in drawable.rasterizationRateMaps.enumerated() {
+                maps.append(MapSnap(drawable: d, map: m, screen: rateMap.screenSize,
+                                    physical: (0..<rateMap.layerCount).map { rateMap.physicalSize(layer: $0) }))
+            }
+        }
+        let drawableCount = drawables.count
+        Diag.background {
+            func q(_ x: Float?) -> Any { x.map { Double($0) as Any } ?? "unavailable" }
+            Diag.log("m5", ["drawables": drawableCount, "render_quality": q(quality), "max_render_quality": q(maxQuality), "foveation": foveation])
+            for s in views {
+                let vp = s.viewport
+                let t = s.tangents
+                Diag.log("m5_view", ["drawable": s.drawable, "view": s.view, "texture": s.texture, "slice": s.slice,
+                                     "tex_w": s.width, "tex_h": s.height, "tex_array": s.arrayLength,
+                                     "tex_format": s.format.map(DiagProbes.formatName) ?? "unavailable",
                                      "viewport": String(format: "%.0f,%.0f,%.0f,%.0f", vp.originX, vp.originY, vp.width, vp.height),
                                      "tangents": String(format: "%.4f,%.4f,%.4f,%.4f", t.x, t.y, t.z, t.w)])
             }
-            for (m, rateMap) in drawable.rasterizationRateMaps.enumerated() {
-                let physical = (0..<rateMap.layerCount).map { layer -> String in
-                    let size = rateMap.physicalSize(layer: layer)
-                    return "\(size.width)x\(size.height)"
-                }
-                Diag.log("m5_vrr", ["drawable": d, "map": m, "screen": "\(rateMap.screenSize.width)x\(rateMap.screenSize.height)",
-                                    "layers": rateMap.layerCount, "physical": physical.joined(separator: ";")])
-            }
-            if drawable.rasterizationRateMaps.isEmpty {
+            for d in 0..<drawableCount where !maps.contains(where: { $0.drawable == d }) {
                 Diag.log("m5_vrr", ["drawable": d, "map": "none"])
+            }
+            for s in maps {
+                Diag.log("m5_vrr", ["drawable": s.drawable, "map": s.map, "screen": "\(s.screen.width)x\(s.screen.height)",
+                                    "layers": s.physical.count, "physical": s.physical.map { "\($0.width)x\($0.height)" }.joined(separator: ";")])
             }
         }
     }

@@ -6,6 +6,9 @@
 // to alvr_log at Info and to Documents/diag/diag-<UTC stamp>.log (a new file before one would pass 20 MB), on a serial
 // queue off the calling thread. Off: no directory, no file, and the fields are never built (autoclosure).
 // Values with spaces, quotes, backslashes, control characters or = are quoted and escaped; keys keep [A-Za-z0-9_.].
+// File errors (e.g. a handle revoked while suspended) drop lines and retry the open each second; the first line
+// after recovery reports how many were dropped. Diag.background runs percentiles, formatting and resource queries
+// on the Diag queue, so render threads only append to bounded buffers (DiagCadence) and check a DiagSchedule.
 // Also the per-second cadence window (M6) and the 5 s GPU window (M9), nearest-rank p50/p95.
 // Foundation-only so it is unit tested on macOS (tests/swift/DiagTests.swift).
 //
@@ -33,6 +36,11 @@ enum Diag {
     static func log(_ topic: String, _ fields: @autoclosure () -> KeyValuePairs<String, Any>) {
         guard let sink else { return }
         sink.write(line(topic: topic, tMs: monotonicMs(), fields: fields()))
+    }
+
+    // Work for the Diag queue (off when Diagnostics is off: never queued).
+    static func background(_ work: @escaping () -> Void) {
+        sink?.async(work)
     }
 
     static func flush() {
@@ -94,72 +102,104 @@ enum Diag {
 }
 
 // File + console sink; all I/O on one serial queue. A file is closed before the next line would pass maxBytes
-// (a longer line goes alone into its own file); a failed open drops file output, the console keeps the lines.
+// (a longer line goes alone into its own file). A failed open or write drops the line and retries the open at most
+// once per retryInterval; the console keeps every line.
 final class DiagSink {
+    static let retryInterval: TimeInterval = 1
     private let queue = DispatchQueue(label: "uk.lumenio.alvr.diag", qos: .utility)
     private let directory: URL
     private let maxBytes: Int
     private let now: () -> Date
     private let console: ((String) -> Void)?
+    private let opener: (String) -> Int32
     private var handle: FileHandle?
     private var written = 0
-    private var fileFailed = false
+    private var retryAt: Date?
+    private var dropped = 0
 
-    init(directory: URL, maxBytes: Int, now: @escaping () -> Date, console: ((String) -> Void)?) {
+    // opener: open(2) with O_CREAT | O_EXCL; replaceable to simulate suspension in tests.
+    init(directory: URL, maxBytes: Int, now: @escaping () -> Date, console: ((String) -> Void)?, opener: ((String) -> Int32)? = nil) {
         self.directory = directory
         self.maxBytes = maxBytes
         self.now = now
         self.console = console
+        self.opener = opener ?? { open($0, O_WRONLY | O_CREAT | O_EXCL, 0o644) }
     }
 
     func write(_ line: String) {
         queue.async { [self] in
             console?(line)
-            let data = Data((line + "\n").utf8)
-            if handle == nil || (written > 0 && written + data.count > maxBytes) {
-                openNext()
-            }
-            guard let handle else { return }
-            do {
-                try handle.write(contentsOf: data)
-                written += data.count
-            } catch {
-                try? handle.close()
-                self.handle = nil
-                fileFailed = true
-            }
+            writeFile(Data((line + "\n").utf8))
         }
+    }
+
+    func async(_ work: @escaping () -> Void) {
+        queue.async(execute: work)
     }
 
     func flush() {
         queue.sync {}
     }
 
+    private func writeFile(_ data: Data) {
+        if handle == nil || (written > 0 && written + data.count > maxBytes) {
+            if handle == nil, let retryAt, now() < retryAt {
+                dropped += 1
+                return
+            }
+            openNext()
+            guard handle != nil else { return fail() }
+            retryAt = nil
+            if dropped > 0 {
+                let count = dropped
+                dropped = 0
+                guard append(Data("DIAG diag t_ms=\(Diag.monotonicMs()) file_recovered=true dropped_lines=\(count)\n".utf8)) else {
+                    dropped = count
+                    return fail()
+                }
+            }
+        }
+        if !append(data) { fail() }
+    }
+
+    private func fail() {
+        dropped += 1
+        retryAt = now().addingTimeInterval(Self.retryInterval)
+    }
+
+    private func append(_ data: Data) -> Bool {
+        guard let handle else { return false }
+        do {
+            try handle.write(contentsOf: data)
+            written += data.count
+            return true
+        } catch {
+            try? handle.close()
+            self.handle = nil
+            return false
+        }
+    }
+
     private func openNext() {
         try? handle?.close()
         handle = nil
         written = 0
-        guard !fileFailed else { return }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.timeZone = TimeZone(identifier: "UTC")
         formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
         let stamp = formatter.string(from: now())
-        guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil else {
-            fileFailed = true
-            return
-        }
+        guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil else { return }
         // O_EXCL: an existing name (same second) moves on to -1, -2, ...
         for n in 0..<1000 {
             let name = n == 0 ? "diag-\(stamp).log" : "diag-\(stamp)-\(n).log"
-            let fd = open(directory.appendingPathComponent(name).path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+            let fd = opener(directory.appendingPathComponent(name).path)
             if fd >= 0 {
                 handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
                 return
             }
-            if errno != EEXIST { break }
+            if errno != EEXIST { return }
         }
-        fileFailed = true
     }
 }
 
@@ -179,80 +219,149 @@ enum DiagStats {
     }
 }
 
-// M6 per-second cadence and the M9 GPU window. frame() on the render thread, completed() from command buffer
-// completion; drain() once per frame from the render thread returns a window once a second has passed.
+// Periodic sampling on a monotonic ms clock without overflow: the first call fires (fireOnFirst) or only starts the
+// period; a clock that steps back fires and restarts the period.
+struct DiagSchedule {
+    let periodMs: Int
+    let fireOnFirst: Bool
+    private var lastMs: Int?
+
+    init(periodMs: Int, fireOnFirst: Bool) {
+        self.periodMs = periodMs
+        self.fireOnFirst = fireOnFirst
+    }
+
+    mutating func due(nowMs: Int) -> Bool {
+        guard let last = lastMs else {
+            lastMs = nowMs
+            return fireOnFirst
+        }
+        if nowMs >= last {
+            let elapsed = nowMs.subtractingReportingOverflow(last)
+            guard elapsed.overflow || elapsed.partialValue >= periodMs else { return false }
+        }
+        lastMs = nowMs
+        return true
+    }
+}
+
+// M6 per-second cadence and the M9 GPU samples. The render thread calls frame() and take(), command buffer completion
+// calls completed(); each is O(1) under the lock, appending to buffers preallocated at `capacity` (samples beyond it
+// are dropped and counted in overflow; GPU samples beyond it are dropped). window() and the percentiles run on the
+// Diag queue.
+// Times: targetNs is the drawable's frameTiming.presentationTime, the compositor's target for this frame, and
+// predictedNs the frame's predictTiming() presentation time, both on the layer clock; the actual photon time is not
+// exposed by CompositorServices and is logged as unavailable. Command buffer times are host times, moved to the layer
+// clock with the offset sampled on the render thread (layer now - host now).
 final class DiagCadence {
+    struct Raw {
+        var targetIntervalsMs: [Double]
+        var targetMinusPredictedMs: [Double]
+        var frames = 0, fresh = 0, repeated = 0, blank = 0, missedRenderDeadline = 0, callbackAfterTarget = 0, overflow = 0
+        var clockOffsetMs: Double?
+
+        init(capacity: Int) {
+            targetIntervalsMs = []
+            targetIntervalsMs.reserveCapacity(capacity)
+            targetMinusPredictedMs = []
+            targetMinusPredictedMs.reserveCapacity(capacity)
+        }
+    }
+
     struct Window: Equatable {
-        let frames, fresh, repeated, missed: Int
+        let frames, fresh, repeated, blank, missedRenderDeadline, callbackAfterTarget, overflow: Int
         let requestedMs: Double?
-        let interval, presentDelta: DiagStats.Summary?
+        let targetInterval, targetMinusPredicted: DiagStats.Summary?
+        let clockOffsetMs: Double?
     }
 
+    private let capacity: Int
     private let lock = NSLock()
-    private var windowStartMs: Int?
-    private var lastPresentNs: UInt64?
-    private var intervals: [Double] = []
-    private var presentDeltas: [Double] = []
-    private var frames = 0
-    private var fresh = 0
-    private var missed = 0
+    private var raw: Raw
     private var gpuMs: [Double] = []
+    private var lastTargetNs: UInt64?
+    private var lastSourceId: UInt64?
+    private var clockOffsetNs: Int64 = 0
 
-    // presentNs: the drawable's presentation time; predictedNs: the frame's predictTiming() presentation time.
-    func frame(presentNs: UInt64, predictedNs: UInt64, fresh isFresh: Bool) {
+    init(capacity: Int = 1024) {
+        self.capacity = max(capacity, 1)
+        raw = Raw(capacity: self.capacity)
+        gpuMs.reserveCapacity(self.capacity)
+    }
+
+    // sourceId: the video frame actually encoded into this frame's drawables; nil when none was (idle, or rejected).
+    func frame(targetNs: UInt64, predictedNs: UInt64, sourceId: UInt64?, clockOffsetNs offset: Int64) {
         lock.lock()
         defer { lock.unlock() }
-        if let last = lastPresentNs, presentNs > last {
-            intervals.append(Double(presentNs - last) / 1e6)
+        if let last = lastTargetNs, targetNs > last {
+            if !Self.append(&raw.targetIntervalsMs, Double(targetNs - last) / 1e6, capacity) { raw.overflow += 1 }
         }
-        lastPresentNs = presentNs
-        presentDeltas.append((Double(presentNs) - Double(predictedNs)) / 1e6)
-        frames += 1
-        if isFresh { fresh += 1 }
-    }
-
-    // late: GPU completion after the frame's presentation time (a missed deadline).
-    func completed(gpuNs: UInt64, late: Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        if late { missed += 1 }
-        if gpuNs > 0 && gpuMs.count < 4096 { gpuMs.append(Double(gpuNs) / 1e6) }
-    }
-
-    func drain(nowMs: Int, requestedHz: Double) -> Window? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let start = windowStartMs else {
-            windowStartMs = nowMs
-            return nil
+        lastTargetNs = targetNs
+        if !Self.append(&raw.targetMinusPredictedMs, (Double(targetNs) - Double(predictedNs)) / 1e6, capacity) { raw.overflow += 1 }
+        raw.frames += 1
+        if let sourceId {
+            if sourceId == lastSourceId { raw.repeated += 1 } else { raw.fresh += 1 }
+            lastSourceId = sourceId
+        } else {
+            raw.blank += 1
         }
-        guard nowMs - start >= 1000 || nowMs < start else { return nil }
-        let window = Window(frames: frames, fresh: fresh, repeated: frames - fresh, missed: missed,
-                            requestedMs: requestedHz > 0 ? 1000.0 / requestedHz : nil,
-                            interval: DiagStats.summary(intervals), presentDelta: DiagStats.summary(presentDeltas))
-        windowStartMs = nowMs
-        intervals.removeAll(keepingCapacity: true)
-        presentDeltas.removeAll(keepingCapacity: true)
-        frames = 0
-        fresh = 0
-        missed = 0
-        return window
+        clockOffsetNs = offset
+        raw.clockOffsetMs = Double(offset) / 1e6
     }
 
-    func drainGpu() -> DiagStats.Summary? {
+    // Host-clock GPU start/end and callback time; layer-clock deadline and target of the frame.
+    func completed(gpuStartHostNs: UInt64, gpuEndHostNs: UInt64, renderingDeadlineNs: UInt64, targetNs: UInt64, callbackHostNs: UInt64) {
         lock.lock()
         defer { lock.unlock() }
-        let summary = DiagStats.summary(gpuMs)
-        gpuMs.removeAll(keepingCapacity: true)
-        return summary
+        let offset = Double(clockOffsetNs)
+        if gpuEndHostNs > gpuStartHostNs && gpuStartHostNs > 0 {
+            if Double(gpuEndHostNs) + offset > Double(renderingDeadlineNs) { raw.missedRenderDeadline += 1 }
+            if gpuMs.count < capacity { gpuMs.append(Double(gpuEndHostNs - gpuStartHostNs) / 1e6) }
+        }
+        if Double(callbackHostNs) + offset > Double(targetNs) { raw.callbackAfterTarget += 1 }
+    }
+
+    // The window so far, replaced by empty buffers (one allocation per window, no sorting).
+    func take() -> Raw {
+        lock.lock()
+        defer { lock.unlock() }
+        let taken = raw
+        raw = Raw(capacity: capacity)
+        return taken
+    }
+
+    func takeGpu() -> [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        let taken = gpuMs
+        gpuMs = []
+        gpuMs.reserveCapacity(capacity)
+        return taken
+    }
+
+    private static func append(_ buffer: inout [Double], _ value: Double, _ capacity: Int) -> Bool {
+        guard buffer.count < capacity else { return false }
+        buffer.append(value)
+        return true
+    }
+
+    static func window(_ raw: Raw, requestedHz: Double) -> Window {
+        Window(frames: raw.frames, fresh: raw.fresh, repeated: raw.repeated, blank: raw.blank,
+               missedRenderDeadline: raw.missedRenderDeadline, callbackAfterTarget: raw.callbackAfterTarget, overflow: raw.overflow,
+               requestedMs: requestedHz > 0 ? 1000.0 / requestedHz : nil,
+               targetInterval: DiagStats.summary(raw.targetIntervalsMs), targetMinusPredicted: DiagStats.summary(raw.targetMinusPredictedMs),
+               clockOffsetMs: raw.clockOffsetMs)
     }
 
     static func fields(_ w: Window) -> KeyValuePairs<String, Any> {
         func v(_ x: Double?) -> Any { x.map { $0 as Any } ?? "unavailable" }
-        return ["requested_ms": v(w.requestedMs),
-                "interval_p50_ms": v(w.interval?.p50), "interval_p95_ms": v(w.interval?.p95), "interval_max_ms": v(w.interval?.max),
-                "present_delta_p50_ms": v(w.presentDelta?.p50), "present_delta_p95_ms": v(w.presentDelta?.p95),
-                "present_delta_max_ms": v(w.presentDelta?.max),
-                "frames": w.frames, "fresh": w.fresh, "repeated": w.repeated, "missed": w.missed]
+        return ["requested_interval_ms": v(w.requestedMs),
+                "target_interval_p50_ms": v(w.targetInterval?.p50), "target_interval_p95_ms": v(w.targetInterval?.p95),
+                "target_interval_max_ms": v(w.targetInterval?.max),
+                "target_minus_predicted_p50_ms": v(w.targetMinusPredicted?.p50), "target_minus_predicted_p95_ms": v(w.targetMinusPredicted?.p95),
+                "target_minus_predicted_max_ms": v(w.targetMinusPredicted?.max), "actual_presentation": "unavailable",
+                "frames": w.frames, "fresh": w.fresh, "repeated": w.repeated, "blank": w.blank,
+                "missed_render_deadline": w.missedRenderDeadline, "callback_after_target": w.callbackAfterTarget,
+                "clock_offset_ms": v(w.clockOffsetMs), "overflow": w.overflow]
     }
 }

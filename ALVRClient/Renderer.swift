@@ -186,7 +186,6 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     
     init(_ layerRenderer: LayerRenderer?) {
         self.layerRenderer = layerRenderer
-        self.diagProbe = layerRenderer != nil && Diag.isOn ? DiagRenderProbe() : nil
         let rendererName = layerRenderer == nil ? "realitykit" : "metal"
         StreamTelemetry.shared.updateFormat { $0.renderer = rendererName }
         if layerRenderer == nil {
@@ -212,6 +211,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
 
         self.device = layerRenderer?.device ?? MTLCreateSystemDefaultDevice()!
         self.commandQueue = self.device.makeCommandQueue()!
+        self.diagProbe = layerRenderer != nil && Diag.isOn ? DiagRenderProbe(device: self.device) : nil
 
         let uniformBufferSize = alignedUniformsSize * maxBuffersInFlight
         self.dynamicUniformBuffer = self.device.makeBuffer(length:uniformBufferSize,
@@ -974,7 +974,6 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         
         let vsyncTime = LayerRenderer.Clock.Instant.epoch.duration(to: mainDrawable.frameTiming.presentationTime).timeInterval
         let vsyncTimeNs = UInt64(vsyncTime * Double(NSEC_PER_SEC))
-        diagProbe?.frame(layerRenderer: layerRenderer!, drawables: drawables, predicted: timing, fresh: selectionSource == .new, device: device)
         let framePreviouslyPredictedPose = queuedFrame != nil ? WorldTracker.shared.convertSteamVRViewPose(queuedFrame!.viewParams) : nil
         if ALVRClientApp.gStore.settings.showPerformanceHud {
             PerformanceTracker.shared.recordFramePresentation(presentationTime: mainDrawable.frameTiming.presentationTime, timestampNs: queuedFrame?.timestamp)
@@ -1030,9 +1029,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         
         let gpuTimes = self.gpuTimes
         let diagProbe = self.diagProbe
+        let diagRenderingDeadline = mainDrawable.frameTiming.renderingDeadline
         commandBuffer.addCompletedHandler { (_ commandBuffer)-> Swift.Void in
             let completionNs = UInt64(CACurrentMediaTime() * Double(NSEC_PER_SEC))
-            diagProbe?.completed(commandBuffer, vsyncNs: vsyncTimeNs, completionNs: completionNs)
+            diagProbe?.completed(commandBuffer, renderingDeadline: diagRenderingDeadline, targetNs: vsyncTimeNs, callbackHostNs: completionNs)
             if commandBuffer.gpuEndTime > commandBuffer.gpuStartTime {
                 gpuTimes.add(ns: UInt64((commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * Double(NSEC_PER_SEC)))
             }
@@ -1117,6 +1117,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
            let queuedFrame {
             PerformanceTracker.shared.recordCompositorStart(timestampNs: queuedFrame.timestamp)
         }
+        // Diagnostics: the video frame actually encoded this frame (nil: idle, or rejected by beginRenderStreamingFrame).
+        var diagSourceId: UInt64? = nil
         for drawable in drawables {
             drawable.deviceAnchor = deviceAnchor
             
@@ -1148,6 +1150,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             if renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil {
                 //print("render")
                 if let encoder = beginRenderStreamingFrame(0, commandBuffer: commandBuffer, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor, drawable: drawable) {
+                    diagSourceId = queuedFrame?.timestamp
                     renderStreamingFrame(0, commandBuffer: commandBuffer, renderEncoder: encoder, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
                     endRenderStreamingFrame(renderEncoder: encoder)
                 }
@@ -1169,7 +1172,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             
             drawable.encodePresent(commandBuffer: commandBuffer)
         }
-        
+        diagProbe?.frame(layerRenderer: layerRenderer!, drawables: drawables, predicted: timing, sourceId: diagSourceId)
+
         coolPulsingColorsTime += 0.005
         if coolPulsingColorsTime > 4.0 {
             coolPulsingColorsTime = 0.0
