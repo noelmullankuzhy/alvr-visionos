@@ -1,11 +1,11 @@
 //
 //  ColourPipeline.swift
 //
-//  Colour maths for decoded video -> CompositorServices' extended-linear Display P3 (pure Foundation/simd so it is
-//  unit-tested on macOS, tests/swift/ColourPipelineTests.swift).
+//  Colour maths for decoded video -> the rgba16Float drawable (pure Foundation/simd so it is unit-tested on macOS,
+//  tests/swift/ColourPipelineTests.swift).
 //
 //  Explicit planar shader path: texture samples -> yuvToRGB (H.273 matrix + range) -> sRGB EOTF -> encoding gamma
-//  (linear light, source primaries) -> sourceToDisplayP3 -> half output.
+//  (linear light, source primaries) -> sourceToOutput -> half output.
 //
 
 import Foundation
@@ -13,6 +13,26 @@ import simd
 
 enum ColourPrimaries: String {
     case bt709, bt2020, displayP3
+}
+
+// Primaries of the linear float drawable. The simulator compositor was measured (RDR2 title screen, 21 Oct 2026) to
+// read it as extended linear sRGB: a 709 -> P3 conversion turned source red (203,0,0) into (186,38,26). Device
+// behaviour is unverified, so UserDefaults ALVRDisplayP3Output = true restores the P3 conversion for an A/B.
+enum ColourOutput: String {
+    case srgb, p3
+
+    static let displayP3DefaultsKey = "ALVRDisplayP3Output"
+
+    init(displayP3Default: Bool) {
+        self = displayP3Default ? .p3 : .srgb
+    }
+
+    var primaries: ColourPrimaries {
+        switch self {
+        case .srgb: return .bt709
+        case .p3: return .displayP3
+        }
+    }
 }
 
 enum ColourTransfer: String {
@@ -36,16 +56,18 @@ struct ColourSelection: Equatable {
     var rangeAssumed: Bool
     // Applied to float4(Y, Cb, Cr, 1) texture samples; columns are Y, Cb, Cr gains and offsets.
     var yuvToRGB: simd_float4x4
-    // Linear source RGB -> linear Display P3. Identity for PQ/HLG, whose shader path is not implemented yet.
-    var sourceToDisplayP3: simd_float3x3
+    var output: ColourOutput
+    // Linear source RGB -> linear output primaries, unclipped. Identity for PQ/HLG, whose shader path is not
+    // implemented yet.
+    var sourceToOutput: simd_float3x3
 
-    var convertsGamut: Bool { sourceToDisplayP3 != matrix_identity_float3x3 }
+    var convertsGamut: Bool { sourceToOutput != matrix_identity_float3x3 }
 
     func logLine(path: String) -> String {
         func tag(_ value: String, _ assumed: Bool) -> String { assumed ? value + "(assumed)" : value }
         return "ALVRCOLOUR primaries=\(tag(primaries.rawValue, primariesAssumed)) transfer=\(transfer.rawValue)"
             + " matrix=\(tag(matrix.rawValue, matrixAssumed)) range=\(tag(fullRange ? "full" : "limited", rangeAssumed))"
-            + " bits=\(bitDepth) path=\(path)"
+            + " bits=\(bitDepth) out=\(output.rawValue) path=\(path)"
     }
 }
 
@@ -70,9 +92,13 @@ enum ColourPipeline {
         return simd_double3x3(columns: (m.columns.0 * s.x, m.columns.1 * s.y, m.columns.2 * s.z))
     }
 
+    static func primariesConversion(from source: ColourPrimaries, to destination: ColourPrimaries) -> simd_double3x3 {
+        if source == destination { return matrix_identity_double3x3 }
+        return rgbToXYZ(destination).inverse * rgbToXYZ(source)
+    }
+
     static func primariesToDisplayP3(_ primaries: ColourPrimaries) -> simd_double3x3 {
-        if primaries == .displayP3 { return matrix_identity_double3x3 }
-        return rgbToXYZ(.displayP3).inverse * rgbToXYZ(primaries)
+        primariesConversion(from: primaries, to: .displayP3)
     }
 
     static func lumaCoefficients(_ matrix: YCbCrMatrix) -> (kr: Double, kb: Double) {
@@ -126,7 +152,8 @@ enum ColourPipeline {
     // Arguments are the CMFormatDescription extension values (kCVImageBuffer* strings, FullRangeVideo,
     // BitsPerComponent), nil when absent. Each field is parsed on its own: bit depth never implies a gamut.
     // planeBitDepth is the code depth of the planes the shader samples; nil falls back to the stream's bit depth.
-    static func select(primaries: String?, transfer: String?, matrix: String?, fullRange: Bool?, bitDepth: Int?, planeBitDepth: Int? = nil) -> ColourSelection {
+    // output is the drawable's primaries policy (ColourOutput).
+    static func select(primaries: String?, transfer: String?, matrix: String?, fullRange: Bool?, bitDepth: Int?, planeBitDepth: Int? = nil, output: ColourOutput = .srgb) -> ColourSelection {
         let parsedPrimaries: ColourPrimaries?
         switch primaries {
         case "ITU_R_709_2": parsedPrimaries = .bt709
@@ -157,12 +184,13 @@ enum ColourPipeline {
         let bits = bitDepth ?? 8
         let planeBits = planeBitDepth ?? bits
         let hdrTransfer = parsedTransfer == .pq || parsedTransfer == .hlg
-        let gamut = hdrTransfer ? matrix_identity_double3x3 : primariesToDisplayP3(p)
+        let gamut = hdrTransfer ? matrix_identity_double3x3 : primariesConversion(from: p, to: output.primaries)
         return ColourSelection(
             primaries: p, transfer: parsedTransfer, matrix: m, fullRange: full, bitDepth: bits, planeBitDepth: planeBits,
             primariesAssumed: parsedPrimaries == nil, matrixAssumed: parsedMatrix == nil, rangeAssumed: fullRange == nil,
             yuvToRGB: yuvToRGBMatrix(matrix: m, fullRange: full, bitDepth: planeBits),
-            sourceToDisplayP3: simd_float3x3(columns: (simd_float3(gamut.columns.0), simd_float3(gamut.columns.1), simd_float3(gamut.columns.2))))
+            output: output,
+            sourceToOutput: simd_float3x3(columns: (simd_float3(gamut.columns.0), simd_float3(gamut.columns.1), simd_float3(gamut.columns.2))))
     }
 
     // Swift mirror of Shaders.metal NonlinearToLinearRGB: sRGB EOTF, odd-symmetric outside [0, 1], pow on |x| only.

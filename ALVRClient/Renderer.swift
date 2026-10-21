@@ -551,9 +551,9 @@ class Renderer {
         fragmentConstants.setConstantValue(&currentYuvTransform.columns.1, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform1.rawValue)
         fragmentConstants.setConstantValue(&currentYuvTransform.columns.2, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform2.rawValue)
         fragmentConstants.setConstantValue(&currentYuvTransform.columns.3, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform3.rawValue)
-        fragmentConstants.setConstantValue(&currentGamutTransform.columns.0, type: .float3, index: ALVRFunctionConstant.gamutToDisplayP3_0.rawValue)
-        fragmentConstants.setConstantValue(&currentGamutTransform.columns.1, type: .float3, index: ALVRFunctionConstant.gamutToDisplayP3_1.rawValue)
-        fragmentConstants.setConstantValue(&currentGamutTransform.columns.2, type: .float3, index: ALVRFunctionConstant.gamutToDisplayP3_2.rawValue)
+        fragmentConstants.setConstantValue(&currentGamutTransform.columns.0, type: .float3, index: ALVRFunctionConstant.gamutToOutput_0.rawValue)
+        fragmentConstants.setConstantValue(&currentGamutTransform.columns.1, type: .float3, index: ALVRFunctionConstant.gamutToOutput_1.rawValue)
+        fragmentConstants.setConstantValue(&currentGamutTransform.columns.2, type: .float3, index: ALVRFunctionConstant.gamutToOutput_2.rawValue)
 
         let fragmentFunction = try library?.makeFunction(name: "videoFrameFragmentShader_" + variantName, constantValues: fragmentConstants)
 
@@ -861,7 +861,7 @@ class Renderer {
                     needsPipelineRebuild = true
                 }
                 currentYuvTransform = nextYuvTransform
-                let nextGamutTransform = colour.sourceToDisplayP3
+                let nextGamutTransform = colour.sourceToOutput
                 if nextGamutTransform != currentGamutTransform {
                     needsPipelineRebuild = true
                 }
