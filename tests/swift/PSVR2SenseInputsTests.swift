@@ -1,6 +1,34 @@
-// SOURCES: ALVRClient/Input/PSVR2SenseInputs.swift
+// SOURCES: ALVRClient/Input/PSVR2SenseInputs.swift ALVRClient/Input/ControllerInputGate.swift
 // PSVR2SenseInputs: Sense controller elements -> ALVR button paths, limited to the server's active profile button_set
 // (ALVR alvr/common/src/inputs.rs: QUEST_CONTROLLER_PROFILE / PSVR2_CONTROLLER_PROFILE).
+
+// A declared ControllerInputGate that records what it delivers and logs, per send call.
+final class GateHarness {
+    private var names: [UInt64: String] = [:]
+    private var sent: [ButtonInput] = []
+    private var logs: [String] = []
+    private var gate: ControllerInputGate!
+
+    init(profile: ControllerInputProfile) {
+        for path in ControllerInputGate.knownPaths {
+            names[UInt64(truncatingIfNeeded: path.hashValue)] = path
+        }
+        gate = ControllerInputGate(
+            pathId: { UInt64(truncatingIfNeeded: $0.hashValue) },
+            deliver: { [unowned self] id, value in self.sent.append(ButtonInput(path: self.names[id] ?? "?", value: value)) },
+            announce: { _ in },
+            log: { [unowned self] in self.logs.append($0) })
+        gate.streamStarted(profile: profile)
+    }
+
+    func send(_ inputs: [ButtonInput]) -> (sent: [ButtonInput], logs: [String]) {
+        sent = []
+        logs = []
+        gate.send(inputs)
+        return (sent, logs)
+    }
+}
+
 @main
 enum PSVR2SenseInputsTests {
     static func paths(_ inputs: [ButtonInput]) -> Set<String> {
@@ -113,32 +141,31 @@ enum PSVR2SenseInputsTests {
 
         // Quest Touch: unchanged behaviour (menu doubles as system while Home does not reach the app),
         // minus the paths outside the Quest button_set.
-        var filter = ButtonPathFilter()
-        let qr = filter.admit(PSVR2SenseInputs.inputs(isLeft: false, elements: options, profile: quest, homeButtonReachesApp: false, includeTrigger: true), profile: quest)
-        expectEqual(value(qr.send, "/user/hand/right/input/system/click"), .binary(true), "Quest: Options still drives right system/click")
-        expect(!paths(qr.send).contains("/user/hand/right/input/menu/click"), "Quest: right menu/click not in button_set")
-        expect(paths(qr.send).isSubset(of: quest.buttonSet), "Quest right sends within button_set")
-        expectEqual(paths(qr.send), hand("right", ["a/click", "a/touch", "b/click", "b/touch", "system/click",
+        let qg = GateHarness(profile: quest)
+        let qr = qg.send(PSVR2SenseInputs.inputs(isLeft: false, elements: options, profile: quest, homeButtonReachesApp: false, includeTrigger: true))
+        expectEqual(value(qr.sent, "/user/hand/right/input/system/click"), .binary(true), "Quest: Options still drives right system/click")
+        expect(!paths(qr.sent).contains("/user/hand/right/input/menu/click"), "Quest: right menu/click not in button_set")
+        expect(paths(qr.sent).isSubset(of: quest.buttonSet), "Quest right sends within button_set")
+        expectEqual(paths(qr.sent), hand("right", ["a/click", "a/touch", "b/click", "b/touch", "system/click",
                                                    "squeeze/value", "trigger/value", "trigger/touch",
                                                    "thumbstick/x", "thumbstick/y", "thumbstick/click", "thumbstick/touch"]), "Quest right paths")
-        expectEqual(Set(qr.newlyDropped), hand("right", ["menu/click", "menu/touch", "system/touch",
-                                                         "squeeze/click", "squeeze/touch", "trigger/click"]), "Quest right drops")
+        expectEqual(qr.logs.count, 6, "Quest right drops: menu click/touch, system touch, squeeze click/touch, trigger click")
 
-        let ql = filter.admit(PSVR2SenseInputs.inputs(isLeft: true, elements: options, profile: quest, homeButtonReachesApp: false, includeTrigger: true), profile: quest)
-        expectEqual(value(ql.send, "/user/hand/left/input/menu/click"), .binary(true), "Quest: Create -> left menu/click")
-        expectEqual(paths(ql.send), hand("left", ["x/click", "x/touch", "y/click", "y/touch", "menu/click",
+        let ql = qg.send(PSVR2SenseInputs.inputs(isLeft: true, elements: options, profile: quest, homeButtonReachesApp: false, includeTrigger: true))
+        expectEqual(value(ql.sent, "/user/hand/left/input/menu/click"), .binary(true), "Quest: Create -> left menu/click")
+        expectEqual(paths(ql.sent), hand("left", ["x/click", "x/touch", "y/click", "y/touch", "menu/click",
                                                   "squeeze/value", "trigger/value", "trigger/touch",
                                                   "thumbstick/x", "thumbstick/y", "thumbstick/click", "thumbstick/touch"]), "Quest left paths")
 
         // Each dropped path is reported once, not every frame.
-        let again = filter.admit(PSVR2SenseInputs.inputs(isLeft: false, elements: idle, profile: quest, homeButtonReachesApp: false, includeTrigger: true), profile: quest)
-        expect(again.newlyDropped.isEmpty, "drops reported once")
-        expect(!again.send.isEmpty, "sends continue after the drop report")
+        let again = qg.send(PSVR2SenseInputs.inputs(isLeft: false, elements: idle, profile: quest, homeButtonReachesApp: false, includeTrigger: true))
+        expect(again.logs.isEmpty, "drops reported once")
+        expect(!again.sent.isEmpty, "sends continue after the drop report")
 
-        // PSVR2 through the filter: nothing dropped.
-        let pr = filter.admit(right, profile: psvr)
-        expect(pr.newlyDropped.isEmpty, "PSVR2: nothing dropped")
-        expectEqual(pr.send, right, "PSVR2: everything sent, in order")
+        // PSVR2 through the gate: nothing dropped.
+        let pr = GateHarness(profile: psvr).send(right)
+        expect(pr.logs.isEmpty, "PSVR2: nothing dropped")
+        expectEqual(pr.sent, right, "PSVR2: everything sent, in order")
 
         finishTests("PSVR2SenseInputsTests")
     }
