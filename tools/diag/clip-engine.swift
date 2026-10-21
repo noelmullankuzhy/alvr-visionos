@@ -21,13 +21,19 @@ final class Sink {
     let lock = NSLock()
     var error: String?
     var frames = 0
+    var droppedFrames = 0
     var bytes = 0
     var format: [String: Any] = [:]
     init(_ input: AVAssetWriterInput) { self.input = input }
-    func receive(_ status: OSStatus, _ sample: CMSampleBuffer?) {
+    func receive(_ status: OSStatus, _ flags: VTEncodeInfoFlags, _ sample: CMSampleBuffer?) {
         lock.lock()
         defer { lock.unlock() }
-        guard status == noErr, let sample = sample else { error = "callback status \(status)"; return }
+        switch classifyClipCallback(status: status, hasSample: sample != nil, frameDropped: flags.contains(.frameDropped)) {
+        case .failure(let code): error = "callback status \(code)"; return
+        case .dropped: droppedFrames += 1; return
+        case .encoded: break
+        }
+        guard let sample else { return } // classification guarantees a sample here
         if let desc = CMSampleBufferGetFormatDescription(sample) {
             let ext = (CMFormatDescriptionGetExtensions(desc) as NSDictionary?) ?? [:]
             if let atoms = ext[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] as? NSDictionary,
@@ -59,9 +65,9 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
                                    kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
     try check(VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height), codecType: kCMVideoCodecType_HEVC,
         encoderSpecification: nil, imageBufferAttributes: attributes as CFDictionary, compressedDataAllocator: nil,
-        outputCallback: { ref, _, status, _, sample in
+        outputCallback: { ref, _, status, flags, sample in
             guard let ref = ref else { return }
-            Unmanaged<Sink>.fromOpaque(ref).takeUnretainedValue().receive(status, sample)
+            Unmanaged<Sink>.fromOpaque(ref).takeUnretainedValue().receive(status, flags, sample)
         }, refcon: Unmanaged.passUnretained(sink).toOpaque(), compressionSessionOut: &session), "create encoder")
     guard let session = session else { throw Failure("no encoder") }
     defer { VTCompressionSessionInvalidate(session) }
@@ -143,17 +149,23 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
     }
     try check(VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid), "complete")
     if let error = sink.error { throw Failure(error) }
-    input.markAsFinished()
-    let done = DispatchSemaphore(value: 0)
-    writer.finishWriting { done.signal() }
-    done.wait()
-    guard writer.status == .completed else { throw Failure("finish writer: \(String(describing: writer.error))") }
-    guard sink.frames == count, sink.format["lumaBitDepth"] as? Int == 10,
-          sink.format["chromaFormatIDC"] as? Int == 1, sink.format["profileIDC"] as? Int == 2 else {
-        throw Failure("output is not Main10 4:2:0 or frames missing: \(sink.format)")
+    guard sink.frames + sink.droppedFrames == count else { throw Failure("missing encoder callbacks: \(sink.frames) encoded + \(sink.droppedFrames) dropped of \(count)") }
+    if sink.frames > 0 {
+        input.markAsFinished()
+        let done = DispatchSemaphore(value: 0)
+        writer.finishWriting { done.signal() }
+        done.wait()
+        guard writer.status == .completed else { throw Failure("finish writer: \(String(describing: writer.error))") }
+        guard sink.format["lumaBitDepth"] as? Int == 10,
+              sink.format["chromaFormatIDC"] as? Int == 1, sink.format["profileIDC"] as? Int == 2 else {
+            throw Failure("output is not Main10 4:2:0: \(sink.format)")
+        }
+    } else {
+        // No valid movie can be finalized, but calibration must still see the drop feedback.
+        writer.cancelWriting()
     }
     var result: [String: Any] = ["file": out.lastPathComponent, "kind": kind, "width": width, "height": height,
-        "fps": fps, "frames": sink.frames, "seconds": Double(count) / Double(fps),
+        "fps": fps, "frames": sink.frames, "requestedFrames": count, "droppedFrames": sink.droppedFrames, "seconds": Double(count) / Double(fps),
         "content": content, "noiseAmplitude": noiseAmplitude, "encoderBitrate": encoderBitrate ?? bitrate,
         "dataRateLimitApplied": capApplied, "achievedBitrate": Double(sink.bytes * 8 * fps) / Double(count),
         "requestedBitrate": bitrate, "bitrate": Double(sink.bytes * 8 * fps) / Double(count),
@@ -171,35 +183,16 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
     return result
 }
 
-// Validate the compressed-sample bitrate, not container bytes or wall-clock generation speed.
-// If rate control misses, bisect noise amplitude (overshoot) or raise the encoder hint
-// (undershoot at full entropy). Never publish an out-of-tolerance targeted clip.
 func calibratedEncode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int,
                       kind: String, content: String, overload: Bool) throws -> [String: Any] {
-    let limited = content == "noise" && !overload
-    var amplitude = 1.0, lower = 0.0, upper = 1.0, encoderRate = bitrate
-    for attempt in 1...(limited ? 8 : 1) {
-        var clip = try encode(out: out, width: width, height: height, fps: fps, seconds: seconds, bitrate: bitrate,
-                              kind: kind, content: content, noiseAmplitude: amplitude, encoderBitrate: encoderRate, limited: limited)
-        let achieved = clip["achievedBitrate"] as! Double
-        guard achieved.isFinite, achieved > 0 else { throw Failure("encoder produced no compressed bytes") }
-        clip["overload"] = overload
-        clip["rateLimited"] = limited
-        clip["rateMode"] = overload ? "overload" : (limited ? "targeted" : "target-hint")
-        clip["bitrateTolerance"] = 0.15
-        clip["encodeAttempts"] = attempt
-        if !limited || abs(achieved / Double(bitrate) - 1) <= 0.15 { return clip }
-        try FileManager.default.removeItem(at: out)
-        fputs("Re-encode \(out.lastPathComponent): achieved \(Int(achieved)) vs target \(bitrate), amplitude \(amplitude)\n", stderr)
-        if achieved > Double(bitrate) * 1.15 {
-            upper = amplitude; amplitude = (lower + upper) / 2
-        } else {
-            lower = amplitude
-            if amplitude < upper { amplitude = (lower + upper) / 2 }
-            else { encoderRate = Int(min(Double(Int.max / 4), Double(encoderRate) * min(2, Double(bitrate) / achieved))) }
-        }
-    }
-    throw Failure("noise bitrate could not reach ±15% of \(bitrate) after 8 encodes; use --stress only for uncapped overload")
+    try calibrateClip(bitrate: bitrate, targeted: content == "noise" && !overload, overload: overload, encode: { amplitude, hint, limited in
+        try encode(out: out, width: width, height: height, fps: fps, seconds: seconds, bitrate: bitrate,
+                   kind: kind, content: content, noiseAmplitude: amplitude, encoderBitrate: hint, limited: limited)
+    }, discard: {
+        if FileManager.default.fileExists(atPath: out.path) { try FileManager.default.removeItem(at: out) }
+    }, reportRetry: { achieved, drops, amplitude in
+        fputs("Re-encode \(out.lastPathComponent): achieved \(Int(achieved)) vs target \(bitrate), droppedFrames \(drops), amplitude \(amplitude)\n", stderr)
+    })
 }
 
 func main() throws {
@@ -246,7 +239,9 @@ func main() throws {
                     print("Wrote \(url.lastPathComponent)")
                 } catch {
                     try? FileManager.default.removeItem(at: url)
-                    refused.append(["size": String(size), "fps": fps, "kind": kind, "error": String(describing: error)])
+                    var refusal: [String: Any] = ["size": String(size), "fps": fps, "kind": kind, "error": String(describing: error)]
+                    if let calibration = error as? ClipCalibrationFailure { refusal["droppedFrames"] = calibration.droppedFrames }
+                    refused.append(refusal)
                     fputs("Skipped \(size) @ \(fps): \(error)\n", stderr)
                 }
             }

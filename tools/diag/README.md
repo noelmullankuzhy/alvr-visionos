@@ -2,7 +2,9 @@
 
 Tools only: no client changes, third-party packages, ffmpeg, downloads or device installation.
 Run from the repository root on a Mac with Xcode selected and an available HEVC encoder.
-The two entry scripts share `clip-engine.swift` and invoke the system Swift interpreter.
+The two entry scripts assemble shared `clip-policy.swift` and `clip-engine.swift`
+into a temporary script and invoke the system Swift interpreter. The same policy
+is compiled directly by the encoder-free Swift tests; the temporary script is removed.
 
 ```sh
 swift tools/diag/make-hevc-clips.swift --out /tmp/avp-hevc
@@ -183,17 +185,28 @@ sh tools/diag/push-clips.sh 'DEVICE NAME OR ID' /tmp/avp-noise
 `--content default` preserves the moving ramps/bars. Noise uses deterministic
 frame-seeded xorshift samples across the limited luma/chroma range. Noise defaults
 to targeted output: a supported VideoToolbox rolling data-rate cap is requested,
-and the achieved compressed-sample bitrate must be within ±15% of the request.
+and the achieved compressed-sample bitrate must be within ±15% of the request
+with **zero dropped frames**.
 A miss triggers re-encoding (up to eight attempts), bisecting noise amplitude on
-overshoot or increasing the encoder bitrate hint on undershoot. A clip that still
+overshoot **or any dropped frame**, or increasing the encoder bitrate hint on
+undershoot only when no frames were dropped. A successful callback with a nil
+sample, or a `frameDropped` flag, counts as a drop; nonzero OSStatus remains an
+error. Even a trial that dropped every frame feeds calibration rather than
+failing movie finalization. A clip that still
 misses is refused and deleted, never published as meeting its target. The manifest
 records `rateMode`, `rateLimited`, `noiseAmplitude`, `encoderBitrate`,
-`dataRateLimitApplied`, `encodeAttempts` and `bitrateTolerance`.
+`dataRateLimitApplied`, `encodeAttempts`, `bitrateTolerance`, `requestedFrames`
+and `droppedFrames`. `frames` counts encoded frames; encoded + dropped must equal
+requested. The bounded `calibration` array preserves each attempt's achieved rate,
+amplitude, encoder hint and drops. Targeted clips with persistent drops are
+refused, with `droppedFrames` recorded in the refusal, and their files removed.
 
 Use `--content noise --stress` explicitly for uncapped overload: the manifest labels
 it `rateMode=overload`, `overload=true`, `rateLimited=false`. This mode retains the
 bitrate hint and full-amplitude noise but applies no hard cap or tolerance check;
-its achieved rate may differ substantially. It is not a calibrated target clip. Encoding
+its achieved rate may differ substantially. Partial output is allowed and its
+`droppedFrames` remains visible; an all-dropped run cannot produce a playable
+movie and is refused with the drop count. It is not a calibrated target clip. Encoding
 is CPU-heavy on large noise inputs; generation speed is not a decoder result.
 Both `achievedBitrate` and the existing `bitrate` manifest field contain measured
 compressed sample bytes × 8 / media duration. Compare these with `requestedBitrate`;
@@ -266,8 +279,12 @@ The Swift tests cover parser golden bytes cross-checked against the Python sende
 loss/reorder/jitter and decode statistics, run exclusion/ownership, actual bench
 compilation and shared SDR/PQ output requests. `test_noise.py` asserts >=2× the
 bitrate of default content for a 640×360/30fps/1s clip at the same 20 Mb/s request.
-It also checks ±15% at **3648×2912@90, 150 and 300 Mb/s** (two-second clips),
-plus explicit overload labelling. Swift tests inject cancellation during session
+It also checks ±15% and all 180 frames (zero drops) at
+**3648×2912@90, 150 and 300 Mb/s** (two-second clips),
+plus explicit overload labelling. `ClipEncodingTests` uses no encoder: it verifies
+callback classification and the production calibration loop with fake encoded
+results, including in-range/below-target/all-dropped trials, retry exhaustion,
+overload drops and real encoder errors. Swift tests inject cancellation during session
 creation and frame submission, hold callback drain and invalidation separately,
 and feed one million completions/latencies through the bounded distributions.
 It explicitly skips only HEVC creation refusal -12908. Swift and Python loopback
