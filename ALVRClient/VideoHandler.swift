@@ -168,19 +168,7 @@ struct VideoHandler {
         //}
         
         let videoDecoderSpecification:[NSString: AnyObject] = [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder:kCFBooleanTrue]
-        var destinationImageBufferAttributes:[NSString: AnyObject] = [kCVPixelBufferMetalCompatibilityKey: true as NSNumber, kCVPixelBufferPoolMinimumBufferCountKey: 3 as NSNumber]
-        // PQ: request uncompressed 10-bit biplanar output, so the explicit shader path decodes PQ (the private *_sRGB
-        // samplers would apply the sRGB EOTF) and HDRProbe can read the codes. Costs a copy; SDR streams are untouched.
-        // The decoder may ignore the request: streamColourState checks every frame's actual format (8-bit planes are
-        // still PQ-converted, other formats dropped).
-        if HDRPipeline.requiresExplicitPlanes(transfer: videoFormat!.extensions[kCMFormatDescriptionExtension_TransferFunction] as? String) {
-            let pixelFormat = getIsFullRangeForVideoFormat(videoFormat!) ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
-            destinationImageBufferAttributes[kCVPixelBufferPixelFormatTypeKey] = pixelFormat as NSNumber
-        }
-        // TODO come back to this maybe idk
-        //if pixelFormat != nil {
-        //    destinationImageBufferAttributes[kCVPixelBufferPixelFormatTypeKey] = pixelFormat! as NSNumber
-        //}
+        let destinationImageBufferAttributes = VideoDecoderOutput.attributes(videoFormat!)
 
         var decompressionSession:VTDecompressionSession? = nil
         err = VTDecompressionSessionCreate(allocator: nil, formatDescription: videoFormat!, decoderSpecification: videoDecoderSpecification as CFDictionary, imageBufferAttributes: destinationImageBufferAttributes as CFDictionary, outputCallback: nil, decompressionSessionOut: &decompressionSession)

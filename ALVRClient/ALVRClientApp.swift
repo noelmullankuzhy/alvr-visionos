@@ -136,6 +136,7 @@ struct ALVRClientApp: App {
                 model.isShowingClient = false
                 EventHandler.shared.initializeAlvr()
                 DiagProbes.start()
+                if Diag.isOn { EventHandler.shared.objectWillChange.send() } // reveal the gated diagnostic controls
                 await WorldTracker.shared.initializeAr()
                 EventHandler.shared.start()
             }

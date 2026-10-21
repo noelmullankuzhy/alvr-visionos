@@ -45,7 +45,7 @@ python3 tools/diag/netprobe-send.py HEADSET_IP --mode tcp --duration 30
 sh tools/diag/pull-diag.sh 'DEVICE NAME OR ID' /tmp/avp-diag-logs
 ```
 
-Port defaults to 9945; the AVP sink must already be listening. The Python file
+Port defaults to 9944; the AVP sink must already be listening. The Python file
 uses only the Python 3.9 standard library and also runs on Windows. UDP sends
 one burst per frame, pacing from absolute monotonic deadlines. Fractional byte
 budgets carry between frames. Packet size is a **maximum UDP payload**; a frame's
@@ -161,3 +161,88 @@ manifest. These are media-clock samples, not measured photon presentation times.
 Record headset brightness, OS/model, ambient light, fit and thermal/power state
 alongside logs. Device photometry or Noel's visual comparison remains necessary
 to establish actual brightness; playback eligibility does not measure headroom.
+
+## M7 / M8 on headset
+
+Enable Diagnostics in Advanced Settings and restart the app (or launch with
+`ALVR_DIAG=1`). Advanced Settings then shows **Decode bench**, a port field
+(default 9944), **TCP bulk**, **Net sink**, **Stop**, and run status. These controls
+and their resources are absent with diagnostics off. Stop the stream first;
+a stream start synchronously closes the network listener and cancels decode work.
+
+Generate stress content with independent moving luma/chroma noise to fill high
+bitrate requests, then copy a clip directory to the installed client:
+
+```sh
+swift tools/diag/make-hevc-clips.swift --out /tmp/avp-noise --content noise --bitrate 150000000
+sh tools/diag/push-clips.sh 'DEVICE NAME OR ID' /tmp/avp-noise
+```
+
+`--content default` preserves the moving ramps/bars. Noise uses deterministic
+frame-seeded xorshift samples across the full limited luma/chroma range. Encoding
+is CPU-heavy on large noise inputs; generation speed is not a decoder result.
+Both `achievedBitrate` and the existing `bitrate` manifest field contain measured
+compressed sample bytes × 8 / media duration. Compare these with `requestedBitrate`;
+an encoder target is not evidence that the requested bitrate was reached.
+
+**Decode bench** reads each MOV/MP4/M4V in Documents/diag-clips, in filename order,
+and runs 1/2 independent hardware-required sessions in max/paced modes, without
+presentation. The shared client output attributes leave SDR in the native format
+and request explicit full/video-range 10-bit planes for PQ. Each session has at
+most eight outstanding submissions; latency is submit-to-callback wall time,
+quantiles use nearest rank, and fps/pixel rate aggregate both sessions over their
+common wall interval (coded dimensions, not visible eye regions). Paced runs
+include the last frame period. Drops are submitted minus successful callbacks;
+errors, actual output fourcc(s), hardware property readback, dimensions, source
+cadence and depth limit are logged through Diag. Err -1 is an outstanding-slot
+stall, -2 a reader failure, -3 hardware readback false; VT errors retain OSStatus.
+Cancellation drains outstanding frames. Inspect every trial's `err` and `hw`;
+the UI's completion message alone does not establish hardware acceptance.
+
+**Net sink** listens on IPv4, UDP unless TCP bulk is selected. Each run lasts up
+to 60 seconds, or until Stop, leaving the panel, or a stream starts. Use one sender
+run per sink run; start the sink before the sender. Specify `--port` on the sender
+if changed. If ALVR or another listener owns 9944, select another port on both.
+UDP pins the first valid sender address/port and counts foreign/malformed packets
+separately. TCP consumes unframed bulk and reports throughput only.
+
+`DIAG net` reports once per second and once with `summary=true`. `mbps` includes
+UDP diagnostic headers, excludes UDP/IP headers; periodic rates use the elapsed
+report interval. Summary rates use first-to-last valid reception (`active_seconds`),
+excluding setup/stop idle time. All other counters/distributions are cumulative:
+
+- `loss`: highest sequence + 1 minus unique received packets; includes leading
+  loss and repairs late arrivals. Trailing loss cannot be known without a sender
+  end marker. Duplicates do not repair loss. `reorder` counts unique arrivals
+  below the highest sequence. History retains at least 65536 sequence numbers;
+  older arrivals count as `stale` and remain lost. At most 256 incomplete frames
+  are tracked; incomplete/evicted frames never enter completion distributions.
+- `jitter_ms`: RFC3550-style EWMA of absolute changes in (receive time − send
+  time), alpha 1/16, using unique arrivals in reception order.
+- `spread_p95_ms` / `spread_p99_ms` and `burst_tail_p95_ms` / `burst_tail_p99_ms`:
+  nearest-rank first-to-last reception spread of **complete** frames, including
+  reordering. They measure delivery spread, not absolute one-way latency.
+- `owdv_ms`: max minus min packet transit; `owdv_p95_ms` / `owdv_p99_ms`:
+  complete-frame worst packet transit relative to the minimum packet transit
+  across the run. Sender/receiver clock offset cancels; drift can still contribute.
+
+Validation (no device required except the final measurement runs):
+
+```sh
+sh tests/swift/run-tests.sh
+sh /Users/noel/Projects/Personal/vr-gaming/tools/typecheck-client.sh "$PWD"
+/usr/bin/python3 -m unittest discover -s tools/diag -p 'test_*.py'
+/opt/homebrew/bin/python3 -m unittest discover -s tools/diag -p 'test_*.py'
+DIAG_LOOPBACK=1 sh tests/swift/run-tests.sh DiagSinkLoopback
+```
+
+The Swift tests cover parser golden bytes cross-checked against the Python sender,
+loss/reorder/jitter and decode statistics, run exclusion/ownership, actual bench
+compilation and shared SDR/PQ output requests. `test_noise.py` asserts >=2× the
+bitrate of default content for a 640×360/30fps/1s clip at the same 20 Mb/s request.
+It explicitly skips only HEVC creation refusal -12908. Swift and Python loopback
+tests are opt-in; the worker sandbox denies bind. HDRGPUTests also cannot access
+a Metal device there: use `SWIFT_SKIP_TESTS=HDRGPUTests sh tests/swift/run-tests.sh`
+for the remaining tests (the runner prints the explicit skip), and run the normal
+suite, noise test, and both loopback suites outside that sandbox. Hardware decode
+acceptance/throughput/format and real PC→AVP network tails remain device-only.

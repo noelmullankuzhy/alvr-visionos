@@ -12,6 +12,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 FILTER="$1"
 OUT="$ROOT/local-scratch/swift-tests"
 mkdir -p "$OUT"
+export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$OUT/module-cache}"
 fail=0
 ran=0
 for t in "$ROOT"/tests/swift/*Tests.swift; do
@@ -20,6 +21,10 @@ for t in "$ROOT"/tests/swift/*Tests.swift; do
   if [ -n "$FILTER" ] && [ "$name" != "$FILTER" ] && [ "$name" != "${FILTER}Tests" ]; then
     continue
   fi
+  # Explicit opt-out for hardware unavailable in a worker sandbox; normal runs skip nothing.
+  case ",${SWIFT_SKIP_TESTS:-}," in
+    *,"$name",*) echo "SKIP $name (SWIFT_SKIP_TESTS)"; continue ;;
+  esac
   srcs=""
   for s in $(sed -n 's#^// SOURCES: ##p' "$t" | head -1); do
     srcs="$srcs $ROOT/$s"

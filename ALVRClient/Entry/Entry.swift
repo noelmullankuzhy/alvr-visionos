@@ -372,6 +372,8 @@ struct Entry: View {
                             saveAction()
                         }
 
+                        if Diag.isOn { DiagBenchView() }
+
                         Button {
                             openWindow(id: "InputDebug")
                         } label: {

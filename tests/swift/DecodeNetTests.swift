@@ -53,6 +53,22 @@ import Foundation
         expectEqual(net.loss, 1, "interior gap")
         expectEqual(net.spreads.count, 1, "incomplete frame excluded")
         expectEqual(net.percentile([1,2,3,4,5], 0.99), 5, "tail nearest rank")
+        var shifted = NetMeasurement()
+        shifted.receive(packet(1, 1, 1_001_000_000), bytes: 100, nowNs: 101_000_000)
+        shifted.receive(packet(2, 2, 1_002_000_000), bytes: 100, nowNs: 104_000_000)
+        shifted.receive(packet(0, 0, 1_000_000_000), bytes: 100, nowNs: 105_000_000)
+        expectEqual(shifted.jitterMs, 0.3046875, "jitter independent of clock origin")
+        expectEqual(shifted.delayVariationMs, 5, "delay variation independent of clock origin")
+        expectEqual(shifted.tail(0.99), 5, "relative frame tail independent of clock origin")
+        var paced = NetMeasurement()
+        paced.receive(packet(0, 0, 0), bytes: 28, nowNs: 1_000_000)
+        paced.receive(packet(1, 1, 100_000_000), bytes: 28, nowNs: 101_000_000)
+        expectEqual(paced.jitterMs, 0, "sender pacing gaps are not network jitter")
+        var bounded = NetMeasurement()
+        bounded.receive(packet(100_000, 0, 0), bytes: 28, nowNs: 1_000_000)
+        bounded.receive(packet(0, 0, 0), bytes: 28, nowNs: 2_000_000)
+        expectEqual(bounded.stale, 1, "ancient sequence outside history")
+        expectEqual(bounded.loss, 100_000, "ancient packet cannot corrupt unique count")
         // Gate must exclude all resources when off, stop synchronously on stream start,
         // and let a cancelled older decode finish without stopping a newer run.
         var starts = 0, stops = 0
