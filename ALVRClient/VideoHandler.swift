@@ -887,10 +887,13 @@ struct VideoHandler {
             matrix: string(kCMFormatDescriptionExtension_YCbCrMatrix),
             fullRange: number(kCMFormatDescriptionExtension_FullRangeVideo).map { $0.boolValue },
             bitDepth: number(kCMFormatDescriptionExtension_BitsPerComponent)?.intValue,
-            planeBitDepth: pixelFormat.flatMap(getPlaneBitDepthForFormat))
+            planeBitDepth: pixelFormat.flatMap(getPlaneBitDepthForFormat),
+            output: colourOutput)
         cachedColourSelection = (videoFormat, pixelFormat, selection)
         return selection
     }
+    // Drawable primaries policy, read once per launch: extended linear sRGB unless ALVRDisplayP3Output is set.
+    static let colourOutput = ColourOutput(displayP3Default: UserDefaults.standard.bool(forKey: ColourOutput.displayP3DefaultsKey))
     // Pixel format of the decoded buffer the renderer last bound; nil until the first frame.
     static var boundPixelFormat: OSType? = nil
     private static var cachedColourSelection: (videoFormat: CMFormatDescription, pixelFormat: OSType?, selection: ColourSelection)? = nil

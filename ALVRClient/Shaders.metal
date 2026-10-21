@@ -120,10 +120,11 @@ constant float4 ENCODING_YUV_TRANSFORM_0 [[ function_constant(ALVRFunctionConsta
 constant float4 ENCODING_YUV_TRANSFORM_1 [[ function_constant(ALVRFunctionConstantEncodingYUVTransform1) ]];
 constant float4 ENCODING_YUV_TRANSFORM_2 [[ function_constant(ALVRFunctionConstantEncodingYUVTransform2) ]];
 constant float4 ENCODING_YUV_TRANSFORM_3 [[ function_constant(ALVRFunctionConstantEncodingYUVTransform3) ]];
-// Columns of the linear source-primaries -> linear Display P3 matrix (ColourPipeline.swift; identity for PQ/HLG).
-constant float3 GAMUT_TO_DISPLAY_P3_0 [[ function_constant(ALVRFunctionConstantGamutToDisplayP3_0) ]];
-constant float3 GAMUT_TO_DISPLAY_P3_1 [[ function_constant(ALVRFunctionConstantGamutToDisplayP3_1) ]];
-constant float3 GAMUT_TO_DISPLAY_P3_2 [[ function_constant(ALVRFunctionConstantGamutToDisplayP3_2) ]];
+// Columns of the linear source-primaries -> linear output-primaries matrix (ColourPipeline.swift sourceToOutput:
+// identity for BT.709 into the default extended-linear sRGB output, and for PQ/HLG).
+constant float3 GAMUT_TO_OUTPUT_0 [[ function_constant(ALVRFunctionConstantGamutToOutput_0) ]];
+constant float3 GAMUT_TO_OUTPUT_1 [[ function_constant(ALVRFunctionConstantGamutToOutput_1) ]];
+constant float3 GAMUT_TO_OUTPUT_2 [[ function_constant(ALVRFunctionConstantGamutToOutput_2) ]];
 
 float2 TextureToEyeUV(float2 textureUV, bool isRightEye) {
     // flip distortion horizontally for right eye
@@ -293,11 +294,11 @@ half3 rgb2hsv(half3 rgb) {
 half4 videoFrameFragmentShader_common(float3 color_in) {
     float3 linearSource = EncodingNonlinearToLinearRGB(color_in, ENCODING_GAMMA);
     float3 color = linearSource;
-    // CompositorServices expects extended-linear Display P3. RealityKit's interpretation of its texture is
-    // UNVERIFIED, so that path keeps the previous (unconverted) output.
+    // Output primaries follow ColourOutput: extended linear sRGB by default (measured in the simulator), Display P3
+    // opt-in. RealityKit's interpretation of its texture is UNVERIFIED, so that path keeps the unconverted output.
     if (!REALITYKIT_ENABLED) {
-        const float3x3 gamutToDisplayP3 = float3x3(GAMUT_TO_DISPLAY_P3_0, GAMUT_TO_DISPLAY_P3_1, GAMUT_TO_DISPLAY_P3_2);
-        color = gamutToDisplayP3 * linearSource;
+        const float3x3 gamutToOutput = float3x3(GAMUT_TO_OUTPUT_0, GAMUT_TO_OUTPUT_1, GAMUT_TO_OUTPUT_2);
+        color = gamutToOutput * linearSource;
     }
 
     half4 colorOut = half4(half3(color), 1.0);
@@ -354,7 +355,7 @@ fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]
 
 // Private (*_sRGB) YCbCr texture formats: the sampler itself applies YCbCr->RGB (matrix/range from the buffer, by the
 // driver) and the sRGB EOTF, returning RGB in the stream's primaries. It is not documented to convert primaries
-// (UNVERIFIED), so the common stage applies the same encoding gamma and primaries->P3 matrix as the explicit path;
+// (UNVERIFIED), so the common stage applies the same encoding gamma and output-primaries matrix as the explicit path;
 // ENCODING_YUV_TRANSFORM_* is not used here, so nothing is converted twice.
 fragment half4 videoFrameFragmentShader_SecretYpCbCrFormats(ColorInOut in [[stage_in]], texture2d<float> in_tex_y) {
     

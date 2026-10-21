@@ -1,7 +1,8 @@
 // SOURCES: ALVRClient/ColourPipeline.swift
 // ColourPipeline: YCbCr->RGB matrices (H.273 / BT.601, BT.709, BT.2020, full and limited range, 8- and 10-bit code
-// ranges), source primaries -> Display P3 matrices derived from chromaticities, and the colour selection parsed from
-// the format description (never inferring BT.2020 from bit depth).
+// ranges), source primaries -> output primaries (sRGB/BT.709 by default, Display P3 opt-in) derived from
+// chromaticities, the colour selection parsed from the format description (never inferring BT.2020 from bit depth),
+// and the full per-pixel path against the PC source pixels measured on the RDR2 title screen.
 import Foundation
 import simd
 
@@ -48,6 +49,31 @@ func decode(_ codes: simd_double3, _ selection: ColourSelection) -> simd_float3 
     return simd_float3(out.x, out.y, out.z)
 }
 
+// Independent reference sRGB OETF (IEC 61966-2-1), odd-symmetric like extended sRGB.
+func referenceSRGBEncode(_ linear: Double) -> Double {
+    let m = abs(linear)
+    let v = m <= 0.0031308 ? 12.92 * m : 1.055 * pow(m, 1 / 2.4) - 0.055
+    return linear < 0 ? -v : v
+}
+
+// The full explicit-path pixel: an 8-bit sRGB source pixel encoded as BT.709 full-range 10-bit YCbCr (rounded codes),
+// then what the shader does (yuvToRGB -> sRGB EOTF -> encoding gamma -> gamut step), then the compositor's reading of
+// the linear float drawable as extended linear sRGB, re-encoded to 8-bit sRGB (what a screenshot shows).
+func referencePixel(_ srgb8: simd_int3, _ selection: ColourSelection, gamma: Float = 1) -> simd_int3 {
+    let e = simd_double3(Double(srgb8.x), Double(srgb8.y), Double(srgb8.z)) / 255
+    let codes = referenceEncode(e, kr: 0.2126, kb: 0.0722, fullRange: true, bitDepth: 10).rounded(.toNearestOrEven)
+    let rgb = decode(codes, selection)
+    func toLinear(_ x: Float) -> Float { ColourPipeline.encodingGammaToLinear(ColourPipeline.srgbEOTF(x), gamma: gamma) }
+    let linear = selection.sourceToOutput * simd_float3(toLinear(rgb.x), toLinear(rgb.y), toLinear(rgb.z))
+    func code(_ x: Float) -> Int32 { Int32((min(max(referenceSRGBEncode(Double(x)), 0), 1) * 255).rounded()) }
+    return simd_int3(code(linear.x), code(linear.y), code(linear.z))
+}
+
+func expectWithinCodes(_ a: simd_int3, _ b: simd_int3, _ tol: Int32, _ message: String, file: StaticString = #file, line: UInt = #line) {
+    let d = abs(a &- b)
+    expect(d.x <= tol && d.y <= tol && d.z <= tol, "\(message): expected \(b), got \(a)", file: file, line: line)
+}
+
 func selection(_ matrix: YCbCrMatrix, fullRange: Bool, bits: Int) -> ColourSelection {
     let names: [YCbCrMatrix: String] = [.bt601: "ITU_R_601_4", .bt709: "ITU_R_709_2", .bt2020: "ITU_R_2020"]
     return ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: names[matrix], fullRange: fullRange, bitDepth: bits)
@@ -62,6 +88,9 @@ enum ColourPipelineTests {
         testLimitedRangeCodes()
         testPublishedLimitedMatrix()
         testPrimariesToDisplayP3()
+        testPrimariesToSRGB()
+        testOutputPolicy()
+        testMeasuredTitleScreenPixels()
         testSelection()
         testLogLineAndFourCC()
         testTransferFunctions()
@@ -93,13 +122,15 @@ enum ColourPipelineTests {
         expectNear(ColourPipeline.encodingGammaToLinear(1, gamma: 1.5), 1, 1e-7, "gamma(1)")
 
         // A 4:2:0 blue/red edge sample with G ~ -0.07 stays finite in every channel after the gamut matrix.
-        let sel = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 10)
         let edge = simd_float3(0.6, -0.07, 0.7)
         let linear = simd_float3(ColourPipeline.encodingGammaToLinear(eotf(edge.x), gamma: 1.5),
                                  ColourPipeline.encodingGammaToLinear(eotf(edge.y), gamma: 1.5),
                                  ColourPipeline.encodingGammaToLinear(eotf(edge.z), gamma: 1.5))
-        let p3 = sel.sourceToDisplayP3 * linear
-        expect(p3.x.isFinite && p3.y.isFinite && p3.z.isFinite, "edge sample finite in P3, got \(p3)")
+        for output in [ColourOutput.srgb, .p3] {
+            let sel = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 10, output: output)
+            let out = sel.sourceToOutput * linear
+            expect(out.x.isFinite && out.y.isFinite && out.z.isFinite, "edge sample finite, out=\(output), got \(out)")
+        }
     }
 
     // The YCbCr matrix follows the bound plane format, not the stream's BitsPerComponent.
@@ -208,10 +239,67 @@ enum ColourPipelineTests {
         let p3 = ColourPipeline.primariesToDisplayP3(.displayP3)
         expect(near(simd_length(p3.columns.0 - simd_double3(1, 0, 0)) + simd_length(p3.columns.1 - simd_double3(0, 1, 0)) + simd_length(p3.columns.2 - simd_double3(0, 0, 1)), 0, 1e-9), "P3->P3 is identity")
 
-        // The float matrix the shader gets transforms BT.709 white to P3 white and red to the published P3 red.
-        let sel = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: true, bitDepth: 10)
-        expectNear3(sel.sourceToDisplayP3 * simd_float3(1, 1, 1), simd_float3(1, 1, 1), 1e-6, "709 white -> P3 white")
-        expectNear3(sel.sourceToDisplayP3 * simd_float3(1, 0, 0), simd_float3(0.822462, 0.033194, 0.017083), 1e-4, "709 red -> P3")
+        // With the opt-in P3 policy the float matrix the shader gets maps BT.709 white to P3 white, red to P3 red.
+        let sel = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: true, bitDepth: 10, output: .p3)
+        expectNear3(sel.sourceToOutput * simd_float3(1, 1, 1), simd_float3(1, 1, 1), 1e-6, "709 white -> P3 white")
+        expectNear3(sel.sourceToOutput * simd_float3(1, 0, 0), simd_float3(0.822462, 0.033194, 0.017083), 1e-4, "709 red -> P3")
+    }
+
+    static func testPrimariesToSRGB() {
+        // Published BT.2020 -> BT.709 (ITU-R BT.2087-0, linear).
+        let bt2020: [[Double]] = [
+            [1.6605, -0.5876, -0.0728],
+            [-0.1246, 1.1329, -0.0083],
+            [-0.0182, -0.1006, 1.1187],
+        ]
+        let m = ColourPipeline.primariesConversion(from: .bt2020, to: .bt709)
+        for r in 0..<3 {
+            for c in 0..<3 {
+                expect(near(m[c][r], bt2020[r][c], 1e-4), "2020->709 [\(r)][\(c)] expected \(bt2020[r][c]) got \(m[c][r])")
+            }
+        }
+        // P3 -> 709 inverts the published 709 -> P3.
+        let p3to709 = ColourPipeline.primariesConversion(from: .displayP3, to: .bt709) * ColourPipeline.primariesToDisplayP3(.bt709)
+        expect(near(simd_length(p3to709.columns.0 - simd_double3(1, 0, 0)) + simd_length(p3to709.columns.1 - simd_double3(0, 1, 0)) + simd_length(p3to709.columns.2 - simd_double3(0, 0, 1)), 0, 1e-9), "P3->709 inverts 709->P3")
+    }
+
+    // Default output is extended linear sRGB (what the simulator compositor was measured to assume): BT.709 sources are
+    // passed through, BT.2020 SDR sources convert in linear light with negatives kept; ALVRDisplayP3Output opts into P3.
+    static func testOutputPolicy() {
+        let s709 = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: true, bitDepth: 10)
+        expectEqual(s709.output, .srgb, "default output policy")
+        expect(s709.sourceToOutput == matrix_identity_float3x3, "709 -> sRGB output is identity")
+        expect(!s709.convertsGamut, "709 -> sRGB output does not convert")
+        let unsignalled = ColourPipeline.select(primaries: nil, transfer: nil, matrix: nil, fullRange: nil, bitDepth: 8)
+        expect(unsignalled.sourceToOutput == matrix_identity_float3x3, "unsignalled (assumed 709) -> identity")
+
+        let s2020 = ColourPipeline.select(primaries: "ITU_R_2020", transfer: "IEC_sRGB", matrix: "ITU_R_2020", fullRange: true, bitDepth: 10)
+        expect(s2020.convertsGamut, "2020 -> sRGB output converts")
+        expectNear3(s2020.sourceToOutput * simd_float3(1, 1, 1), simd_float3(1, 1, 1), 1e-5, "2020 white -> 709 white")
+        let green = s2020.sourceToOutput * simd_float3(0, 1, 0)
+        expectNear3(green, simd_float3(-0.5876, 1.1329, -0.1006), 1e-4, "2020 green -> 709 keeps negatives")
+
+        let p3 = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: true, bitDepth: 10, output: .p3)
+        expectEqual(p3.output, .p3, "P3 output policy")
+        expect(p3.convertsGamut, "709 -> P3 output converts")
+        let p3Source = ColourPipeline.select(primaries: "P3_D65", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8)
+        expect(p3Source.convertsGamut, "P3 source -> sRGB output converts")
+
+        expectEqual(ColourOutput(displayP3Default: false), .srgb, "ALVRDisplayP3Output unset/false -> srgb")
+        expectEqual(ColourOutput(displayP3Default: true), .p3, "ALVRDisplayP3Output true -> p3")
+    }
+
+    // GM evidence (RDR2 title screen): PC capture logo red (203,0,0), snow (205,223,237). Sim before AC5 (no gamut
+    // step) showed (202,0,0); after AC5's 709 -> P3 step (186,38,26), which is the P3 values re-read as sRGB.
+    static func testMeasuredTitleScreenPixels() {
+        let srgb = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: true, bitDepth: 10)
+        expectWithinCodes(referencePixel(simd_int3(203, 0, 0), srgb), simd_int3(203, 0, 0), 1, "logo red round-trips with sRGB output")
+        expectWithinCodes(referencePixel(simd_int3(205, 223, 237), srgb), simd_int3(205, 223, 237), 1, "snow round-trips with sRGB output")
+        let p3 = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: true, bitDepth: 10, output: .p3)
+        // Hand arithmetic from linear 0.597 gives (187,38,26); the full path with 10-bit codes lands on the measurement.
+        let p3Red = referencePixel(simd_int3(203, 0, 0), p3)
+        expectWithinCodes(p3Red, simd_int3(187, 38, 26), 1, "P3 output re-read as sRGB = hand-computed desaturated red")
+        expectWithinCodes(p3Red, simd_int3(186, 38, 26), 0, "P3 output re-read as sRGB = measured sim red")
     }
 
     static func testSelection() {
@@ -242,23 +330,26 @@ enum ColourPipelineTests {
         expect(ColourPipeline.select(primaries: nil, transfer: nil, matrix: nil, fullRange: true, bitDepth: 8).fullRange, "full range flag")
         expectEqual(ColourPipeline.select(primaries: nil, transfer: nil, matrix: nil, fullRange: nil, bitDepth: nil).bitDepth, 8, "absent bit depth -> 8")
 
-        // Transfers: SDR transfers convert the gamut in linear light; PQ/HLG keep the previous (identity) behaviour.
+        // Transfers: SDR transfers convert the gamut in linear light (when the output primaries differ); PQ/HLG keep
+        // the previous (identity) behaviour.
         expectEqual(ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8).transfer, .sRGB, "sRGB transfer")
         expectEqual(ColourPipeline.select(primaries: nil, transfer: "ITU_R_709_2", matrix: nil, fullRange: true, bitDepth: 8).transfer, .bt709, "709 transfer")
         let pq = ColourPipeline.select(primaries: "ITU_R_2020", transfer: "SMPTE_ST_2084_PQ", matrix: "ITU_R_2020", fullRange: false, bitDepth: 10)
         expectEqual(pq.transfer, .pq, "PQ transfer")
         expect(!pq.convertsGamut, "PQ path does not convert gamut")
-        expect(pq.sourceToDisplayP3 == matrix_identity_float3x3, "PQ gamut matrix is identity")
+        expect(pq.sourceToOutput == matrix_identity_float3x3, "PQ gamut matrix is identity")
+        let pqP3 = ColourPipeline.select(primaries: "ITU_R_2020", transfer: "SMPTE_ST_2084_PQ", matrix: "ITU_R_2020", fullRange: false, bitDepth: 10, output: .p3)
+        expect(!pqP3.convertsGamut, "PQ path does not convert gamut with P3 output either")
         expectEqual(ColourPipeline.select(primaries: nil, transfer: "ITU_R_2100_HLG", matrix: nil, fullRange: true, bitDepth: 10).transfer, .hlg, "HLG transfer")
-        expect(ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8).convertsGamut, "sRGB converts gamut")
-        expect(ColourPipeline.select(primaries: "P3_D65", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8).sourceToDisplayP3 == matrix_identity_float3x3, "P3 source -> identity")
+        expect(ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8, output: .p3).convertsGamut, "sRGB transfer converts gamut to P3")
+        expect(ColourPipeline.select(primaries: "P3_D65", transfer: "IEC_sRGB", matrix: nil, fullRange: true, bitDepth: 8, output: .p3).sourceToOutput == matrix_identity_float3x3, "P3 source -> P3 identity")
     }
 
     static func testLogLineAndFourCC() {
         let s = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "IEC_sRGB", matrix: "ITU_R_709_2", fullRange: true, bitDepth: 10)
-        expectEqual(s.logLine(path: "explicit"), "ALVRCOLOUR primaries=bt709 transfer=sRGB matrix=bt709 range=full bits=10 path=explicit")
-        let a = ColourPipeline.select(primaries: nil, transfer: nil, matrix: nil, fullRange: nil, bitDepth: 10)
-        expectEqual(a.logLine(path: "secret"), "ALVRCOLOUR primaries=bt709(assumed) transfer=unknown matrix=bt709(assumed) range=limited(assumed) bits=10 path=secret")
+        expectEqual(s.logLine(path: "explicit"), "ALVRCOLOUR primaries=bt709 transfer=sRGB matrix=bt709 range=full bits=10 out=srgb path=explicit")
+        let a = ColourPipeline.select(primaries: nil, transfer: nil, matrix: nil, fullRange: nil, bitDepth: 10, output: .p3)
+        expectEqual(a.logLine(path: "secret"), "ALVRCOLOUR primaries=bt709(assumed) transfer=unknown matrix=bt709(assumed) range=limited(assumed) bits=10 out=p3 path=secret")
         expectEqual(ColourPipeline.fourCC(0x78343230), "x420")
         expectEqual(ColourPipeline.fourCC(0x26786630), "&xf0")
         expectEqual(ColourPipeline.fourCC(0x00000001), "0x00000001")
