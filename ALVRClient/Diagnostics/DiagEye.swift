@@ -1,9 +1,39 @@
 import Foundation
 import simd
 
+// Persisted independently of Diagnostics. UI writes and render reads share this cache;
+// UserDefaults is read only when the shared flag is first accessed.
+final class EyeBadgeFlag {
+    static let defaultsKey = "ALVREyeBadges"
+    static let shared = EyeBadgeFlag(defaultsValue: UserDefaults.standard.object(forKey: defaultsKey) as? Bool)
+    private let lock = NSLock()
+    private var cachedEnabled: Bool
+
+    init(defaultsValue: Bool?) {
+        cachedEnabled = defaultsValue ?? false
+    }
+
+    var enabled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedEnabled
+    }
+
+    func update(defaultsValue: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        cachedEnabled = defaultsValue
+    }
+}
+
 // Shared eye identity for diagnostic overlays (decisions 65a/b), including the pending corner chart.
 enum DiagEye: String {
     case left = "L", right = "R"
+    // Diagnostics and streaming state do not control the user's badge opt-in.
+    static func shouldDraw(badgesEnabled: Bool, isRealityKit: Bool) -> Bool {
+        badgesEnabled && !isRealityKit
+    }
+
     var glyph: String { rawValue }
     var colourName: String { self == .left ? "cyan" : "magenta" }
     var colour: SIMD4<Float> { self == .left ? SIMD4(0, 1, 1, 1) : SIMD4(1, 0, 1, 1) }

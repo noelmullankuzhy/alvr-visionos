@@ -5,6 +5,32 @@ import simd
 
 @main enum DiagEyeTests {
     static func main() throws {
+        let flag = EyeBadgeFlag(defaultsValue: nil)
+        expect(!flag.enabled, "eye badges default off when no persisted value exists")
+        expect(!EyeBadgeFlag(defaultsValue: false).enabled, "persisted off")
+        expect(EyeBadgeFlag(defaultsValue: true).enabled, "persisted on restored")
+        for enabled in [true, false, true, false] {
+            flag.update(defaultsValue: enabled)
+            expectEqual(flag.enabled, enabled, "live on/off uses the same cached flag")
+        }
+        // Diagnostics and stream state must never supply implicit permission to draw.
+        for diagnostics in [false, true] {
+            for streaming in [false, true] {
+                for enabled in [false, true] {
+                    expectEqual(DiagEye.shouldDraw(badgesEnabled: enabled, isRealityKit: false), enabled,
+                                "explicit setting wins: diagnostics=\(diagnostics), streaming=\(streaming)")
+                    expect(!DiagEye.shouldDraw(badgesEnabled: enabled, isRealityKit: true), "RealityKit never draws badges")
+                }
+            }
+        }
+        let defaults = UserDefaults(suiteName: "EyeBadgeTests.\(UUID().uuidString)")!
+        defer { defaults.removeObject(forKey: EyeBadgeFlag.defaultsKey) }
+        defaults.set(true, forKey: EyeBadgeFlag.defaultsKey)
+        expect(EyeBadgeFlag(defaultsValue: defaults.object(forKey: EyeBadgeFlag.defaultsKey) as? Bool).enabled,
+               "persisted opt-in survives flag recreation")
+        defaults.set(false, forKey: EyeBadgeFlag.defaultsKey)
+        expect(!EyeBadgeFlag(defaultsValue: defaults.object(forKey: EyeBadgeFlag.defaultsKey) as? Bool).enabled,
+               "persisted opt-out survives flag recreation")
         // Creating a descriptor needs no Metal device; exercise the factory used by every badge pipeline.
         for format in [MTLPixelFormat.rgba16Float, .bgra8Unorm_srgb] {
             let descriptor = DiagEyeDrawing.pipelineDescriptor(colourFormat: format, depthFormat: .depth32Float)
@@ -45,9 +71,18 @@ import simd
         expect(renderer.contains("Diag.capture(enabled: diagProbe != nil, DiagRenderProbe.timing"), "actual deadline/offset reads gated")
         expect(renderer.contains("Diag.capture(enabled: diagProbe != nil, queuedFrame?.timestamp)"), "actual source ID read gated")
         expect(renderer.contains("diagEye?.encode"), "streaming and idle draw before present")
-        expect(renderer.contains("layerRenderer != nil && Diag.isOn ?"), "off creates no badge object/pipeline")
+        expect(renderer.contains("DiagEye.shouldDraw(badgesEnabled: EyeBadgeFlag.shared.enabled, isRealityKit: isRealityKit)"),
+               "main renderer gates creation and encoding on live flag")
+        expect(!renderer.contains("self.diagEye = layerRenderer != nil && Diag.isOn"), "Diagnostics does not create badges")
+        let entry = try String(contentsOfFile: "ALVRClient/Entry/Entry.swift", encoding: .utf8)
+        expect(entry.contains("@AppStorage(EyeBadgeFlag.defaultsKey)"), "UI persists eye badge setting")
+        expect(entry.contains("Eye badges (L/R)"), "explicit Advanced Settings label")
+        expect(entry.contains("EyeBadgeFlag.shared.update(defaultsValue: eyeBadgesEnabled)"), "UI updates live cache")
         let ramp = try String(contentsOfFile: "ALVRClient/Diagnostics/EDRRenderer.swift", encoding: .utf8)
         expect(ramp.contains("badge?.encode"), "EDR uses same badge")
+        expect(ramp.contains("DiagEye.shouldDraw(badgesEnabled: EyeBadgeFlag.shared.enabled, isRealityKit: false)"),
+               "EDR uses the same live opt-in")
+        expect(!ramp.contains("badge = Diag.isOn ?"), "EDR Diagnostics does not create badges")
         finishTests("DiagEye")
     }
 }

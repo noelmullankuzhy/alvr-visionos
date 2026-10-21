@@ -170,7 +170,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     private var rqSweep: RQRenderer?
     // Corner chart (decision 65): Metal renderer, no stream; nil unless Diagnostics is on and the setting picks a mode.
     let cornerChart: CornerChartRenderer?
-    let diagEye: DiagEyeRenderer?
+    private var diagEye: DiagEyeRenderer?
     let diagFrameCapture: DiagFrameCaptureSession?
     var hdrEnabled = false
     var currentRenderColorFormat = renderColorFormatSDR
@@ -224,7 +224,6 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         self.cornerChart = layerRenderer.flatMap { CornerChartRenderer.make(device: $0.device, layerRenderer: $0) }
         self.diagFrameCapture = layerRenderer != nil && Diag.isOn && ALVRClientApp.gStore.settings.captureDiagnosticFrames
             ? DiagFrameCaptureSession() : nil
-        self.diagEye = layerRenderer != nil && Diag.isOn ? DiagEyeRenderer(layerRenderer!) : nil
         if layerRenderer == nil && Diag.isOn { DiagEye.unsupported() }
 
         let uniformBufferSize = alignedUniformsSize * maxBuffersInFlight
@@ -1212,9 +1211,14 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         if let rqSweep, !EventHandler.shared.streamingActive {
             rqSweep.encode(layer: layerRenderer!, drawables: drawables, buffer: commandBuffer)
         }
-        for drawable in drawables {
-            diagEye?.encode(buffer: commandBuffer, drawable: drawable, mode: diagSourceId == nil ? "idle" : "streaming",
-                            generation: EventHandler.videoStreams.currentStream?.generation)
+        if DiagEye.shouldDraw(badgesEnabled: EyeBadgeFlag.shared.enabled, isRealityKit: isRealityKit), let layerRenderer {
+            if diagEye == nil { diagEye = DiagEyeRenderer(layerRenderer) }
+            for drawable in drawables {
+                diagEye?.encode(buffer: commandBuffer, drawable: drawable, mode: diagSourceId == nil ? "idle" : "streaming",
+                                generation: EventHandler.videoStreams.currentStream?.generation)
+            }
+        } else {
+            diagEye = nil
         }
         diagFrameCapture?.encode(buffer: commandBuffer, drawables: drawables,
                                  idle: !renderingStreaming && !EventHandler.shared.streamingActive, chart: cornerChart)
