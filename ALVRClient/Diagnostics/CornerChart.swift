@@ -3,7 +3,7 @@
 //
 // Corner chart (GM decision 65): measures where each eye's visible area ends and its shape (rectangle, rounded or
 // ellipse), for the render corner trim (decision 60). Per eye, in that eye's own tangent space, 16 spokes every 22.5
-// degrees (0 = right, counter-clockwise) with rings at 100 ... 75% of the eye's tangent extent along each spoke. Spoke
+// degrees (0 = right, counter-clockwise) with rings at 100 ... 55% of the eye's tangent extent along each spoke. Spoke
 // angles are in drawable-normalised space (each quadrant scaled by its own tangent extents), so the diagonals end at
 // the drawable corners and every ring is the nested rectangle at that percentage. The wearer keeps the head still,
 // looks along each spoke and steps the highlighted ring until it is the outermost one still seen; the marks give the
@@ -120,7 +120,8 @@ struct CornerShape {
 }
 
 enum CornerChart {
-    static let ringPercents = [100, 98, 96, 94, 92, 90, 88, 85, 80, 75]
+    // Down to 55 so an elliptical boundary (diagonal at ~71% of the corner) is inside the chart (decision 65c).
+    static let ringPercents = [100, 95, 90, 85, 80, 75, 70, 65, 60, 55]
     static let linePx = 3.0, padPx = 2.0, maxLabelPx = 48.0, minLabelPx = 6.0
 
     struct Rect: Equatable { var x0, y0, x1, y1: Double }
@@ -205,13 +206,29 @@ enum CornerChart {
         return out
     }
 
-    // The eye glyph's box: centred on the tangent origin, 0.2 of the drawable height (0.6 as wide), shrunk to stay
-    // within 80% of the space inside the innermost ring.
+    // Space the innermost ring's labels may take inside its line, plus a margin: the glyph and status keep out of it.
+    private static let labelBandPx = linePx + 2 * padPx + maxLabelPx + 6
+    private static let statusGapPx = 12.0, statusBorderPx = 6.0
+
+    private static func statusPx(_ h: Double) -> Double { 0.04 * h }
+
+    // The eye glyph's box: centred on the tangent origin, 0.2 of the drawable height (0.6 as wide), shrunk so it and
+    // the status below it stay inside the innermost ring and clear of that ring's labels.
     static func glyphRect(_ t: CornerTangents, widthPx w: Double, heightPx h: Double) -> Rect {
         let c = t.ndc(x: 0, y: 0), r = ringRect(t, pct: ringPercents.last!)
-        let halfW = min(r.x1 - c.x, c.x - r.x0) * w / 2, halfH = min(r.y1 - c.y, c.y - r.y0) * h / 2
-        let gh = min(0.2 * h, 1.6 * halfH, 1.6 * halfW / 0.6), gw = 0.6 * gh
+        let side = min(r.x1 - c.x, c.x - r.x0) * w / 2 - labelBandPx
+        let top = (r.y1 - c.y) * h / 2 - labelBandPx
+        let bottom = (c.y - r.y0) * h / 2 - labelBandPx - (statusGapPx + statusPx(h) + statusBorderPx)
+        let gh = max(min(0.2 * h, 2 * top, 2 * bottom, 2 * side / 0.6), 0), gw = 0.6 * gh
         return Rect(x0: c.x - gw / w, y0: c.y - gh / h, x1: c.x + gw / w, y1: c.y + gh / h)
+    }
+
+    // The status box (text plus its black border), centred under the glyph.
+    static func statusRect(_ t: CornerTangents, _ status: String, widthPx w: Double, heightPx h: Double) -> Rect {
+        let g = glyphRect(t, widthPx: w, heightPx: h), size = textSize(status, h: statusPx(h), vertical: false)
+        let cx = (g.x0 + g.x1) / 2, y1 = g.y0 - (statusGapPx - statusBorderPx) * 2 / h
+        return Rect(x0: cx - (size.w / 2 + statusBorderPx) * 2 / w, y0: y1 - (size.h + 2 * statusBorderPx) * 2 / h,
+                    x1: cx + (size.w / 2 + statusBorderPx) * 2 / w, y1: y1)
     }
 
     // Block L / R (stroke 0.16 of the height): L = stem and foot; R = stem, top, middle, bowl side and a stepped leg.
@@ -243,10 +260,10 @@ enum CornerChart {
         for label in labels(t, widthPx: w, heightPx: h) {
             out += text(label.text, in: label.rect, vertical: label.vertical, color: eye.color)
         }
-        // Spoke direction: dots from 10 to 70% (the selected spoke brighter and larger).
+        // Spoke direction: dots from 10 to 50%, inside the innermost ring (the selected spoke brighter and larger).
         for k in 0..<CornerSpokes.count {
             let on = selected?.spoke == k, s = on ? 4.0 : 2.0
-            for pct in stride(from: 10, through: 70, by: 10) {
+            for pct in stride(from: 10, through: 50, by: 10) {
                 let p = spokeNdc(t, k, pct)
                 out.append(Quad(rect: Rect(x0: p.x - s * dx, y0: p.y - s * dy, x1: p.x + s * dx, y1: p.y + s * dy),
                                 color: on ? eye.color : eye.dimColor))
@@ -276,8 +293,9 @@ enum CornerChart {
             boxed("\(pct)", centre: (a.x - d.x * (m + size.w / 2) * dx, a.y - d.y * (m + size.h / 2) * dy), px: maxLabelPx)
         }
         if !status.isEmpty {
-            let g = glyphRect(t, widthPx: w, heightPx: h), px = 0.04 * h
-            boxed(status, centre: ((g.x0 + g.x1) / 2, g.y0 - (12 + px / 2) * dy), px: px)
+            let r = statusRect(t, status, widthPx: w, heightPx: h), b = statusBorderPx
+            out.append(Quad(rect: r, color: black))
+            out += text(status, in: Rect(x0: r.x0 + b * dx, y0: r.y0 + b * dy, x1: r.x1 - b * dx, y1: r.y1 - b * dy), vertical: false, color: white)
         }
         return out
     }

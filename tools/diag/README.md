@@ -83,7 +83,7 @@ sh tools/diag/capture-mirror.sh -l
 
 The client's corner chart (Diagnostics on, Corner chart setting, no stream) draws
 16 spokes per eye every 22.5° (0 = right, counter-clockwise), with numbered rings at
-100, 98, 96, 94, 92, 90, 88, 85, 80, 75% of that eye's tangent extent along each spoke.
+100, 95, 90, 85, 80, 75, 70, 65, 60, 55% of that eye's tangent extent along each spoke.
 On the diagonals, 100 is the drawable corner. The left eye's chart is cyan and the
 right's magenta (rings, numbers, spokes), with a large L / R at the eye's centre, so
 each capture names the eye the mirror shows (decision 65a). Mirror the headset to the Mac (Control
@@ -104,8 +104,10 @@ the marks is expected; a larger one means the marks are conservative. The summar
 logs its raw numbers so the shape can be recomputed. Per quadrant with axis radii a, b
 (normalised so the axis spokes are 1 at 100%), a rectangle's diagonal is sqrt(a²+b²),
 an ellipse's is 1/sqrt((1/a²+1/b²)/2), and the superellipse exponent is
-n = ln2 / ln(√2·axis_r/diag_r). The innermost ring is 75%, so an ellipse
-(diagonal ≈ 70.7%) shows as the 75 floor (`diag_floor=true`), not as an exact fit.
+n = ln2 / ln(√2·axis_r/diag_r). An ellipse through the axis points crosses the
+diagonal at ≈ 70.7%, so it marks on the 70 ring and classifies as `ellipse`
+(decision 65c). A diagonal at the innermost ring (55%) sets `diag_floor=true`
+(the true edge may be further in).
 No visionOS 27.0 API reports the visible area (`corner api=unavailable`), so these
 are subjective marks.
 

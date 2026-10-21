@@ -379,7 +379,7 @@ struct Entry: View {
                                 }
                             } label: {
                                 Text("Corner chart")
-                                Text("With no stream: 16 numbered spokes, rings at 100-75% of each eye's view. Head still, look along each spoke. Pinch right/left: ring out/in; hold right: record; hold left: back (or d-pad, A, B).")
+                                Text("With no stream: 16 numbered spokes, rings at 100-55% of each eye's view. Head still, look along each spoke. Pinch right/left: ring out/in; hold right: record; hold left: back (or d-pad, A, B).")
                                     .font(.system(size: 10))
                             }
                             .pickerStyle(.menu)
