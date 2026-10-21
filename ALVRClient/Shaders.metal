@@ -443,3 +443,26 @@ fragment float4 diagRQFragment(float4 position [[position]], constant float2 &ce
     float value = fmod(floor(p.x < 0 ? position.x : position.y), 2.0);
     return float4(value, value, value, 1.0);
 }
+
+// Corner chart (Diagnostics, CornerChartRenderer.swift): per vertex (ndc x, ndc y, view index, 0) then colour, drawn
+// without a projection; vertices of the other view collapse to one off-screen point.
+struct CornerChartOut {
+    float4 position [[position]];
+    float4 color;
+};
+
+vertex CornerChartOut cornerChartVertexShader(uint vid [[vertex_id]],
+                                              ushort amp_id [[amplification_id]],
+                                              constant float4 *verts [[buffer(BufferIndexMeshPositions)]])
+{
+    CornerChartOut out;
+    float4 p = verts[2 * vid];
+    out.color = verts[2 * vid + 1];
+    out.position = ushort(p.z) == amp_id ? float4(p.x, p.y, 0.5, 1.0) : float4(-2.0, -2.0, 0.5, 1.0);
+    return out;
+}
+
+fragment float4 cornerChartFragmentShader(CornerChartOut in [[stage_in]])
+{
+    return in.color;
+}

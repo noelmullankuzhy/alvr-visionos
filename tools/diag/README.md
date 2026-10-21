@@ -76,6 +76,44 @@ time, offered Mb/s and late frames; they do not establish receipt/loss at the si
 Socket timeouts/errors produce a nonzero exit. The puller targets the paired
 app's `uk.lumenio.alvr` data container, `Documents/diag`, and preserves logs on device.
 
+## Corner chart mirror comparison
+
+```sh
+sh tools/diag/capture-mirror.sh -i 2 -o /tmp/avp-mirror
+sh tools/diag/capture-mirror.sh -l
+```
+
+The client's corner chart (Diagnostics on, Corner chart setting, no stream) draws
+16 spokes per eye every 22.5° (0 = right, counter-clockwise), with numbered rings at
+100, 95, 90, 85, 80, 75, 70, 65, 60, 55% of that eye's tangent extent along each spoke.
+On the diagonals, 100 is the drawable corner. The left eye's chart is cyan and the
+right's magenta (rings, numbers, spokes), with a large L / R at the eye's centre, so
+each capture names the eye the mirror shows (decision 65a). Mirror the headset to the Mac (Control
+Centre > Mirror My View > this Mac). The script then captures the largest on-screen
+window whose owner or title matches `-w` (default `airplay`; use `-l` and pass the
+owner from the list if your receiver is named differently). It captures every `-i`
+seconds into `mirror-<UTC>-<n>.png`, with `index.tsv` recording the time and window id.
+It exits with an error when no window matches, Screen Recording is not granted to
+the terminal, or a capture fails.
+
+To read a capture, hold the chart's head pose steady. For each spoke, the outermost
+ring number visible in the image is that spoke's mirror crop. Compare it with the
+`DIAG corner eye=… pos_deg=… ring_pct=…` mark you recorded on the headset (the
+outermost ring you could see) and with the eye's `corner_summary` line (`r=` radii,
+`axis_r`, `diag_r`, `ratio`, `shape`). The mirror is one eye's processed view, so it
+shows the mirror's own crop, not the panel's visible area. A mirror crop smaller than
+the marks is expected; a larger one means the marks are conservative. The summary
+logs its raw numbers so the shape can be recomputed. Per quadrant with axis radii a, b
+(normalised so the axis spokes are 1 at 100%), along the fixed diagonal a rectangle
+is left at √2·min(a, b) and an ellipse at 1/sqrt((1/a²+1/b²)/2). Each quadrant's
+superellipse exponent n solves (s/a)ⁿ + (s/b)ⁿ = 1 with s = diag_r/√2
+(`superellipse_q`, inf at or beyond the rectangle); `superellipse_n` = 1/mean(1/n). An ellipse through the axis points crosses the
+diagonal at ≈ 70.7%, so it marks on the 70 ring and classifies as `ellipse`
+(decision 65c). A diagonal at the innermost ring (55%) sets `diag_floor=true`
+(the true edge may be further in).
+No visionOS 27.0 API reports the visible area (`corner api=unavailable`), so these
+are subjective marks.
+
 ## Validation
 
 ```sh
@@ -83,7 +121,13 @@ app's `uk.lumenio.alvr` data container, `Documents/diag`, and preserves logs on 
 /opt/homebrew/bin/python3 tools/diag/test_netprobe.py
 sh tools/diag/smoke.sh
 sh -n tools/diag/pull-diag.sh
+sh -n tools/diag/capture-mirror.sh
+sh tools/diag/capture-mirror.sh -i 0.5 -n 3 -o /tmp/avp-mirror -c
 ```
+
+`-c` checks the capture arguments (whole-number `-n`, positive decimal `-i`) and
+exits without building or capturing. The window lister's source, binary, compiler
+temp, module cache and logs live in `<output>/.scratch`, removed at exit.
 
 Python defaults test the wire header, fractional rate/pacing math, sender loop
 with a deterministic clock/socket, and JSON summary without opening sockets.

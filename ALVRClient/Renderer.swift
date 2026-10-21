@@ -168,6 +168,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     // Diagnostics M5/M6/M9 (GM decision 65): Metal renderer only, nil when Diagnostics is off.
     let diagProbe: DiagRenderProbe?
     private var rqSweep: RQRenderer?
+    // Corner chart (decision 65): Metal renderer, no stream; nil unless Diagnostics is on and the setting picks a mode.
+    let cornerChart: CornerChartRenderer?
     var hdrEnabled = false
     var currentRenderColorFormat = renderColorFormatSDR
     var currentDrawableRenderColorFormat = renderColorFormatDrawableSDR
@@ -213,6 +215,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         self.device = layerRenderer?.device ?? MTLCreateSystemDefaultDevice()!
         self.commandQueue = self.device.makeCommandQueue()!
         self.diagProbe = layerRenderer != nil && Diag.isOn ? DiagRenderProbe(device: self.device) : nil
+        self.cornerChart = layerRenderer.flatMap { CornerChartRenderer.make(device: $0.device, layerRenderer: $0) }
 
         let uniformBufferSize = alignedUniformsSize * maxBuffersInFlight
         self.dynamicUniformBuffer = self.device.makeBuffer(length:uniformBufferSize,
@@ -1169,6 +1172,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                     endRenderStreamingFrame(renderEncoder: encoder)
                 }
                 renderStreamingFrameOverlays(0, commandBuffer: commandBuffer, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor, drawable: drawable)
+            }
+            else if let cornerChart, !renderingStreaming {
+                reprojectedFramesInARow = 0
+                cornerChart.encode(commandBuffer: commandBuffer, drawable: drawable, viewports: viewports, rasterizationRateMap: rasterizationRateMap)
             }
             else
             {
