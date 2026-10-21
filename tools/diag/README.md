@@ -222,6 +222,34 @@ straight-ahead point (the projection's tangent origin), rather than the viewport
 centre. Their patches are square in physical viewport pixels. The surround is
 black. The original half-field **split** stays unchanged: 1.0 left, step value right.
 
+**Video / Metal cross-path match (relative brightness, no meter):** choose
+**Immersion: Full**, **Layout: match** (Compare), then **Start**. The single
+head-locked Metal patch covers 5% of each eye viewport, is centred 12° left
+of straight ahead using that view's tangents, and has a black surround.
+Choose a single-level **level-<N>-…** PQ clip and **Play in window**. Turn so
+the app's video window sits just right of the patch. Adjust until they look
+equal: quick right pinch increases, quick left pinch decreases, or use **− / +**.
+The value starts at 1.0 × SDR white and is shown only in the controls status
+line. Steps are 0.02, or 0.10 with **Coarse**; limits are 0.1–4.0.
+Press **Matched**, then select/play the next level and repeat. If equality is
+outside the range, set the patch to the relevant limit and press **Video
+brighter than max** or **Video darker than min**. Stop releases both paths.
+Window playback and clip selection remain available during EDR only for match.
+Result buttons require a playing window item named `level-<N>-…`; logs use
+that item's name even if the clip picker has since changed.
+
+```text
+DIAG edr t_ms=1234 match=1 metal_value=1.500 clip=level-100-pq.mov clip_nits=100 immersion=full
+DIAG edr t_ms=2345 match=above metal_value=4.000 clip=level-1000-pq.mov clip_nits=1000 immersion=full
+DIAG edr t_ms=3456 match=below metal_value=0.100 clip=level-10-pq.mov clip_nits=10 immersion=full
+```
+
+Each result means **video N nominal nits == Metal V × SDR white**, or a bound.
+This measures relative appearance only; it does not establish emitted nits or
+calibrate either path absolutely. The window's own dimming and tone-mapping,
+including effects of the full-immersion surroundings, are what is measured.
+Keep window size, placement and viewing conditions consistent across levels.
+
 **Pair comparison:** choose **pair 1%**, **pair 5%** or **pair 20%**. These percentages
 are the **total** lit area: each of the two squares occupies 0.5%, 2.5% or 10% of
 the eye's viewport respectively. The horizontal gap equals one patch width.

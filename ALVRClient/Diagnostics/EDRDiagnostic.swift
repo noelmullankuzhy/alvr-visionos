@@ -28,6 +28,7 @@ enum PQSchedule {
 }
 
 enum EDRLayout: String, CaseIterable {
+    case match
     case onePercent = "1%", tenPercent = "10%", full = "100%", split, checkerboard
     case pairOne = "pair 1%", pairFive = "pair 5%", pairTwenty = "pair 20%"
     case gridOne = "grid 1%", gridTen = "grid 10%", gridFifty = "grid 50%"
@@ -90,6 +91,10 @@ enum EDRLayout: String, CaseIterable {
             }
         }
 
+        if self == .match {
+            let w = sqrt(0.05 / aspect), h = w * aspect
+            return [Patch(x: centre.x - w / 2, y: centre.y - h / 2, width: w, height: h, value: value)]
+        }
         if self == .split {
             return [Patch(x: 0, y: 0, width: 0.5, height: 1, value: 1),
                     Patch(x: 0.5, y: 0, width: 0.5, height: 1, value: value)]
@@ -106,12 +111,13 @@ enum EDRLayout: String, CaseIterable {
     }
 }
 
-enum EDRControl { case gridOptions, steps, navigation, mark, answers, gridHint }
+enum EDRControl { case gridOptions, steps, navigation, mark, answers, gridHint, matchOptions, matchActions }
 
 func edrVisibleControls(layout: EDRLayout, running: Bool) -> Set<EDRControl> {
-    var controls: Set<EDRControl> = layout.gridArea != nil ? [.gridOptions] : [.steps]
+    var controls: Set<EDRControl> = layout == .match ? [.matchOptions] : layout.gridArea != nil ? [.gridOptions] : [.steps]
     if running {
-        if layout.gridArea != nil { controls.insert(.gridHint) }
+        if layout == .match { controls.insert(.matchActions) }
+        else if layout.gridArea != nil { controls.insert(.gridHint) }
         else if layout.isComparison { controls.formUnion([.answers, .navigation]) }
         else { controls.formUnion([.navigation, .mark]) }
     }
@@ -120,11 +126,36 @@ func edrVisibleControls(layout: EDRLayout, running: Bool) -> Set<EDRControl> {
 
 // Normalized top-left viewport coordinates of the projection's tangent origin.
 enum EDRView {
-    static func centre(left: Double, right: Double, top: Double, bottom: Double) -> SIMD2<Double> {
-        SIMD2(left / (left + right), top / (top + bottom))
+    static func centre(left: Double, right: Double, top: Double, bottom: Double, horizontalDegrees: Double = 0) -> SIMD2<Double> {
+        SIMD2((left + tan(horizontalDegrees * .pi / 180)) / (left + right), top / (top + bottom))
     }
-    static func centre(projectionX: Double, projectionY: Double) -> SIMD2<Double> {
-        SIMD2((1 - projectionX) / 2, (1 + projectionY) / 2)
+    static func centre(projectionX: Double, projectionY: Double, horizontalScale: Double = 1, horizontalDegrees: Double = 0) -> SIMD2<Double> {
+        SIMD2((1 - projectionX + horizontalScale * tan(horizontalDegrees * .pi / 180)) / 2, (1 + projectionY) / 2)
+    }
+}
+
+func pqWindowPlaybackAllowed(space: String?, layout: EDRLayout) -> Bool {
+    space == nil || (space == "EDRDiagnostic" && layout == .match)
+}
+
+enum EDRMatchResult: String, CaseIterable { case equal = "1", above, below }
+
+struct EDRMatch {
+    // Integer hundredths keep repeated fine/coarse steps exact and reversible.
+    private var hundredths = 100
+    var coarse = false
+    var value: Float { Float(hundredths) / 100 }
+    mutating func adjust(up: Bool) {
+        hundredths = min(400, max(10, hundredths + (up ? 1 : -1) * (coarse ? 10 : 2)))
+    }
+    static func clipNits(_ clip: String) -> Int? {
+        let parts = clip.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count >= 3, parts[0] == "level", let nits = Int(parts[1]), nits > 0 else { return nil }
+        return nits
+    }
+    func fields(_ result: EDRMatchResult, clip: String, immersion: String) -> KeyValuePairs<String, Any> {
+        ["match": result.rawValue, "metal_value": value, "clip": clip,
+         "clip_nits": Self.clipNits(clip).map(String.init) ?? "unknown", "immersion": immersion]
     }
 }
 
@@ -219,13 +250,14 @@ struct EDRFrame {
     let step: EDRStep
     let layout: EDRLayout
     let grid: EDRGrid
+    var matchValue: Float = 1
     func shiftFields(centre: SIMD2<Double>, aspect: Double, pixelHeight: Double,
                      view: Int, immersion: String) -> KeyValuePairs<String, Any>? {
         guard layout.shift(centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight) != .zero else { return nil }
         return ["layout": layout.rawValue, "shifted": 1, "view": view, "immersion": immersion]
     }
     func patches(centre: SIMD2<Double>, aspect: Double, pixelHeight: Double) -> [EDRLayout.Patch] {
-        let patches = layout.patches(value: step.value, centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight)
+        let patches = layout.patches(value: layout == .match ? matchValue : step.value, centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight)
         return layout.gridArea == nil ? patches : patches + grid.labels(patches: patches)
     }
 }
@@ -239,6 +271,8 @@ final class EDRSession {
     private var dirty = true
     private var presented: (EDRStep, EDRLayout)?
     private var runID = UUID()
+    private var match = EDRMatch()
+    private var presentedMatch: EDRMatch?
     private var grid = EDRGrid()
     private var immersion = EDRImmersion.defaultStyle.rawValue
     private var gridNeedsLog = true
@@ -253,6 +287,10 @@ final class EDRSession {
         guard layout.gridArea != nil else { return }
         for entry in grid.entries { Diag.log("edr", grid.fields(entry, layout: layout, immersion: immersion)) }
     }
+    var isMatching: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return layout == .match
+    }
     var currentRun: UUID {
         lock.lock(); defer { lock.unlock() }
         return runID
@@ -261,17 +299,21 @@ final class EDRSession {
         lock.lock(); defer { lock.unlock() }
         runID = UUID()
         presented = nil
+        presentedMatch = nil
+        match = EDRMatch(coarse: match.coarse)
         gridNeedsLog = true
         dirty = true
     }
     var currentValue: Float? {
         lock.lock(); defer { lock.unlock() }
-        return presented?.0.value
+        return presented?.1 == .match ? presentedMatch?.value : presented?.0.value
     }
-    func configure(layout: EDRLayout, automatic: Bool, sustained: Bool, fine: Bool = false, gridRange: EDRGridRange = .fine, mirror: Bool = false, borders: Bool = false) {
+    func configure(layout: EDRLayout, automatic: Bool, sustained: Bool, fine: Bool = false, gridRange: EDRGridRange = .fine, mirror: Bool = false, borders: Bool = false, coarse: Bool = false) {
         lock.lock(); defer { lock.unlock() }
         let changedLayout = self.layout != layout
         self.layout = layout
+        if changedLayout && layout == .match { match = EDRMatch() }
+        match.coarse = coarse
         step.selectFine(fine)
         let changedGrid = changedLayout || grid.range != gridRange || grid.mirror != mirror || grid.borders != borders
         grid = EDRGrid(range: gridRange, mirror: mirror, borders: borders)
@@ -287,12 +329,16 @@ final class EDRSession {
     func next() {
         lock.lock(); defer { lock.unlock() }
         guard layout.gridArea == nil else { return }
-        step.next(nowMs: Diag.monotonicMs()); dirty = true
+        if layout == .match { match.adjust(up: true) }
+        else { step.next(nowMs: Diag.monotonicMs()) }
+        dirty = true
     }
     func back() {
         lock.lock(); defer { lock.unlock() }
         guard layout.gridArea == nil else { return }
-        step.back(nowMs: Diag.monotonicMs()); dirty = true
+        if layout == .match { match.adjust(up: false) }
+        else { step.back(nowMs: Diag.monotonicMs()) }
+        dirty = true
     }
     func answer(_ answer: EDRAnswer) {
         lock.lock(); defer { lock.unlock() }
@@ -305,10 +351,20 @@ final class EDRSession {
         if gridNeedsLog { logGrid(); gridNeedsLog = false }
         let now = Diag.monotonicMs()
         if dirty { step.startMs = now }
-        let changed = layout.gridArea == nil && step.tick(nowMs: now)
-        if dirty || changed { Diag.log("edr", step.fields(layout: layout, immersion: immersion)); dirty = false }
+        let changed = layout != .match && layout.gridArea == nil && step.tick(nowMs: now)
+        if dirty || changed {
+            if layout != .match { Diag.log("edr", step.fields(layout: layout, immersion: immersion)) }
+            dirty = false
+        }
         presented = (step, layout)
-        return EDRFrame(step: step, layout: layout, grid: grid)
+        presentedMatch = match
+        return EDRFrame(step: step, layout: layout, grid: grid, matchValue: match.value)
+    }
+    func recordMatch(_ result: EDRMatchResult, clip: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard layout == .match, presented?.1 == .match, !dirty,
+              let shown = presentedMatch, EDRMatch.clipNits(clip) != nil else { return }
+        Diag.log("edr", shown.fields(result, clip: clip, immersion: immersion))
     }
     func mark() {
         lock.lock(); defer { lock.unlock() }

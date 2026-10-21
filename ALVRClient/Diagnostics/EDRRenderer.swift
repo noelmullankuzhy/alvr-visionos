@@ -71,6 +71,7 @@ final class EDRRenderer {
     let drawing: EDRDrawing
     let badge: DiagEyeRenderer?
     let runID = EDRSession.shared.currentRun
+    private var pinches: [SpatialEventCollection.Event.ID: (start: TimeInterval, right: Bool)] = [:]
     private var anchorMissingLogged = false
     private var shiftedViews = Set<String>()
     let immersion: String
@@ -83,8 +84,30 @@ final class EDRRenderer {
     }
     func start() {
         guard Diag.isOn else { return }
-        layer.onSpatialEvent = { events in
-            for event in events where event.phase == .ended { EDRSession.shared.next() }
+        layer.onSpatialEvent = { [weak self] events in
+            guard let self else { return }
+            for event in events {
+                guard EDRSession.shared.isMatching else {
+                    pinches.removeAll()
+                    if event.phase == .ended { EDRSession.shared.next() }
+                    continue
+                }
+                guard event.kind == .indirectPinch else { continue }
+                let now = ProcessInfo.processInfo.systemUptime
+                switch event.phase {
+                case .active:
+                    if pinches[event.id] == nil, #available(visionOS 2.0, *) {
+                        if event.chirality == .right { pinches[event.id] = (now, true) }
+                        else if event.chirality == .left { pinches[event.id] = (now, false) }
+                    }
+                case .ended:
+                    if let pinch = pinches.removeValue(forKey: event.id), now - pinch.start < 0.5 {
+                        if pinch.right { EDRSession.shared.next() }
+                        else { EDRSession.shared.back() }
+                    }
+                default: pinches.removeValue(forKey: event.id)
+                }
+            }
         }
         Thread.detachNewThread { [self] in
             while layer.state != .invalidated {
@@ -122,7 +145,9 @@ final class EDRRenderer {
                 let map = view.textureMap
                 let projection = drawable.computeProjection(viewIndex: index)
                 let centre = EDRView.centre(projectionX: Double(projection.columns.2.x),
-                                            projectionY: Double(projection.columns.2.y))
+                                            projectionY: Double(projection.columns.2.y),
+                                            horizontalScale: Double(projection.columns.0.x),
+                                            horizontalDegrees: snapshot.layout == .match ? -12 : 0)
                 let shiftKey = "\(snapshot.layout.rawValue):\(snapshot.grid.borders):\(index)"
                 if let fields = snapshot.shiftFields(centre: centre, aspect: map.viewport.width / map.viewport.height,
                                                      pixelHeight: map.viewport.height, view: index, immersion: immersion),
@@ -135,7 +160,7 @@ final class EDRRenderer {
                                depth: drawable.depthTextures[map.textureIndex], slice: map.sliceIndex,
                                viewport: map.viewport, patches: patches, projection: projection)
             }
-            badge?.encode(buffer: buffer, drawable: drawable, mode: "edr_ramp", generation: nil)
+            if snapshot.layout != .match { badge?.encode(buffer: buffer, drawable: drawable, mode: "edr_ramp", generation: nil) }
             drawable.encodePresent(commandBuffer: buffer)
         }
         buffer.commit()

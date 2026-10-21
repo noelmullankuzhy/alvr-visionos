@@ -8,6 +8,7 @@ import RealityKit
     @Published var clips: [URL] = []
     @Published var selected: URL?
     @Published var space: String?
+    @Published private(set) var playbackContext: PQPlaybackContext?
     private var observer: Any?
     private var status: NSKeyValueObservation?
     func refresh() {
@@ -18,6 +19,7 @@ import RealityKit
         selected = clips.first
     }
     func stop() {
+        playbackContext = nil
         player.pause()
         if let observer { player.removeTimeObserver(observer) }
         observer = nil; status = nil
@@ -27,6 +29,7 @@ import RealityKit
         guard Diag.isOn, let selected else { return }
         stop()
         let context = PQPlaybackContext(clip: selected.lastPathComponent, path: immersive ? "realitykit" : "window")
+        playbackContext = context
         let item = AVPlayerItem(url: selected)
         player.replaceCurrentItem(with: item)
         Diag.log("pq", ["path": context.path, "clip": context.clip, "eligibleForHDRPlayback": AVPlayer.eligibleForHDRPlayback,
@@ -96,6 +99,7 @@ private struct BrightnessControls: View {
     @Environment(\.openImmersiveSpace) private var openSpace
     @Environment(\.dismissImmersiveSpace) private var dismissSpace
     @State private var layout = EDRLayout.onePercent
+    @State private var coarse = false
     @State private var fine = false
     @State private var gridRange = EDRGridRange.fine
     @State private var mirror = false
@@ -107,7 +111,7 @@ private struct BrightnessControls: View {
     private func configure() {
         EDRSession.shared.setImmersion(edr.immersion.rawValue)
         EDRSession.shared.configure(layout: layout, automatic: automatic, sustained: sustained,
-                                    fine: fine, gridRange: gridRange, mirror: mirror, borders: borders)
+                                    fine: fine, gridRange: gridRange, mirror: mirror, borders: borders, coarse: coarse)
     }
     private func enter(_ id: String) {
         busy = true
@@ -128,6 +132,15 @@ private struct BrightnessControls: View {
         }
     }
     private var running: Bool { pq.space == "EDRDiagnostic" }
+    private var windowAllowed: Bool { pqWindowPlaybackAllowed(space: pq.space, layout: layout) }
+    private var matchClip: String? {
+        guard running, layout == .match, let context = pq.playbackContext,
+              context.path == "window", EDRMatch.clipNits(context.clip) != nil else { return nil }
+        return context.clip
+    }
+    private func recordMatch(_ result: EDRMatchResult) {
+        if let clip = matchClip { EDRSession.shared.recordMatch(result, clip: clip) }
+    }
     private var visible: Set<EDRControl> { edrVisibleControls(layout: layout, running: running) }
     private func stop() {
         pq.stop()
@@ -138,7 +151,7 @@ private struct BrightnessControls: View {
             Text("EDR ramp").font(.title2)
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 let value = layout.gridArea != nil ? gridRange.rawValue :
-                    EDRSession.shared.currentValue.map { "Value: \($0)" } ?? "Awaiting first frame"
+                    EDRSession.shared.currentValue.map { String(format: "Value: %.2f × SDR white", $0) } ?? "Awaiting first frame"
                 Text("\(running ? "Running" : "Idle") · \(edr.immersion.rawValue.capitalized) · \(layout.rawValue) · \(value)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
@@ -163,7 +176,7 @@ private struct BrightnessControls: View {
                     ForEach([EDRLayout.onePercent, .tenPercent, .full, .checkerboard], id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 Section("Compare") {
-                    ForEach([EDRLayout.split, .pairOne, .pairFive, .pairTwenty], id: \.self) { Text($0.rawValue).tag($0) }
+                    ForEach([EDRLayout.split, .pairOne, .pairFive, .pairTwenty, .match], id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 Section("Grid") {
                     ForEach([EDRLayout.gridOne, .gridTen, .gridFifty], id: \.self) { Text($0.rawValue).tag($0) }
@@ -176,6 +189,7 @@ private struct BrightnessControls: View {
                 Toggle("Mirror", isOn: $mirror)
                 Toggle("Borders", isOn: $borders)
             }
+            if visible.contains(.matchOptions) { Toggle("Coarse (0.10 steps)", isOn: $coarse) }
             if visible.contains(.steps) {
                 Picker("Steps", selection: $fine) {
                     Text("Standard").tag(false)
@@ -187,7 +201,7 @@ private struct BrightnessControls: View {
         } header: {
             Text("Pattern")
         } footer: {
-            Text(layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70." :
+            Text(layout == .match ? "Match uses 0.02 steps, or 0.10 with Coarse." : layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70." :
                     "Automatic advances every 4 seconds, or 60 seconds with Sustained.")
         }
     }
@@ -201,6 +215,17 @@ private struct BrightnessControls: View {
     }
     private var runningSection: some View {
         Section {
+            if visible.contains(.matchActions) {
+                HStack {
+                    Button("−") { EDRSession.shared.back() }.accessibilityLabel("Decrease Metal value")
+                    Button("+") { EDRSession.shared.next() }.accessibilityLabel("Increase Metal value")
+                }
+                Group {
+                    Button("Matched") { recordMatch(.equal) }
+                    Button("Video brighter than max") { recordMatch(.above) }
+                    Button("Video darker than min") { recordMatch(.below) }
+                }.disabled(matchClip == nil)
+            }
             if visible.contains(.navigation) {
                 HStack {
                     Button("Back") { EDRSession.shared.back() }
@@ -223,7 +248,7 @@ private struct BrightnessControls: View {
         } header: {
             Text("While running")
         } footer: {
-            Text(layout.gridArea != nil ? "Close one eye and compare neighbouring cells, A–E and 1–5." :
+            Text(layout == .match ? "Quick right pinch increases; quick left pinch decreases. Match the window to the patch." : layout.gridArea != nil ? "Close one eye and compare neighbouring cells, A–E and 1–5." :
                     layout.isComparison ? "Close one eye and compare right with the fixed 1.0 reference on the left." :
                     "Pinch the ramp or tap Next to advance; mark where brightness stops increasing.")
         }
@@ -232,14 +257,14 @@ private struct BrightnessControls: View {
         Section {
             Picker("Clip", selection: $pq.selected) {
                 ForEach(pq.clips, id: \.self) { Text($0.lastPathComponent).tag(Optional($0)) }
-            }.disabled(pq.space != nil)
+            }.disabled(!windowAllowed)
             if pq.clips.isEmpty { Text("Copy PQ clips to Documents/diag-clips, then Reload.").font(.caption) }
             HStack {
-                Button("Reload") { pq.refresh() }.disabled(pq.space != nil)
-                Button("Play in window") { pq.play(immersive: false) }.disabled(pq.space != nil || pq.selected == nil)
+                Button("Reload") { pq.refresh() }.disabled(!windowAllowed)
+                Button("Play in window") { pq.play(immersive: false) }.disabled(!windowAllowed || pq.selected == nil)
                 Button("Play immersive") { enter("PQDiagnostic") }.disabled(pq.selected == nil)
             }
-            if pq.space == nil { VideoPlayer(player: pq.player).frame(height: 240) }
+            if windowAllowed { VideoPlayer(player: pq.player).frame(height: 240) }
         } header: {
             Text("HDR video (PQ)")
         } footer: {
@@ -262,6 +287,7 @@ private struct BrightnessControls: View {
         .onAppear { pq.refresh(); configure() }
         .onChange(of: edr.immersion) { configure() }
         .onChange(of: layout) { configure() }
+        .onChange(of: coarse) { configure() }
         .onChange(of: fine) { configure() }
         .onChange(of: gridRange) { configure() }
         .onChange(of: mirror) { configure() }
