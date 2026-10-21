@@ -442,25 +442,30 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    RealityKit dots do not manufacture CompositorServices projection measurements;
    without prior M5 values the report retains angular points and says **no data**
    for tangent percentages and area.
-2. Choose **Boundary dots**. Keep a comfortable, steady head pose; look at a dot
-   until the system highlights it, then pinch to confirm it. It turns white and
-   remains confirmed. Pinch it again to clear it. Choose **L**, **R**, or **Both**
-   near the fixation cross; each selection has independent marks, restored when
-   switching back. These are labels only: close the other eye yourself for L/R.
-   Both labels a binocular observation and is not two monocular measurements.
-3. Work around all 24 rays (0° right, increasing counter-clockwise in 15° steps).
-   On each ray, confirm the outermost dot you can see **and highlight**. Multiple
-   confirmations on a ray are allowed; its outermost remaining mark is the boundary
-   vertex. Use the small centre cross between observations; look away from it to
-   select dots. The field moves with your head, so turning your head cannot bring
-   an edge dot towards the centre of your view.
-4. If you see a dot but cannot make it highlight, record that ray and eccentricity
-   separately as a **tracker limit**, not a visibility boundary. The system does
-   not report unsuccessful gaze targeting, so the app cannot infer or log this
-   failure. Do not replace a visibility measurement with the last highlightable
-   dot without labelling this limit in your notes. Leave affected rays unmarked
-   if a boundary cannot be measured. Pinch **Done** or leave with system controls
-   to write all three eye summaries; the lobby returns.
+2. Choose **Boundary dots**. Keep a comfortable, steady head pose. Use a quick
+   **right-hand pinch** on **L**, **R**, or **Both** near the fixation cross to
+   select the eye label. Each eye keeps its own cursor and confirmed boundaries
+   when switching back. Close the other eye yourself for L/R; Both labels a
+   binocular observation, not two monocular measurements.
+3. Look at a reachable dot until the system highlights it, then quick-pinch with
+   the **right hand** to select the ray and cursor dot. A **yellow 1.6° ring**
+   stays on the cursor independently of gaze. Wherever you look (including empty
+   black space), a **left-hand quick pinch (< 0.5 s)** steps one dot **outward**;
+   a **left-hand hold (>= 0.5 s)** steps one dot **inward**. Steps stop at 10° and
+   70°. Actions occur on release, once per pinch; a cancelled pinch does nothing.
+4. When the cursor reaches the outermost dot you can see, **hold the right-hand
+   pinch for >= 0.5 s and release**, wherever you look, to confirm it white.
+   Each ray has one boundary per eye; confirming again replaces that ray's old
+   boundary. Quick right-pinch a highlighted confirmed dot to clear it. Repeat
+   around all 24 rays (0° right, increasing counter-clockwise in 15° steps).
+   The dim centre status shows eye, cursor ray/eccentricity and rays done.
+   Use the centre cross between observations. The field follows your head;
+   turning your head cannot bring an edge dot towards the centre. Gaze only
+   needs to reach the starting dot on each ray; stepping and confirmation do
+   not need an edge dot to highlight. If no starting dot on a ray can be
+   highlighted, note a **tracker limit** separately and leave that ray unmarked.
+   Quick right-pinch **Done** or leave with system controls to write all three
+   eye summaries and return to the lobby.
 5. Pull `diag-*.log` and run `diag-report.py` below. The **Boundary dots** section
    contains per-eye boundary tables, source references, and `visible_area_frac`.
    An area requires all 24 rays and valid tangents; no missing boundary is inferred.
@@ -487,8 +492,11 @@ the field on hardware; input is also rejected after connection/stream arrival.
 There is no `AnchorEntity(.head)` in this implementation and therefore no reliance
 on input support for privacy-protected head anchors. Each dot and control explicitly
 has `InputTargetComponent(.indirect)`, `CollisionComponent`, and
-`HoverEffectComponent`; `SpatialTapGesture.targetedToAnyEntity()` receives the
-system-selected entity. This follows Apple's documented
+`HoverEffectComponent`. The black backdrop also has indirect input and a sphere
+collision shape, without hover. `SpatialEventGesture.targetedToAnyEntity()` reads
+spatial-event chirality and timestamps, retaining each event's initial target
+and start time until release. Left steps and right holds ignore the target;
+short right pinches use the system-selected entity. Unknown chirality is ignored. This follows Apple's documented
 [device-transform placement](https://developer.apple.com/documentation/visionos/placing-entities-using-head-and-device-transform)
 and [entity gesture requirements](https://developer.apple.com/documentation/realitykit/responding-to-gestures-on-an-entity).
 The [update event](https://developer.apple.com/documentation/realitykit/sceneevents/update)
@@ -496,20 +504,27 @@ runs once per frame interval. The app does not estimate gaze or read hover ident
 In Simulator, when ARKit supplies no pose, a stationary root at `(0, 1.6, 0)`
 permits pointer hover/click checks. This fallback is compiled out on hardware and
 does not validate head-follow latency. GM device checks must verify head locking,
-hover and pinch at the centre and edge; pointer tests cannot establish tracker limits.
+hover, yellow cursor persistence, both-hand timing, empty-space input and
+confirmation at the centre and edge. Pointer tests cannot validate chirality or
+establish tracker limits.
 
-Each toggle writes, for example:
+Each cursor action writes, for example:
 
 ```text
 DIAG dots_session t_ms=100 event=begin radius_m=10.000 pose=device angles=projected_tangent
-DIAG dots t_ms=101 eye=L action=confirm ray_deg=45.000 ecc_deg=60.000 yaw_deg=50.768 pitch_deg=50.768
-DIAG dots t_ms=102 eye=L action=clear ray_deg=45.000 ecc_deg=60.000 yaw_deg=50.768 pitch_deg=50.768
+DIAG dots t_ms=101 eye=L action=cursor ray_deg=45.000 ecc_deg=60.000 yaw_deg=50.768 pitch_deg=50.768 via=gaze
+DIAG dots t_ms=102 eye=L action=confirm ray_deg=45.000 ecc_deg=60.000 yaw_deg=50.768 pitch_deg=50.768 via=step
 DIAG dots_summary t_ms=103 eye=L points=2 rays=0:30,90:32.5
 DIAG dots_summary t_ms=103 eye=R points=0 rays=none
 DIAG dots_summary t_ms=103 eye=Both points=0 rays=none
 ```
 
-`points` counts all confirmed dots; `rays` is the sorted ray:outermost-eccentricity
+Actions are `cursor`, `step_out`, `step_in`, `confirm`, and `clear`.
+`via=gaze` identifies cursor selection/clear; `via=step` identifies stepping and
+hold confirmation. Cursor/step actions never contribute boundary vertices.
+New logs replace same-ray confirms; old D11 logs without `via` still replay
+multiple marks and use the outermost remaining confirmed dot.
+`points` counts confirmed rays; `rays` is the sorted ray:outermost-eccentricity
 list, sufficient to reproduce the polygon. Summaries are authoritative even if
 earlier toggle lines are absent. Session markers prevent re-entry from merging
 walks. Unsummarised confirmations are replayed with clears and reported as a

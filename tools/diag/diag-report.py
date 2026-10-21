@@ -495,6 +495,10 @@ def dots_boundaries(records):
             key = (point['ray_deg'], point['ecc_deg'])
             state['source'] = record['source']
             if action == 'confirm':
+                # Stepping logs have one boundary per ray; legacy D11 logs
+                # omit via and retain their multiple-mark/outermost semantics.
+                if f.get('via') in ('gaze', 'step'):
+                    state['marks'] = {k: v for k, v in state['marks'].items() if k[0] != key[0]}
                 state['marks'][key] = dict(point, yaw_deg=yaw, pitch_deg=pitch)
             else:
                 state['marks'].pop(key, None)
@@ -534,8 +538,8 @@ def dots_report(records):
               'Missing rays are not interpolated. Summaries contain the outermost confirmed point '
               'on each ray and are authoritative; unsummarised marks are labelled by their last source.', '',
               'Resolution: 2.5 degrees radially, 15 degrees between rays; targets are 1 degree wide. '
-              'A visible dot that cannot be highlighted is a tracker limit, not a boundary. '
-              'The app cannot detect or log continuous gaze or this failure; record it separately.', '']
+              'Use cursor stepping to reach visible dots beyond gaze targeting. '
+              'If no starting dot on a ray can be highlighted, record that tracker limit separately.', '']
     for boundary in dots_boundaries(records):
         lines += ['Marks={} → eye={}; source={}; tangent_source={}; confirmed_points={}; '
                   'rays={}; status={}; visible_area_frac={}'.format(
