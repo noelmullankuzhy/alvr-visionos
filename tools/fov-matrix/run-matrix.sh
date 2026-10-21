@@ -28,7 +28,7 @@ PCW=${PCW:-/mnt/c/Users/noelm/claude-tmp/fov-matrix}   # override only in the st
 TUNNEL_PORT=18082
 
 POINTS=; MODE=; OUT=; DRY=0; RESTORE_ONLY=0; STOP_ON_ERROR=0; FORCE_OVERLAY=0
-STREAM_TIMEOUT=150; CAPTURE_TIMEOUT=90; PROBE_SECONDS=30; SETTLE=
+STREAM_TIMEOUT=150; CAPTURE_TIMEOUT=20; PROBE_SECONDS=30; SETTLE=
 
 die() { echo "run-matrix: $*" >&2; exit 2; }
 while [ $# -gt 0 ]; do
@@ -156,9 +156,14 @@ stop_all() {  # terminate our app, finish the hold, stop SteamVR/ALVR (as the e4
   fi
 }
 
+CLEANED=0
 cleanup() {
   rc=$?
-  trap - EXIT INT TERM
+  # Exactly once, and uninterruptible: a second signal while restoring must not skip the restore.
+  [ "$CLEANED" = 0 ] || exit "$rc"
+  CLEANED=1
+  trap '' INT TERM HUP
+  trap - EXIT
   [ -n "$TP" ] && kill "$TP" 2>/dev/null
   [ -n "$PP" ] && kill "$PP" 2>/dev/null
   [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
@@ -179,9 +184,11 @@ cleanup() {
   fi
   exit $rc
 }
+# Installed before any PC change (the first one is the backup below). Signals only exit; cleanup() runs from the EXIT trap.
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # ---------------------------------------------------------------- one point
 run_point() {
@@ -248,7 +255,11 @@ run_point() {
   log "[$NAME] stream up, settling ${SETTLE}s"
   [ "$DRY" = 1 ] && plan "+ sleep $SETTLE" || sleep "$SETTLE"
 
-  # 7. server stats probe (background) while waiting for the client capture
+  # 7. ask the streaming client for a capture (request file; the client deletes it when it takes it), server stats
+  #    probe (background) while waiting for the capture
+  if [ "$DRY" = 1 ]; then plan "+ mkdir -p \$DATA/Documents/diag && echo $NAME > \$DATA/Documents/diag/capture.request"; else
+    mkdir -p "$DATA/Documents/diag" && echo "$NAME" > "$DATA/Documents/diag/capture.request" || fail_soft "capture: cannot write capture.request in $DATA/Documents/diag"
+  fi
   if [ "$DRY" != 1 ]; then
     ssh -o ConnectTimeout=10 -o ExitOnForwardFailure=yes -N -L "$TUNNEL_PORT:127.0.0.1:8082" "$WIN" &
     TP=$!; sleep 3
@@ -257,7 +268,7 @@ run_point() {
   else
     plan "+ ssh -o ConnectTimeout=10 -o ExitOnForwardFailure=yes -N -L $TUNNEL_PORT:127.0.0.1:8082 $WIN &"
     plan "+ $PYTHON $HARNESS/ws-probe.py $TUNNEL_PORT $PROBE_SECONDS $PD/events.jsonl > $PD/probe.log 2>&1 &"
-    plan "+ wait <= ${CAPTURE_TIMEOUT}s for a new DiagFrameCapture dir in \$DATA/Documents/diag/captures (capture.json present)"
+    plan "+ wait <= ${CAPTURE_TIMEOUT}s for a new DiagFrameCapture dir (trigger.reason request_file) in \$DATA/Documents/diag/captures (capture.json present)"
   fi
   CAP=
   if [ "$DRY" != 1 ]; then
@@ -280,7 +291,7 @@ run_point() {
     latest=$(ls -t "$DATA"/Documents/diag/diag-*.log 2>/dev/null | head -1)
     [ -n "$latest" ] && cp "$latest" "$PD/"
   else
-    fail_soft "capture: no DiagFrameCapture appeared in ${CAPTURE_TIMEOUT}s. Needs Diagnostics on (ALVR_DIAG=1 is set) and captureDiagnosticFrames (set); NOTE the client only submits captures while idle (Renderer.swift passes idle: !renderingStreaming && !streamingActive), so streaming captures need a client change. Screenshot kept: $PD/screenshot.png"
+    fail_soft "capture: no DiagFrameCapture appeared in ${CAPTURE_TIMEOUT}s after capture.request. Needs Diagnostics on (ALVR_DIAG=1 is set) and captureDiagnosticFrames (set); a client without streaming capture support ignores the request file. Screenshot kept: $PD/screenshot.png"
   fi
 
   # 9. server chart dump (chart mode)
@@ -329,14 +340,18 @@ if [ "$RESTORE_ONLY" = 1 ]; then log "restore only (build $BUILD)"; exit 0; fi
 
 log "matrix $MODE: $(wc -l < "$POINTS" | tr -d ' ') lines in $POINTS, build $BUILD, out $OUT"
 [ "$DRY" = 1 ] && plan "### backup PC session (hash recorded; refuses if a stale backup exists)"
+# Armed BEFORE the backup runs: a signal during the backup must still restore (restore is a no-op without a backup file).
+BACKED_UP=1
 PC_SETS= pc_action "$OUT" backup backup "$BUILD"
 if [ "$DRY" != 1 ]; then
-  grep -q '^backup sha=' "$OUT/pc-backup.log" || { echo "run-matrix: PC session backup failed (nothing changed): $(tail -2 "$OUT/pc-backup.log")" >&2; exit 4; }
+  grep -q '^backup sha=' "$OUT/pc-backup.log" || {
+    # A refused backup (stale file from an earlier run) stays untouched: never restore it from this run.
+    grep -q 'stale backup' "$OUT/pc-backup.log" && BACKED_UP=0
+    echo "run-matrix: PC session backup failed (nothing changed): $(tail -2 "$OUT/pc-backup.log")" >&2; exit 4; }
   SESSION_SHA=$(sed -n 's/^backup sha=\([0-9a-f]*\).*/\1/p' "$OUT/pc-backup.log" | head -1)
   echo "$SESSION_SHA" > "$OUT/session.sha256"
   log "PC session backed up, sha256 $SESSION_SHA"
 fi
-BACKED_UP=1
 
 for n in $($FM names "$POINTS"); do
   run_point "$n" || { FAILED=$((FAILED + 1)); [ "$STOP_ON_ERROR" = 1 ] && { log "stopping on first error"; break; }; }
