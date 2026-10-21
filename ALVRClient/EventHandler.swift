@@ -227,6 +227,7 @@ class EventHandler: ObservableObject {
     // Stops the EventHandler thread stream.
     func stop() {
         print("EventHandler.Stop")
+        StreamTelemetry.shared.streamingStopped()
         streamingActive = false
         vtDecompressionSession = nil
         videoFormat = nil
@@ -430,17 +431,20 @@ class EventHandler: ObservableObject {
     func handleNals(frameData: AlvrVideoFrameData) -> Bool {
         var retVal = true
         self.timeLastFrameGot = CACurrentMediaTime()
-        
+        StreamTelemetry.shared.recordReceived(timestampNs: frameData.timestamp_ns)
+
         // Prevent NAL buildup
         if !self.renderStarted {
             //VideoHandler.abandonAllPendingNals()
+            StreamTelemetry.shared.recordDroppedBeforeDecode()
             retVal = true
             return retVal
         }
-        
+
         if self.needsEncoderReset {
             self.needsEncoderReset = false
             print("Resetting encoder")
+            StreamTelemetry.shared.recordDroppedBeforeDecode()
             retVal = false
             return retVal
         }
@@ -487,6 +491,7 @@ class EventHandler: ObservableObject {
             
             self.framesSinceLastIDR = 0
             self.framesSinceLastDecode = 0
+            StreamTelemetry.shared.recordDroppedBeforeDecode()
 
             retVal = false
             return retVal
@@ -504,6 +509,7 @@ class EventHandler: ObservableObject {
                 vtDecompressionSession = attemptVtDecompressionSession
                 videoFormat = attemptVideoFormat
                 av1InstantiatedForReal = true
+                VideoHandler.reportVideoFormat(attemptVideoFormat!)
             }
         }
 
@@ -525,10 +531,11 @@ class EventHandler: ObservableObject {
 
                     // We have to request an IDR to resume the video feed
                     resetEncoding()
-                    
+
                     framesSinceLastIDR = 0
                     framesSinceLastDecode = 0
                     objc_sync_exit(frameQueueLock)
+                    StreamTelemetry.shared.recordDecodeOverrun()
 
                     return
                 }
@@ -558,6 +565,7 @@ class EventHandler: ObservableObject {
                     // TODO: make this configurable
                     if frameQueue.count > 2 {
                         frameQueue.removeFirst()
+                        StreamTelemetry.shared.recordQueueOverflow()
                     }
 
 
@@ -575,6 +583,7 @@ class EventHandler: ObservableObject {
                 //print("End VT callback")
             }
         } else {
+            StreamTelemetry.shared.recordDroppedBeforeDecode()
             let nalViewsPtrDiscarded = UnsafeMutablePointer<AlvrViewParams>.allocate(capacity: 2)
             defer { nalViewsPtrDiscarded.deallocate() }
 
@@ -806,6 +815,8 @@ class EventHandler: ObservableObject {
                 
                 encodingGamma = alvrEvent.STREAMING_STARTED.encoding_gamma
                 enableHdr = alvrEvent.STREAMING_STARTED.enable_hdr
+                let started = alvrEvent.STREAMING_STARTED
+                StreamTelemetry.shared.streamingStarted(viewWidth: Int(started.view_width), viewHeight: Int(started.view_height), refreshRateHint: Double(started.refresh_rate_hint), encodingGamma: Double(started.encoding_gamma), enableFoveatedEncoding: started.enable_foveated_encoding, enableHdr: started.enable_hdr, forceFastSecretTextureFormats: forceFastSecretTextureFormats)
                 if !streamingActive {
                     streamEvent = alvrEvent
                     streamingActive = true
@@ -874,6 +885,9 @@ class EventHandler: ObservableObject {
 
                     av1InstantiatedForReal = false
                     (vtDecompressionSession, videoFormat) = VideoHandler.createVideoDecoder(initialNals: nalBuffer!, codec: currentCodec)
+                    if let videoFormat {
+                        VideoHandler.reportVideoFormat(videoFormat)
+                    }
                 }
 
                 EventHandler.shared.updateConnectionState(.connected)

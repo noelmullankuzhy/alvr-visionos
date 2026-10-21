@@ -14,6 +14,7 @@
 		8E458AB52B7E2C010019FC73 /* WorldTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E458AB42B7E2C010019FC73 /* WorldTracker.swift */; };
 		8E739C8B2B78990B0045ED16 /* ViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E739C8A2B78990A0045ED16 /* ViewModel.swift */; };
 		93F10375671142039BA634E8 /* PerformanceTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FDF7F3AB0664D5089D91DE3 /* PerformanceTracker.swift */; };
+		A7E1C0DE5EED000000000002 /* StreamTelemetry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E1C0DE5EED000000000001 /* StreamTelemetry.swift */; };
 		9ED257172B8062A2008DC22F /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9ED257162B8062A1008DC22F /* Settings.swift */; };
 		C5E590322B6379ED00328ED6 /* ALVRClientApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5E590312B6379ED00328ED6 /* ALVRClientApp.swift */; };
 		C5E590362B6379ED00328ED6 /* Renderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5E590352B6379ED00328ED6 /* Renderer.swift */; };
@@ -95,6 +96,7 @@
 
 /* Begin PBXFileReference section */
 		0FDF7F3AB0664D5089D91DE3 /* PerformanceTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceTracker.swift; sourceTree = "<group>"; };
+		A7E1C0DE5EED000000000001 /* StreamTelemetry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamTelemetry.swift; sourceTree = "<group>"; };
 		5BD00478C3614F7DB55D935E /* PerformanceOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerformanceOverlayView.swift; sourceTree = "<group>"; };
 		656A9FCE2F04031600D8DE2D /* ChaperoneSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChaperoneSystem.swift; sourceTree = "<group>"; };
 		8E1240FE2B7CC02E005B75F2 /* Entry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Entry.swift; sourceTree = "<group>"; };
@@ -237,6 +239,7 @@
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
 				0FDF7F3AB0664D5089D91DE3 /* PerformanceTracker.swift */,
+				A7E1C0DE5EED000000000001 /* StreamTelemetry.swift */,
 				5BD00478C3614F7DB55D935E /* PerformanceOverlayView.swift */,
 				E72683DA2BE73DD10065B78B /* MetalClientSystem.swift */,
 				E7A98A9F2BE2EEEA003DF333 /* RealityKitClientSystem.swift */,
@@ -436,6 +439,7 @@
 				E71DEF9A2C18D4B4008A2074 /* ALVRTypes.swift in Sources */,
 				E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */,
 				93F10375671142039BA634E8 /* PerformanceTracker.swift in Sources */,
+				A7E1C0DE5EED000000000002 /* StreamTelemetry.swift in Sources */,
 				E7AC9193873D48A2B7122E11 /* PerformanceOverlayView.swift in Sources */,
 				E72683DB2BE73DD10065B78B /* MetalClientSystem.swift in Sources */,
 				8E1241032B7CC0E1005B75F2 /* EntryControls.swift in Sources */,

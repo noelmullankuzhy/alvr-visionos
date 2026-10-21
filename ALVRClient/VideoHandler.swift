@@ -597,10 +597,13 @@ struct VideoHandler {
                 : annexBBufferToCMSampleBuffer(buffer: nals, videoFormat: videoFormat) // NALs
         else {
             print("Failed in annexBBufferToCMSampleBuffer")
+            StreamTelemetry.shared.recordDecodeSubmitFailed()
             return
         }
+        let submitNs = StreamTelemetry.nowNs()
         err = VTDecompressionSessionDecodeFrame(decompressionSession, sampleBuffer: sampleBuffer, flags: VTDecodeFrameFlags.init(rawValue: 0), infoFlagsOut: nil) { (status: OSStatus, infoFlags: VTDecodeInfoFlags, imageBuffer: CVImageBuffer?, taggedBuffers: [CMTaggedBuffer]?, presentationTimeStamp: CMTime, presentationDuration: CMTime) in
-        
+            StreamTelemetry.shared.recordDecodeOutput(submitNs: submitNs, ok: status >= 0 && imageBuffer != nil)
+
             if status < 0 {
                 //print("Error while decoding:", status, infoFlags, imageBuffer, taggedBuffers, presentationTimeStamp, presentationDuration)
             }
@@ -620,6 +623,7 @@ struct VideoHandler {
             callback(imageBuffer)
         }
         if err != 0 {
+            StreamTelemetry.shared.recordDecodeSubmitFailed()
             //fatalError("VTDecompressionSessionDecodeFrame")
         }
     }
@@ -989,6 +993,8 @@ struct VideoHandler {
         let streamFPS = ALVRClientApp.gStore.settings.streamFPS
 
         refreshRate = Float(streamFPS) ?? defaultRefreshRate
+        let appliedRefreshRate = refreshRate
+        StreamTelemetry.shared.updateFormat { $0.displayRefreshRateHz = StreamTelemetry.round(Double(appliedRefreshRate), 3) }
 
         print("Setting refresh rate preference to:", refreshRate)
 
@@ -1002,6 +1008,46 @@ struct VideoHandler {
                 let avDisplayManager = window.avDisplayManager
                 avDisplayManager.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: refreshRate, formatDescription: videoFormat!)
             }
+        }
+    }
+}
+
+// MARK: - Stream telemetry
+
+extension VideoHandler {
+    // Copies what the decoder was created with into the ALVRFORMAT record; fields absent from
+    // the format description are left out rather than guessed.
+    static func reportVideoFormat(_ videoFormat: CMFormatDescription) {
+        let subType = CMFormatDescriptionGetMediaSubType(videoFormat)
+        let fourCC = StreamTelemetry.fourCCString(subType)
+        let dimensions = CMVideoFormatDescriptionGetDimensions(videoFormat)
+        let ext = { (key: CFString) in CMFormatDescriptionGetExtension(videoFormat, extensionKey: key) }
+
+        var codecConfig: (bitDepth: Int, chromaSubsampling: String)? = nil
+        if let atoms = ext(kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms) as? [String: Any] {
+            for name in ["hvcC", "avcC", "av1C"] {
+                if let data = atoms[name] as? Data {
+                    codecConfig = StreamTelemetry.parseCodecConfig(fourCC: fourCC, bytes: [UInt8](data))
+                    break
+                }
+            }
+        }
+        let bitsPerComponent = (ext(kCMFormatDescriptionExtension_BitsPerComponent) as? NSNumber)?.intValue
+        let fullRange = (ext(kCMFormatDescriptionExtension_FullRangeVideo) as? NSNumber)?.boolValue
+        let primaries = ext(kCMFormatDescriptionExtension_ColorPrimaries) as? String
+        let transfer = ext(kCMFormatDescriptionExtension_TransferFunction) as? String
+        let matrix = ext(kCMFormatDescriptionExtension_YCbCrMatrix) as? String
+
+        StreamTelemetry.shared.updateFormat {
+            $0.codec = StreamTelemetry.codecName(fourCC: fourCC) ?? fourCC
+            $0.codedWidth = Int(dimensions.width)
+            $0.codedHeight = Int(dimensions.height)
+            $0.bitDepth = codecConfig?.bitDepth ?? bitsPerComponent
+            $0.chromaSubsampling = codecConfig?.chromaSubsampling
+            $0.fullRange = fullRange
+            $0.colorPrimaries = primaries
+            $0.transferFunction = transfer
+            $0.ycbcrMatrix = matrix
         }
     }
 }
