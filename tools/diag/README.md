@@ -168,7 +168,9 @@ Enable Diagnostics in Advanced Settings and restart the app (or launch with
 `ALVR_DIAG=1`). Advanced Settings then shows **Decode bench**, a port field
 (default 9944), **TCP bulk**, **Net sink**, **Stop**, and run status. These controls
 and their resources are absent with diagnostics off. Stop the stream first;
-a stream start synchronously closes the network listener and cancels decode work.
+a stream start synchronously closes the network listener and waits for decoder
+callback drain and all session invalidations, including cancellation during creation.
+The gate refuses new diagnostic starts throughout teardown. Stop has the same guarantee.
 
 Generate stress content with independent moving luma/chroma noise to fill high
 bitrate requests, then copy a clip directory to the installed client:
@@ -179,7 +181,19 @@ sh tools/diag/push-clips.sh 'DEVICE NAME OR ID' /tmp/avp-noise
 ```
 
 `--content default` preserves the moving ramps/bars. Noise uses deterministic
-frame-seeded xorshift samples across the full limited luma/chroma range. Encoding
+frame-seeded xorshift samples across the limited luma/chroma range. Noise defaults
+to targeted output: a supported VideoToolbox rolling data-rate cap is requested,
+and the achieved compressed-sample bitrate must be within ±15% of the request.
+A miss triggers re-encoding (up to eight attempts), bisecting noise amplitude on
+overshoot or increasing the encoder bitrate hint on undershoot. A clip that still
+misses is refused and deleted, never published as meeting its target. The manifest
+records `rateMode`, `rateLimited`, `noiseAmplitude`, `encoderBitrate`,
+`dataRateLimitApplied`, `encodeAttempts` and `bitrateTolerance`.
+
+Use `--content noise --stress` explicitly for uncapped overload: the manifest labels
+it `rateMode=overload`, `overload=true`, `rateLimited=false`. This mode retains the
+bitrate hint and full-amplitude noise but applies no hard cap or tolerance check;
+its achieved rate may differ substantially. It is not a calibrated target clip. Encoding
 is CPU-heavy on large noise inputs; generation speed is not a decoder result.
 Both `achievedBitrate` and the existing `bitrate` manifest field contain measured
 compressed sample bytes × 8 / media duration. Compare these with `requestedBitrate`;
@@ -190,13 +204,13 @@ and runs 1/2 independent hardware-required sessions in max/paced modes, without
 presentation. The shared client output attributes leave SDR in the native format
 and request explicit full/video-range 10-bit planes for PQ. Each session has at
 most eight outstanding submissions; latency is submit-to-callback wall time,
-quantiles use nearest rank, and fps/pixel rate aggregate both sessions over their
+quantiles use nearest rank over bounded histograms (precision below), and fps/pixel rate aggregate both sessions over their
 common wall interval (coded dimensions, not visible eye regions). Paced runs
 include the last frame period. Drops are submitted minus successful callbacks;
 errors, actual output fourcc(s), hardware property readback, dimensions, source
 cadence and depth limit are logged through Diag. Err -1 is an outstanding-slot
 stall, -2 a reader failure, -3 hardware readback false; VT errors retain OSStatus.
-Cancellation drains outstanding frames. Inspect every trial's `err` and `hw`;
+Cancellation waits for outstanding callbacks and session invalidation before admission reopens. Inspect every trial's `err` and `hw`;
 the UI's completion message alone does not establish hardware acceptance.
 
 **Net sink** listens on IPv4, UDP unless TCP bulk is selected. Each run lasts up
@@ -220,17 +234,29 @@ excluding setup/stop idle time. All other counters/distributions are cumulative:
 - `jitter_ms`: RFC3550-style EWMA of absolute changes in (receive time − send
   time), alpha 1/16, using unique arrivals in reception order.
 - `spread_p95_ms` / `spread_p99_ms` and `burst_tail_p95_ms` / `burst_tail_p99_ms`:
-  nearest-rank first-to-last reception spread of **complete** frames, including
+  nearest-rank histogram estimates of first-to-last reception spread of **complete** frames, including
   reordering. They measure delivery spread, not absolute one-way latency.
 - `owdv_ms`: max minus min packet transit; `owdv_p95_ms` / `owdv_p99_ms`:
   complete-frame worst packet transit relative to the minimum packet transit
   across the run. Sender/receiver clock offset cancels; drift can still contribute.
 
+Completion spreads and decode latencies use fixed 0.125 ms histogram bins from
+0 to 65536 ms; relative frame transit uses signed bins from -65536 to +65536 ms
+around the first packet's transit. Quantization error is at most **0.0625 ms** for
+an in-range percentile, regardless of sample count. Transit is rebased before
+histogramming so unrelated host clock origins cannot consume its range. Completion
+and decode totals are separate counters; no observations are retained or sorted.
+Two network distributions use <13 MiB; one decode distribution uses <4.1 MiB,
+unchanged after millions of samples. Block totals keep percentile queries bounded
+to a short bin scan. `hist_error_ms` records the bound; `hist_overflow` counts
+out-of-range observations, whose percentile ranks report `nan` rather than a
+clipped measurement. The 60-second listener limit is not the memory bound.
+
 Validation (no device required except the final measurement runs):
 
 ```sh
-sh tests/swift/run-tests.sh
-sh /Users/noel/Projects/Personal/vr-gaming/tools/typecheck-client.sh "$PWD"
+sh tools/run-tests.sh
+sh tools/typecheck
 /usr/bin/python3 -m unittest discover -s tools/diag -p 'test_*.py'
 /opt/homebrew/bin/python3 -m unittest discover -s tools/diag -p 'test_*.py'
 DIAG_LOOPBACK=1 sh tests/swift/run-tests.sh DiagSinkLoopback
@@ -240,9 +266,13 @@ The Swift tests cover parser golden bytes cross-checked against the Python sende
 loss/reorder/jitter and decode statistics, run exclusion/ownership, actual bench
 compilation and shared SDR/PQ output requests. `test_noise.py` asserts >=2× the
 bitrate of default content for a 640×360/30fps/1s clip at the same 20 Mb/s request.
+It also checks ±15% at **3648×2912@90, 150 and 300 Mb/s** (two-second clips),
+plus explicit overload labelling. Swift tests inject cancellation during session
+creation and frame submission, hold callback drain and invalidation separately,
+and feed one million completions/latencies through the bounded distributions.
 It explicitly skips only HEVC creation refusal -12908. Swift and Python loopback
 tests are opt-in; the worker sandbox denies bind. HDRGPUTests also cannot access
-a Metal device there: use `SWIFT_SKIP_TESTS=HDRGPUTests sh tests/swift/run-tests.sh`
+a Metal device there: use `SWIFT_SKIP_TESTS=HDRGPUTests sh tools/run-tests.sh`
 for the remaining tests (the runner prints the explicit skip), and run the normal
 suite, noise test, and both loopback suites outside that sandbox. Hardware decode
 acceptance/throughput/format and real PC→AVP network tails remain device-only.

@@ -4,7 +4,7 @@ let process = Process()
 process.executableURL = URL(fileURLWithPath: "/usr/bin/swift")
 let engine = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("clip-engine.swift")
 let cache = ProcessInfo.processInfo.environment["CLANG_MODULE_CACHE_PATH"] ?? NSTemporaryDirectory() + "alvr-diag-module-cache"
-process.arguments = ["-module-cache-path", cache, engine.path, "--kind", "stress"] + Array(CommandLine.arguments.dropFirst())
+process.arguments = ["-O", "-module-cache-path", cache, engine.path, "--kind", "stress"] + Array(CommandLine.arguments.dropFirst())
 do {
     try process.run()
     process.waitUntilExit()

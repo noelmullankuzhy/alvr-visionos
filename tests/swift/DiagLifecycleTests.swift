@@ -7,6 +7,8 @@ private final class State {
     func change(_ body: (State) -> Void) { lock.lock(); defer { lock.unlock() }; body(self) }
 }
 
+private func waitForStage(_ semaphore: DispatchSemaphore) { _ = semaphore.wait(timeout: .now() + 10) }
+
 @main enum DiagLifecycleTests {
     static func main() async {
         Diag.start(enabled: true, directory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), console: nil)
@@ -25,13 +27,13 @@ private final class State {
                     await lifetime.run { progress in
                         state.change { $0.created = duringCreation ? 1 : 2; $0.callbacks = duringCreation ? 0 : 8 }
                         entered.signal()
-                        _ = resumeOperation.wait(timeout: .now() + 10) // in create / in submit
+                        waitForStage(resumeOperation) // in create / in submit
                         if duringCreation { state.change { $0.created += 1 } }
                         // Cancellation may race the return from either hardware API.
                         if progress.isCancelled {
-                            draining.signal(); _ = drainCallbacks.wait(timeout: .now() + 10)
+                            draining.signal(); waitForStage(drainCallbacks)
                             state.change { $0.callbacks = 0; $0.invalidated = 1 }
-                            invalidating.signal(); _ = finishInvalidation.wait(timeout: .now() + 10)
+                            invalidating.signal(); waitForStage(finishInvalidation)
                             state.change { $0.invalidated = $0.created }
                         }
                     }

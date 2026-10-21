@@ -1,30 +1,37 @@
 import Foundation
 import Darwin
 
-// Stream transitions and UI starts share this lock. Stop closes the listeners synchronously
-// before EventHandler publishes streamingActive=true; off never touches the gate.
+// Keep ownership through synchronous teardown, but never hold the mutex while waiting
+// for workers: admission can refuse promptly and worker completion cannot deadlock.
 enum DiagWorkGate {
-    private static let lock = NSLock()
-    private static var streaming = false
+    private static let condition = NSCondition()
+    private static var streaming = false, stopping = false
     private static var owner: UUID?
     private static var stopAction: (() -> Void)?
     static func start(id: UUID = UUID(), _ action: () -> (() -> Void)?) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard Diag.isOn, !streaming, stopAction == nil else { return false }
-        stopAction = action(); owner = stopAction == nil ? nil : id; return stopAction != nil
+        condition.lock(); defer { condition.unlock() }
+        guard Diag.isOn, !streaming, !stopping, owner == nil else { return false }
+        stopAction = action(); owner = stopAction == nil ? nil : id; return owner != nil
     }
     static func stop() {
-        lock.lock(); defer { lock.unlock() }
-        stopAction?(); stopAction = nil; owner = nil
+        condition.lock()
+        let target = owner
+        while stopping && owner == target { condition.wait() }
+        guard owner == target, let action = stopAction else { condition.unlock(); return }
+        stopping = true
+        condition.unlock()
+        action() // decoder cancellation waits for drain + invalidation, net stop closes sockets
+        condition.lock()
+        stopAction = nil; owner = nil; stopping = false
+        condition.broadcast(); condition.unlock()
     }
     static func finish(_ id: UUID) {
-        lock.lock(); defer { lock.unlock() }
-        if owner == id { stopAction = nil; owner = nil }
+        condition.lock(); defer { condition.unlock() }
+        if owner == id && !stopping { stopAction = nil; owner = nil }
     }
     static func setStreaming(_ active: Bool) {
-        lock.lock(); defer { lock.unlock() }
-        streaming = active
-        if active { stopAction?(); stopAction = nil; owner = nil }
+        condition.lock(); streaming = active; condition.unlock()
+        if active { stop() } // EventHandler publishes streamingActive only after this returns
     }
 }
 
@@ -61,7 +68,7 @@ final class DiagNetSink {
                 guard let self else { return }
                 self.report(summary: false)
                 if DispatchTime.now().uptimeNanoseconds - self.startNs >= 60_000_000_000 {
-                    self.closeRun(); DispatchQueue.main.async { DiagWorkGate.stop() }
+                    self.closeRun()
                 }
             }; timer?.resume()
             return nil
@@ -121,10 +128,11 @@ final class DiagNetSink {
             Diag.log("net", ["mode": mode, "summary": summary, "seconds": Double(now - startNs) / 1e9,
                              "active_seconds": active, "mbps": mbps,
                              "bytes": bytes, "loss": stats.loss, "reorder": stats.reordered, "duplicates": stats.duplicates,
+                             "hist_error_ms": BoundedDistribution.errorMs, "hist_overflow": stats.distributionOverflow,
                              "stale": stats.stale, "invalid": invalid, "foreign": foreign, "jitter_ms": stats.jitterMs,
-                             "frame_complete": stats.spreads.count, "spread_p95_ms": stats.percentile(stats.spreads, 0.95), "spread_p99_ms": stats.percentile(stats.spreads, 0.99),
+                             "frame_complete": stats.completed, "spread_p95_ms": stats.spreads.percentile(0.95), "spread_p99_ms": stats.spreads.percentile(0.99),
                              "owdv_ms": stats.delayVariationMs, "owdv_p95_ms": stats.tail(0.95), "owdv_p99_ms": stats.tail(0.99),
-                             "burst_tail_p95_ms": stats.percentile(stats.spreads, 0.95), "burst_tail_p99_ms": stats.percentile(stats.spreads, 0.99)])
+                             "burst_tail_p95_ms": stats.spreads.percentile(0.95), "burst_tail_p99_ms": stats.spreads.percentile(0.99)])
         }
         lastNs = now; lastBytes = bytes
     }

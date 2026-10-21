@@ -11,18 +11,21 @@ struct DiagBenchView: View {
     var body: some View {
         VStack(alignment: .leading) {
             Text("Decode / network measurements").font(.headline)
-            Text("Stop streaming before testing. Starting a stream stops diagnostics. Net sink accepts one sender per run, for up to 60 seconds.").font(.caption)
+            Text("Stop streaming before testing. Starting a stream waits for diagnostic teardown. Net sink accepts one sender per run, for up to 60 seconds.").font(.caption)
             HStack {
                 Button("Decode bench") {
-                    let cancel = Progress(totalUnitCount: 1), id = UUID()
+                    let id = UUID()
                     runID = id
                     running = DiagWorkGate.start(id: id) {
+                        let lifetime = DiagDecodeLifetime()
+                        // Launch before returning the stop action; teardown never depends on MainActor.
+                        let worker = Task.detached { await lifetime.run { await DiagDecodeBench.run(cancel: $0) } }
                         Task {
-                            let result = await Task.detached { await DiagDecodeBench.run(cancel: cancel) }.value
+                            let result = await worker.value
                             DiagWorkGate.finish(id)
                             if runID == id { status = result; running = false }
                         }
-                        return { cancel.cancel() }
+                        return { lifetime.cancelAndWait() }
                     }
                     status = running ? "Decoding all clips: 1/2 sessions × max/paced…" : "Stop streaming before testing."
                 }
@@ -32,8 +35,8 @@ struct DiagBenchView: View {
                     guard let number = UInt16(port), number > 0 else { status = "Port must be 1–65535"; return }
                     let id = UUID(); runID = id
                     var error: String?
-                    running = DiagWorkGate.start {
-                        error = sink.start(port: number, tcp: tcp) { if runID == id { running = false; status = "Net sink stopped; summary logged." } }
+                    running = DiagWorkGate.start(id: id) {
+                        error = sink.start(port: number, tcp: tcp) { DiagWorkGate.finish(id); if runID == id { running = false; status = "Net sink stopped; summary logged." } }
                         return error == nil ? { sink.stop() } : nil
                     }
                     status = error ?? (running ? "Listening on \(number) (\(tcp ? "TCP" : "UDP"))…" : "Stop streaming before testing.")

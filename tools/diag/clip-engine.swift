@@ -45,7 +45,7 @@ final class Sink {
     }
 }
 
-func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int, kind: String, content: String) throws -> [String: Any] {
+func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int, kind: String, content: String, noiseAmplitude: Double = 1, encoderBitrate: Int? = nil, limited: Bool = false) throws -> [String: Any] {
     let writer = try AVAssetWriter(outputURL: out, fileType: .mov)
     let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil)
     input.expectsMediaDataInRealTime = false
@@ -72,12 +72,20 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
         kVTCompressionPropertyKey_AllowFrameReordering: false,
         kVTCompressionPropertyKey_ExpectedFrameRate: fps,
         kVTCompressionPropertyKey_MaxKeyFrameInterval: fps,
-        kVTCompressionPropertyKey_AverageBitRate: bitrate,
+        kVTCompressionPropertyKey_AverageBitRate: encoderBitrate ?? bitrate,
         kVTCompressionPropertyKey_ColorPrimaries: isPQ ? kCVImageBufferColorPrimaries_ITU_R_2020 : kCVImageBufferColorPrimaries_ITU_R_709_2,
         kVTCompressionPropertyKey_TransferFunction: isPQ ? kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ : kCVImageBufferTransferFunction_ITU_R_709_2,
         kVTCompressionPropertyKey_YCbCrMatrix: isPQ ? kCVImageBufferYCbCrMatrix_ITU_R_2020 : kCVImageBufferYCbCrMatrix_ITU_R_709_2
     ]
     for (key, value) in properties { try check(VTSessionSetProperty(session, key: key, value: value as CFTypeRef), "set \(key)") }
+    var capApplied = false
+    if limited {
+        // A hard rolling-window cap, where supported; final measured bitrate is still checked.
+        let status = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits,
+            value: [Double(bitrate) * 1.10 / 8, 1.0] as CFArray)
+        capApplied = status == noErr
+        if status != noErr && status != kVTPropertyNotSupportedErr { try check(status, "set data rate limit") }
+    }
     try check(VTCompressionSessionPrepareToEncodeFrames(session), "prepare")
     guard writer.startWriting() else { throw Failure("start writer: \(String(describing: writer.error))") }
     writer.startSession(atSourceTime: .zero)
@@ -117,8 +125,10 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
             }
             for line in 0..<(height / 2) { uv.advanced(by: line * uvStride).update(repeating: 512 << 6, count: width) }
             if content == "noise" && kind == "stress" {
-                for line in 0..<height { for x in 0..<width { y[line * yStride + x] = noise(64, 877) } }
-                for line in 0..<(height / 2) { for x in 0..<width { uv[line * uvStride + x] = noise(64, 897) } }
+                let yRange = UInt32((876 * noiseAmplitude).rounded()) + 1
+                let uvRange = UInt32((896 * noiseAmplitude).rounded()) + 1
+                for line in 0..<height { for x in 0..<width { y[line * yStride + x] = noise(64 + (877 - yRange) / 2, yRange) } }
+                for line in 0..<(height / 2) { for x in 0..<width { uv[line * uvStride + x] = noise(64 + (897 - uvRange) / 2, uvRange) } }
             }
             CVPixelBufferUnlockBaseAddress(pixel, [])
             for (key, value) in [(kCVImageBufferColorPrimariesKey, properties[kVTCompressionPropertyKey_ColorPrimaries]!),
@@ -144,7 +154,8 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
     }
     var result: [String: Any] = ["file": out.lastPathComponent, "kind": kind, "width": width, "height": height,
         "fps": fps, "frames": sink.frames, "seconds": Double(count) / Double(fps),
-        "content": content, "achievedBitrate": Double(sink.bytes * 8 * fps) / Double(count),
+        "content": content, "noiseAmplitude": noiseAmplitude, "encoderBitrate": encoderBitrate ?? bitrate,
+        "dataRateLimitApplied": capApplied, "achievedBitrate": Double(sink.bytes * 8 * fps) / Double(count),
         "requestedBitrate": bitrate, "bitrate": Double(sink.bytes * 8 * fps) / Double(count),
         "format": sink.format, "profile": "HEVC Main10", "realTime": true, "allowFrameReordering": false, "range": "limited",
         "primaries": isPQ ? "BT.2020" : "BT.709", "transfer": isPQ ? "SMPTE ST 2084" : "BT.709",
@@ -160,11 +171,43 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
     return result
 }
 
+// Validate the compressed-sample bitrate, not container bytes or wall-clock generation speed.
+// If rate control misses, bisect noise amplitude (overshoot) or raise the encoder hint
+// (undershoot at full entropy). Never publish an out-of-tolerance targeted clip.
+func calibratedEncode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int,
+                      kind: String, content: String, overload: Bool) throws -> [String: Any] {
+    let limited = content == "noise" && !overload
+    var amplitude = 1.0, lower = 0.0, upper = 1.0, encoderRate = bitrate
+    for attempt in 1...(limited ? 8 : 1) {
+        var clip = try encode(out: out, width: width, height: height, fps: fps, seconds: seconds, bitrate: bitrate,
+                              kind: kind, content: content, noiseAmplitude: amplitude, encoderBitrate: encoderRate, limited: limited)
+        let achieved = clip["achievedBitrate"] as! Double
+        guard achieved.isFinite, achieved > 0 else { throw Failure("encoder produced no compressed bytes") }
+        clip["overload"] = overload
+        clip["rateLimited"] = limited
+        clip["rateMode"] = overload ? "overload" : (limited ? "targeted" : "target-hint")
+        clip["bitrateTolerance"] = 0.15
+        clip["encodeAttempts"] = attempt
+        if !limited || abs(achieved / Double(bitrate) - 1) <= 0.15 { return clip }
+        try FileManager.default.removeItem(at: out)
+        fputs("Re-encode \(out.lastPathComponent): achieved \(Int(achieved)) vs target \(bitrate), amplitude \(amplitude)\n", stderr)
+        if achieved > Double(bitrate) * 1.15 {
+            upper = amplitude; amplitude = (lower + upper) / 2
+        } else {
+            lower = amplitude
+            if amplitude < upper { amplitude = (lower + upper) / 2 }
+            else { encoderRate = Int(min(Double(Int.max / 4), Double(encoderRate) * min(2, Double(bitrate) / achieved))) }
+        }
+    }
+    throw Failure("noise bitrate could not reach ±15% of \(bitrate) after 8 encodes; use --stress only for uncapped overload")
+}
+
 func main() throws {
     var options: [String: String] = [:]
-    let args = Array(CommandLine.arguments.dropFirst())
+    let overload = CommandLine.arguments.contains("--stress")
+    let args = Array(CommandLine.arguments.dropFirst()).filter { $0 != "--stress" }
     if args.contains("--help") {
-        print("--out DIR [--sizes 3840x2160,5120x2880,7680x4320,3648x2912] [--fps 90,120] [--seconds 5] [--bitrate 40000000] [--content default|noise]; PQ defaults: 1920x1080, 30fps, 14s steps + 5s gradient. --seconds overrides each clip.")
+        print("--out DIR [--sizes 3840x2160,5120x2880,7680x4320,3648x2912] [--fps 90,120] [--seconds 5] [--bitrate 40000000] [--content default|noise] [--stress (uncapped noise overload)]; PQ defaults: 1920x1080, 30fps, 14s steps + 5s gradient. --seconds overrides each clip.")
         return
     }
     let known = ["--out", "--sizes", "--fps", "--seconds", "--bitrate", "--kind", "--content"]
@@ -177,6 +220,7 @@ func main() throws {
     let isPQ = options["--kind"] == "pq"
     let content = options["--content"] ?? "default"
     guard ["default", "noise"].contains(content), !isPQ || content == "default" else { throw Failure("--content default|noise (noise only for stress)") }
+    guard !overload || (!isPQ && content == "noise") else { throw Failure("--stress requires --content noise") }
     let sizes = (options["--sizes"] ?? (isPQ ? "1920x1080" : "3840x2160,5120x2880,7680x4320,3648x2912")).split(separator: ",")
     let rates = (options["--fps"] ?? (isPQ ? "30" : "90,120")).split(separator: ",")
     guard let bitrate = Int(options["--bitrate"] ?? "40000000"), bitrate > 0,
@@ -197,7 +241,7 @@ func main() throws {
                 guard !FileManager.default.fileExists(atPath: url.path) else { throw Failure("file exists: \(url.path)") }
                 do {
                     let duration = options["--seconds"] == nil && kind == "steps" ? 14 : seconds
-                    let clip = try encode(out: url, width: parts[0], height: parts[1], fps: fps, seconds: duration, bitrate: bitrate, kind: kind, content: content)
+                    let clip = try calibratedEncode(out: url, width: parts[0], height: parts[1], fps: fps, seconds: duration, bitrate: bitrate, kind: kind, content: content, overload: overload)
                     clips.append(clip)
                     print("Wrote \(url.lastPathComponent)")
                 } catch {
