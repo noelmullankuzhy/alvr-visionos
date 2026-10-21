@@ -15,6 +15,9 @@ import SwiftUI
 import CompositorServices
 
 struct ContentStageConfiguration: CompositorLayerConfiguration {
+    // Immersion style of the space this layer is in, for the diagnostics log only.
+    var immersion = "unknown"
+
     func makeConfiguration(capabilities: LayerRenderer.Capabilities, configuration: inout LayerRenderer.Configuration) {
         configuration.depthFormat = .depth32Float
         configuration.colorFormat = .bgra8Unorm_srgb
@@ -37,6 +40,9 @@ struct ContentStageConfiguration: CompositorLayerConfiguration {
         configuration.layout = supportedLayouts.contains(.layered) ? .layered : .dedicated
         
         configuration.colorFormat = .rgba16Float
+        if Diag.isOn {
+            DiagProbes.configuration(capabilities, configuration, immersion: immersion)
+        }
     }
 }
 
@@ -129,6 +135,7 @@ struct ALVRClientApp: App {
             .task {
                 model.isShowingClient = false
                 EventHandler.shared.initializeAlvr()
+                DiagProbes.start()
                 await WorldTracker.shared.initializeAr()
                 EventHandler.shared.start()
             }
@@ -208,7 +215,7 @@ struct ALVRClientApp: App {
         // Pinned to .mixed rather than sharing clientImmersionStyle: a .full
         // space would hide that window.
         ImmersiveSpace(id: "InputDebugSpace") {
-            CompositorLayer(configuration: ContentStageConfiguration()) { layerRenderer in
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
                 let system = MetalClientSystem(layerRenderer)
                 system.startRenderLoop()
             }
@@ -218,7 +225,7 @@ struct ALVRClientApp: App {
         .upperLimbVisibility(.visible)
 
         ImmersiveSpace(id: "DummyImmersiveSpace") {
-            CompositorLayer(configuration: ContentStageConfiguration()) { layerRenderer in
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: "full")) { layerRenderer in
                 let renderer = DummyMetalRenderer(layerRenderer)
                 renderer.startRenderLoop()
             }
@@ -235,7 +242,8 @@ struct ALVRClientApp: App {
         .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
 
         ImmersiveSpace(id: "MetalClient") {
-            CompositorLayer(configuration: ContentStageConfiguration()) { layerRenderer in
+            // clientImmersionStyle starts .mixed and is never reassigned.
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
                 let system = MetalClientSystem(layerRenderer)
                 system.startRenderLoop()
             }

@@ -25,6 +25,8 @@
 		C01A0E012C0000010011CC01 /* ColourPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01A0E022C0000010011CC02 /* ColourPipeline.swift */; };
 		D63A0E012C00000100630001 /* HDRPipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63A0E022C00000100630002 /* HDRPipeline.swift */; };
 		D63A0E012C00000100630003 /* HDRProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63A0E022C00000100630004 /* HDRProbe.swift */; };
+		D65D0E012C00000100650001 /* Diag.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D0E022C00000100650002 /* Diag.swift */; };
+		D65D0E012C00000100650003 /* DiagProbes.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D0E022C00000100650004 /* DiagProbes.swift */; };
 		D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68FA8082B742F6F0052B7FF /* FFR.swift */; };
 		E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */; };
 		A17A0E012C0000010011AA01 /* AutoEnterPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */; };
@@ -133,6 +135,8 @@
 		C01A0E022C0000010011CC02 /* ColourPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColourPipeline.swift; sourceTree = "<group>"; };
 		D63A0E022C00000100630002 /* HDRPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HDRPipeline.swift; sourceTree = "<group>"; };
 		D63A0E022C00000100630004 /* HDRProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HDRProbe.swift; sourceTree = "<group>"; };
+		D65D0E022C00000100650002 /* Diag.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/Diag.swift; sourceTree = "<group>"; };
+		D65D0E022C00000100650004 /* DiagProbes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagProbes.swift; sourceTree = "<group>"; };
 		D68FA8082B742F6F0052B7FF /* FFR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFR.swift; sourceTree = "<group>"; };
 		E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalSettings.swift; sourceTree = "<group>"; };
 		A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoEnterPolicy.swift; sourceTree = "<group>"; };
@@ -262,6 +266,8 @@
 				C01A0E022C0000010011CC02 /* ColourPipeline.swift */,
 				D63A0E022C00000100630002 /* HDRPipeline.swift */,
 				D63A0E022C00000100630004 /* HDRProbe.swift */,
+				D65D0E022C00000100650002 /* Diag.swift */,
+				D65D0E022C00000100650004 /* DiagProbes.swift */,
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
 				A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */,
@@ -487,6 +493,8 @@
 				C01A0E012C0000010011CC01 /* ColourPipeline.swift in Sources */,
 				D63A0E012C00000100630001 /* HDRPipeline.swift in Sources */,
 				D63A0E012C00000100630003 /* HDRProbe.swift in Sources */,
+				D65D0E012C00000100650001 /* Diag.swift in Sources */,
+				D65D0E012C00000100650003 /* DiagProbes.swift in Sources */,
 				D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */,
 				9ED257172B8062A2008DC22F /* Settings.swift in Sources */,
 				C5E590362B6379ED00328ED6 /* Renderer.swift in Sources */,

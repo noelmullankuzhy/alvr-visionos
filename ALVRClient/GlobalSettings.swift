@@ -34,7 +34,9 @@ struct GlobalSettings: Codable {
     var claimControllerHomeButton: Bool = true
     // Sent as prefer_hdr at ALVR initialisation (GM decision 63); off = SDR request as before.
     var hdrPQ: Bool = false
-    
+    // "Diagnostics" (GM decision 65): DIAG lines to alvr_log and Documents/diag; read once at launch.
+    var diagnostics: Bool = false
+
     init() {}
     
     init(from decoder: Decoder) throws {
@@ -65,6 +67,7 @@ struct GlobalSettings: Codable {
         self.showPerformanceHud = try container.decodeIfPresent(Bool.self, forKey: .showPerformanceHud) ?? self.showPerformanceHud
         self.claimControllerHomeButton = try container.decodeIfPresent(Bool.self, forKey: .claimControllerHomeButton) ?? self.claimControllerHomeButton
         self.hdrPQ = try container.decodeIfPresent(Bool.self, forKey: .hdrPQ) ?? self.hdrPQ
+        self.diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? self.diagnostics
     }
 }
 
