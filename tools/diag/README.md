@@ -505,3 +505,84 @@ RQ sweep GPU p99 is logged and reported. M9 footprint is bytes; RQ `footprint_mb
 is MiB. Corner radii/shape/exponents/area come from the recorded summary, with
 16 radii expanded in logged spoke order; missing marks are never filled in.
 These reports cannot manufacture measurements the headset did not record.
+
+## Frame capture
+
+Enable **Diagnostics** under Advanced Settings and restart the app. Enable
+**Capture diagnostic frames**, select a **Corner chart** mode, then enter the
+Metal immersive space without a stream. The capture setting is read when the
+renderer starts, like Corner chart. It defaults off and is hidden with Diagnostics
+off. One capture is requested three seconds after the first idle frame; each
+existing corner mark requests another, up to **24 per app process**. Each renderer
+admits one capture at a time; intervening marks queue with their recorded eye,
+spoke and percent. No captures are submitted while streaming. Restart to reset the cap.
+
+```sh
+sh tools/diag/pull-diag.sh 'DEVICE NAME OR ID' "$PWD/build/pulled-diag"
+/usr/bin/python3 tools/diag/verify-capture.py build/pulled-diag/captures/UTC-N
+# Depending on devicectl's destination layout, captures may be under pulled-diag/diag.
+```
+
+The puller copies the entire `Documents/diag` directory tree, including
+`captures/<UTC>-<n>/capture.json` and one PNG per colour texture slice. The timeout
+is five minutes for these larger pulls. Keep capture directories intact with their
+logs. `DIAG capture t_ms=… dir=… slices=… bytes=… ms_encode_blit=… ms_to_write=…`
+identifies each successful capture; `t_ms` is the captured submission, not the
+later write's time. `ms_encode_blit` measures CPU allocation/encoding;
+`ms_to_write` measures elapsed submission-to-write completion, including GPU
+queueing, readback, conversion, compression and I/O. Neither isolates GPU blit time.
+Failures emit `DIAG capture error=…` and consume their session slot.
+
+Readback is a blit in the presenting command buffer, after **all** app passes and
+before present. Rate tables are snapshotted while the drawable owns its map.
+GPU completion schedules file work on a utility queue. The render thread never waits for readback or writes files. A capture can still add GPU copy
+work and allocation cost. PNG channels are clamped to [0,1], rounded to eight bits,
+with no tone curve. Saturated chart colours survive exactly; this is not lossless
+storage of arbitrary HDR/half-float values. Alpha is retained, not composited.
+
+The JSON records UTC, monotonic submission time, drawable/texture/slice/view,
+physical texture size/format, logical viewport and view tangents in
+**left, right, bottom, top** magnitude order. Each slice's `rate_map` contains
+`screen_w + 1` physical-x samples and `screen_h + 1` physical-y samples, including
+both endpoints, from Metal's `physicalCoordinates(screenCoordinates:layer:)`.
+Maps are separable. Unmapped textures get identity tables. `corner_chart` is a
+locked live snapshot for every capture, including the timer:
+mode, eye, spoke, pct, public `ring_percents` and `cut_percents`, and all recorded
+marks. The separate `trigger` object identifies the timer or corner mark that
+requested it. A mark advances selection, so the live selection can differ from
+the trigger. If no chart is active, its mode is Off and selection fields are null.
+
+The independent Python 3.9+ standard-library verifier scans the **physical**
+image outward on the four tangent-origin axis rays, detects cyan (L) or magenta
+(R) stroke runs. D9 interior strokes are centered, so their run midpoints measure
+the ring; the clipped 100% border uses its outward edge. Older captures without
+`ring_stroke_alignment=center` use outward edges for their inward strokes.
+It independently computes
+ring positions from the recorded tangent magnitudes and percentages, interpolates
+the recorded map, and inverts measured crossings into logical pixels and
+normalised tangent units. Each eye/axis/ring prints expected/found physical and
+logical positions and absolute physical error. Missing rings or error **>1.5
+physical pixels** exit 1. Unlit monocular slices are skipped; an off chart cannot
+provide ring proof. `<source-image>-logical.png` is a nearest-sample unwarped logical
+preview, at most 1600 pixels wide, for visual inspection.
+
+This proves what the app submitted, including its diagnostic overlays and raster
+rate mapping. It does **not** capture lens distortion correction or reprojection,
+which visionOS performs after the app's image, or prove panel output, visible
+optical field, brightness, or photon timing. Mirror images are a separate path.
+
+Validation:
+
+```sh
+/usr/bin/python3 -m unittest tools/diag/test_verify_capture.py
+/opt/homebrew/bin/python3 -m unittest tools/diag/test_verify_capture.py
+sh tests/swift/run-tests.sh DiagCapture
+sh tests/swift/run-tests.sh DiagCaptureGPU
+```
+
+The GPU test uses the real chart geometry and Metal entry points, a two-slice
+rgba16Float texture and real two-layer, nonuniform raster rate map, then the
+production capture writer and Python verifier. Selection highlights can replace
+eye-colour pixels on an axis: the verifier reports such an obscured ring as a failure rather than inferring its location.
+The offscreen test deliberately uses no selection highlight so every ring can be
+checked. A missing Metal device is a **failure**, not a pass: run this test outside the sandbox on the GM's Mac.

@@ -36,6 +36,7 @@ struct GlobalSettings: Codable {
     var hdrPQ: Bool = false
     // "Diagnostics" (GM decision 65): DIAG lines to alvr_log and Documents/diag; read once at launch.
     var diagnostics: Bool = false
+    var captureDiagnosticFrames: Bool = false
     var renderQualitySweep: Bool = false
     // Corner chart (decision 65, CornerChartMode raw value): with Diagnostics on and no stream; read at renderer start.
     var cornerChart: String = CornerChartMode.off.rawValue
@@ -72,6 +73,7 @@ struct GlobalSettings: Codable {
         self.hdrPQ = try container.decodeIfPresent(Bool.self, forKey: .hdrPQ) ?? self.hdrPQ
         self.renderQualitySweep = try container.decodeIfPresent(Bool.self, forKey: .renderQualitySweep) ?? self.renderQualitySweep
         self.diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? self.diagnostics
+        self.captureDiagnosticFrames = try container.decodeIfPresent(Bool.self, forKey: .captureDiagnosticFrames) ?? self.captureDiagnosticFrames
         self.cornerChart = try container.decodeIfPresent(String.self, forKey: .cornerChart) ?? self.cornerChart
     }
 }

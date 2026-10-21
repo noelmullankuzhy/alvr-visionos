@@ -171,6 +171,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     // Corner chart (decision 65): Metal renderer, no stream; nil unless Diagnostics is on and the setting picks a mode.
     let cornerChart: CornerChartRenderer?
     let diagEye: DiagEyeRenderer?
+    let diagFrameCapture: DiagFrameCaptureSession?
     var hdrEnabled = false
     var currentRenderColorFormat = renderColorFormatSDR
     var currentDrawableRenderColorFormat = renderColorFormatDrawableSDR
@@ -221,6 +222,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         self.commandQueue = self.device.makeCommandQueue()!
         self.diagProbe = layerRenderer != nil && Diag.isOn ? DiagRenderProbe(device: self.device) : nil
         self.cornerChart = layerRenderer.flatMap { CornerChartRenderer.make(device: $0.device, layerRenderer: $0) }
+        self.diagFrameCapture = layerRenderer != nil && Diag.isOn && ALVRClientApp.gStore.settings.captureDiagnosticFrames
+            ? DiagFrameCaptureSession() : nil
         self.diagEye = layerRenderer != nil && Diag.isOn ? DiagEyeRenderer(layerRenderer!) : nil
         if layerRenderer == nil && Diag.isOn { DiagEye.unsupported() }
 
@@ -1212,6 +1215,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         for drawable in drawables {
             diagEye?.encode(buffer: commandBuffer, drawable: drawable, mode: diagSourceId == nil ? "idle" : "streaming",
                             generation: EventHandler.videoStreams.currentStream?.generation)
+        }
+        diagFrameCapture?.encode(buffer: commandBuffer, drawables: drawables,
+                                 idle: !renderingStreaming && !EventHandler.shared.streamingActive, chart: cornerChart)
+        for drawable in drawables {
             drawable.encodePresent(commandBuffer: commandBuffer)
         }
         if let diagTiming { diagProbe?.frame(layerRenderer: layerRenderer!, drawables: drawables, predicted: timing, sourceId: diagSourceId, timing: diagTiming) }

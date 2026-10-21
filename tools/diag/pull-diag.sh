@@ -8,10 +8,11 @@ if ! command -v xcrun >/dev/null 2>&1; then
     echo 'Error: xcrun is required (install/select Xcode on this Mac).' >&2
     exit 1
 fi
+# devicectl copies directory trees, including diag/captures/<UTC>-<n>/*.png/json.
 mkdir -p "$2"
 if ! xcrun devicectl device copy from --device "$1" \
     --domain-type appDataContainer --domain-identifier uk.lumenio.alvr \
-    --source Documents/diag --destination "$2" --timeout 60; then
+    --source Documents/diag --destination "$2" --timeout 300; then
     echo "Error: could not pull Documents/diag from device '$1'. Check its name/ID, pairing, connection, unlock state, app installation, and whether diagnostics have produced logs." >&2
     exit 1
 fi
