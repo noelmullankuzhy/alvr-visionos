@@ -8,6 +8,7 @@ import UIKit
 
 struct Entry: View {
     @AppStorage(HDRPipeline.probeKey) private var hdrProbeEnabled = false
+    @AppStorage(EyeBadgeFlag.defaultsKey) private var eyeBadgesEnabled = false
     @ObservedObject var eventHandler = EventHandler.shared
     @EnvironmentObject var gStore: GlobalSettingsStore
     @Environment(\.scenePhase) private var scenePhase
@@ -381,6 +382,16 @@ struct Entry: View {
                         .toggleStyle(.switch)
                         .onChange(of: gStore.settings.diagnostics) {
                             saveAction()
+                        }
+
+                        Toggle(isOn: $eyeBadgesEnabled) {
+                            Text("Eye badges (L/R)")
+                            Text("Shows per-eye labels in the Metal renderer. Applies immediately.")
+                                .font(.system(size: 10))
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: eyeBadgesEnabled) {
+                            EyeBadgeFlag.shared.update(defaultsValue: eyeBadgesEnabled)
                         }
 
                         Toggle("Render quality sweep", isOn: $gStore.settings.renderQualitySweep)

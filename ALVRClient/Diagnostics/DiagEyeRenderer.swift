@@ -50,7 +50,7 @@ final class DiagEyeDrawing {
 #if os(visionOS)
 import CompositorServices
 
-// Created only by a Metal renderer with Diagnostics on; never instantiated by the off or RealityKit paths.
+// Created only by a Metal renderer with Eye badges on; logging still follows Diagnostics.
 final class DiagEyeRenderer {
     private let drawing: DiagEyeDrawing
     private var logs = DiagEye.LogState()

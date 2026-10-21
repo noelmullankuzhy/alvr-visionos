@@ -69,7 +69,7 @@ final class EDRRenderer {
     let layer: LayerRenderer
     let queue: MTLCommandQueue
     let drawing: EDRDrawing
-    let badge: DiagEyeRenderer?
+    private var badge: DiagEyeRenderer?
     let runID = EDRSession.shared.currentRun
     private var pinches: [SpatialEventCollection.Event.ID: (start: TimeInterval, right: Bool)] = [:]
     private var anchorMissingLogged = false
@@ -78,7 +78,6 @@ final class EDRRenderer {
     init(_ layer: LayerRenderer, immersion: String) throws {
         self.layer = layer
         self.immersion = immersion
-        badge = Diag.isOn ? DiagEyeRenderer(layer) : nil
         queue = layer.device.makeCommandQueue()!
         drawing = try EDRDrawing(device: layer.device, library: layer.device.makeDefaultLibrary()!)
     }
@@ -139,6 +138,11 @@ final class EDRRenderer {
         let anchor = WorldTracker.shared.worldTracking.queryDeviceAnchor(atTimestamp: presentation)
         if anchor == nil, !anchorMissingLogged { anchorMissingLogged = true; Diag.log("edr", ["device_anchor": "missing", "immersion": immersion]) }
         let snapshot = EDRSession.shared.frame()
+        if DiagEye.shouldDraw(badgesEnabled: EyeBadgeFlag.shared.enabled, isRealityKit: false) {
+            if badge == nil { badge = DiagEyeRenderer(layer) }
+        } else {
+            badge = nil
+        }
         for drawable in drawables {
             drawable.deviceAnchor = anchor
             for (index, view) in drawable.views.enumerated() {
