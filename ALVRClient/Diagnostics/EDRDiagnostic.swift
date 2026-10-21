@@ -11,6 +11,60 @@ struct PQPlaybackContext {
     }
 }
 
+enum PQPlaybackPath: String, CaseIterable { case window, immersive = "realitykit" }
+
+enum PQControlAction: Equatable {
+    case stop, dismissSpace
+    case openImmersive(URL)
+    case play(PQPlaybackPath, URL)
+}
+
+// Decisions shared by the controls and Foundation-only tests; effects run on the main actor.
+struct PQControls {
+    let space: String?
+    let layout: EDRLayout
+    let selection: URL?
+    let playing: PQPlaybackPath?
+    var reloadEnabled: Bool { true }
+    private var active: PQPlaybackPath? { space == "PQDiagnostic" ? .immersive : playing }
+    func isOn(_ path: PQPlaybackPath) -> Bool { active == path }
+    private func canStart(_ path: PQPlaybackPath) -> Bool {
+        selection != nil && (path == .immersive || space == "PQDiagnostic" || pqWindowPlaybackAllowed(space: space, layout: layout))
+    }
+    func canToggle(_ path: PQPlaybackPath) -> Bool { isOn(path) || canStart(path) }
+    func actions(_ path: PQPlaybackPath, on: Bool) -> [PQControlAction] {
+        if !on {
+            guard isOn(path) else { return [] }
+            return [.stop] + (path == .immersive && space == "PQDiagnostic" ? [.dismissSpace] : [])
+        }
+        guard canStart(path), let selection else { return [] }
+        if path == .window {
+            return (space == "PQDiagnostic" ? [.stop, .dismissSpace] : []) + [.play(.window, selection)]
+        }
+        if space == "PQDiagnostic" { return [.play(.immersive, selection)] }
+        return [.stop] + (space != nil ? [.dismissSpace] : []) + [.openImmersive(selection)]
+    }
+    static func restartAfterSelectionChange(playing: PQPlaybackPath?, to selection: URL?) -> PQControlAction? {
+        guard let playing else { return nil }
+        guard let selection else { return .stop }
+        return .play(playing, selection)
+    }
+}
+
+enum PQClipSelection {
+    static let defaultsKey = "diagnostics.pq.selectedClipName"
+    static func restore(clips: [URL], current: URL?, rememberedName: String?) -> URL? {
+        if let current, let found = clips.first(where: { $0.lastPathComponent == current.lastPathComponent }) { return found }
+        if let rememberedName, let found = clips.first(where: { $0.lastPathComponent == rememberedName }) { return found }
+        return clips.first
+    }
+    static func adjacent(clips: [URL], selected: URL?, forward: Bool) -> URL? {
+        guard !clips.isEmpty else { return nil }
+        guard let selected, let index = clips.firstIndex(of: selected) else { return clips.first }
+        return clips[(index + (forward ? 1 : clips.count - 1)) % clips.count]
+    }
+}
+
 // tools/diag/clip-engine.swift: seven two-second levels, last level held on extension.
 enum PQSchedule {
     static func step(time: Double, clip: String) -> Int {

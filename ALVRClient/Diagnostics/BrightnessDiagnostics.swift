@@ -6,9 +6,23 @@ import RealityKit
     static let shared = PQDiagnostic()
     let player = AVPlayer()
     @Published var clips: [URL] = []
-    @Published var selected: URL?
+    @Published var selected: URL? {
+        didSet {
+            guard selected != oldValue else { return }
+            if let selected { UserDefaults.standard.set(selected.lastPathComponent, forKey: PQClipSelection.defaultsKey) }
+            switch PQControls.restartAfterSelectionChange(playing: playingPath, to: selected) {
+            case .play(let path, let clip): play(clip: clip, immersive: path == .immersive)
+            case .stop: stop()
+            default: break
+            }
+        }
+    }
     @Published var space: String?
     @Published private(set) var playbackContext: PQPlaybackContext?
+    var playingPath: PQPlaybackPath? { playbackContext.flatMap { PQPlaybackPath(rawValue: $0.path) } }
+    func adjacentClip(forward: Bool) {
+        selected = PQClipSelection.adjacent(clips: clips, selected: selected, forward: forward)
+    }
     private var observer: Any?
     private var status: NSKeyValueObservation?
     func refresh() {
@@ -16,7 +30,8 @@ import RealityKit
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("diag-clips")
         clips = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
             .filter { ["mov", "mp4", "m4v"].contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-        selected = clips.first
+        selected = PQClipSelection.restore(clips: clips, current: selected,
+                                           rememberedName: UserDefaults.standard.string(forKey: PQClipSelection.defaultsKey))
     }
     func stop() {
         playbackContext = nil
@@ -25,12 +40,12 @@ import RealityKit
         observer = nil; status = nil
         player.replaceCurrentItem(with: nil)
     }
-    func play(immersive: Bool) {
-        guard Diag.isOn, let selected else { return }
+    func play(clip: URL, immersive: Bool) {
+        guard Diag.isOn else { return }
         stop()
-        let context = PQPlaybackContext(clip: selected.lastPathComponent, path: immersive ? "realitykit" : "window")
+        let context = PQPlaybackContext(clip: clip.lastPathComponent, path: immersive ? "realitykit" : "window")
         playbackContext = context
-        let item = AVPlayerItem(url: selected)
+        let item = AVPlayerItem(url: clip)
         player.replaceCurrentItem(with: item)
         Diag.log("pq", ["path": context.path, "clip": context.clip, "eligibleForHDRPlayback": AVPlayer.eligibleForHDRPlayback,
                         "availableHDRModes": AVPlayer.availableHDRModes.rawValue])
@@ -113,22 +128,45 @@ private struct BrightnessControls: View {
         EDRSession.shared.configure(layout: layout, automatic: automatic, sustained: sustained,
                                     fine: fine, gridRange: gridRange, mirror: mirror, borders: borders, coarse: coarse)
     }
-    private func enter(_ id: String) {
+    private func enter(_ id: String, clip: URL? = nil) async {
+        busy = true
+        defer { busy = false }
+        EDRSession.shared.beginRun()
+        pq.stop()
+        if pq.space != nil { await dismissSpace(); pq.space = nil }
+        configure()
+        switch await openSpace(id: id) {
+        case .opened:
+            pq.space = id
+            if id == "PQDiagnostic", let clip { pq.play(clip: clip, immersive: true) }
+        case .error: error = "Could not open immersive space. Close any active stream first."
+        case .userCancelled: break
+        @unknown default: break
+        }
+    }
+    private var pqControls: PQControls {
+        PQControls(space: pq.space, layout: layout, selection: pq.selected, playing: pq.playingPath)
+    }
+    private func playbackBinding(_ path: PQPlaybackPath) -> Binding<Bool> {
+        Binding(get: { pqControls.isOn(path) }, set: { setPlayback(path, on: $0) })
+    }
+    private func setPlayback(_ path: PQPlaybackPath, on: Bool) {
+        guard !busy else { return }
+        let actions = pqControls.actions(path, on: on)
+        guard !actions.isEmpty else { return }
         busy = true
         Task {
-            EDRSession.shared.beginRun()
-            pq.stop()
-            if pq.space != nil { await dismissSpace(); pq.space = nil }
-            configure()
-            switch await openSpace(id: id) {
-            case .opened:
-                pq.space = id
-                if id == "PQDiagnostic" { pq.play(immersive: true) }
-            case .error: error = "Could not open immersive space. Close any active stream first."
-            case .userCancelled: break
-            @unknown default: break
+            defer { busy = false }
+            for action in actions {
+                switch action {
+                case .stop: pq.stop()
+                case .dismissSpace:
+                    await dismissSpace()
+                    pq.space = nil
+                case .play(let path, let clip): pq.play(clip: clip, immersive: path == .immersive)
+                case .openImmersive(let clip): await enter("PQDiagnostic", clip: clip)
+                }
             }
-            busy = false
         }
     }
     private var running: Bool { pq.space == "EDRDiagnostic" }
@@ -208,7 +246,7 @@ private struct BrightnessControls: View {
     private var primarySection: some View {
         Section {
             HStack {
-                Button("Start") { enter("EDRDiagnostic") }.buttonStyle(.borderedProminent)
+                Button("Start") { Task { await enter("EDRDiagnostic") } }.buttonStyle(.borderedProminent)
                 Button("Stop") { stop() }
             }
         }
@@ -255,15 +293,21 @@ private struct BrightnessControls: View {
     }
     private var pqSection: some View {
         Section {
-            Picker("Clip", selection: $pq.selected) {
-                ForEach(pq.clips, id: \.self) { Text($0.lastPathComponent).tag(Optional($0)) }
-            }.disabled(!windowAllowed)
+            HStack {
+                Button("Prev clip") { pq.adjacentClip(forward: false) }.disabled(pq.clips.isEmpty)
+                Picker("Clip", selection: $pq.selected) {
+                    ForEach(pq.clips, id: \.self) { Text($0.lastPathComponent).tag(Optional($0)) }
+                }
+                Button("Next clip") { pq.adjacentClip(forward: true) }.disabled(pq.clips.isEmpty)
+            }
             if pq.clips.isEmpty { Text("Copy PQ clips to Documents/diag-clips, then Reload.").font(.caption) }
             HStack {
-                Button("Reload") { pq.refresh() }.disabled(!windowAllowed)
-                Button("Play in window") { pq.play(immersive: false) }.disabled(!windowAllowed || pq.selected == nil)
-                Button("Play immersive") { enter("PQDiagnostic") }.disabled(pq.selected == nil)
-            }
+                Button("Reload") { pq.refresh() }
+                Toggle("Play in window", isOn: playbackBinding(.window))
+                    .disabled(busy || !pqControls.canToggle(.window))
+                Toggle("Play immersive", isOn: playbackBinding(.immersive))
+                    .disabled(busy || !pqControls.canToggle(.immersive))
+            }.toggleStyle(.button)
             if windowAllowed { VideoPlayer(player: pq.player).frame(height: 240) }
         } header: {
             Text("HDR video (PQ)")
@@ -274,19 +318,21 @@ private struct BrightnessControls: View {
     var body: some View {
         Form {
             header
-            displaySection
-            patternSection
-            primarySection
-            if running { runningSection }
+            displaySection.disabled(busy)
+            patternSection.disabled(busy)
+            primarySection.disabled(busy)
+            if running { runningSection.disabled(busy) }
             pqSection
             if !error.isEmpty { Text(error).font(.caption) }
         }
         .formStyle(.grouped)
         .frame(width: 520)
-        .disabled(busy)
         .onAppear { pq.refresh(); configure() }
         .onChange(of: edr.immersion) { configure() }
-        .onChange(of: layout) { configure() }
+        .onChange(of: layout) {
+            configure()
+            if !windowAllowed, pq.playingPath == .window { pq.stop() }
+        }
         .onChange(of: coarse) { configure() }
         .onChange(of: fine) { configure() }
         .onChange(of: gridRange) { configure() }

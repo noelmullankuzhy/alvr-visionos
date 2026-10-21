@@ -234,9 +234,9 @@ line. Steps are 0.02, or 0.10 with **Coarse**; limits are 0.1–4.0.
 Press **Matched**, then select/play the next level and repeat. If equality is
 outside the range, set the patch to the relevant limit and press **Video
 brighter than max** or **Video darker than min**. Stop releases both paths.
-Window playback and clip selection remain available during EDR only for match.
-Result buttons require a playing window item named `level-<N>-…`; logs use
-that item's name even if the clip picker has since changed.
+Window playback beside EDR is available only for match. Clip selection and
+Reload remain available while playing. Result buttons require a window item
+named `level-<N>-…`; logs use the active item's immutable clip name.
 
 ```text
 DIAG edr t_ms=1234 match=1 metal_value=1.500 clip=level-100-pq.mov clip_nits=100 immersion=full
@@ -312,6 +312,21 @@ DIAG edr t_ms=5678 answer=brighter step=3 value=1.500 layout="pair 5%" immersion
 DIAG edr t_ms=6789 grid="grid 10%" range=fine mirror=0 borders=0 cell=A1 value=1.000 immersion=full
 DIAG pq t_ms=9000 path=window clip=pq-steps.mov current_s=2.000 step=1 rate=1.000 waiting=none
 ```
+
+**PQ controls:** **Prev clip / Next clip** beside the picker wrap around and
+remain enabled whenever clips exist. Changing the picker or stepping clips
+while playing restarts the same playback path with the new clip (including
+normal PQ playback logs). Each playback action captures the selected URL at
+the press, including across immersive-space opening. **Reload** is always available. Reload and reopening
+the controls keep the selection if the file still exists; the last selected
+filename is saved in UserDefaults and restored across launches. A first launch
+or missing remembered file falls back to the first clip.
+
+**Play in window / Play immersive** are mutually exclusive toggles. Turning a
+toggle off stops PQ playback; turning off immersive playback also dismisses
+the PQ space. Switching to window playback dismisses the PQ space first.
+Window playback beside EDR requires **match**; turning that window toggle off
+leaves EDR running. EDR retains its separate **Start / Stop** controls.
 
 **PQ player:** choose the generated `steps` clip, then Play in window (AVKit
 VideoPlayer) or Play immersive (RealityKit VideoPlayerComponent). Each launch
