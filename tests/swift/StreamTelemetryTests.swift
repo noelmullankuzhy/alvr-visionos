@@ -268,6 +268,10 @@ private func testUniquePresentedWindows() {
     expectEqual(uniquePerWindow([[5], [6], [5]]), [1.0, 1.0, 1.0], "(c) reuse from two windows back counts")
     // (d) Out of order within a window.
     expectEqual(uniquePerWindow([[200, 100]]), [2.0], "(d) [200, 100] counts 2")
+    // (e) A timestamp deduped against the last window is still seen in this one, so the next window dedupes it.
+    expectEqual(uniquePerWindow([[7], [8, 7], [9, 7]]), [1.0, 1.0, 1.0], "(e) reuse carried across three windows")
+    // (f) A consecutive repeat keeps the timestamp seen for the following window.
+    expectEqual(uniquePerWindow([[7], [7], [8, 7]]), [1.0, 0.0, 1.0], "(f) repeat in window 2 keeps 7 seen for window 3")
 }
 
 // The same timestamp queued twice: queue age is measured from the latest enqueue.

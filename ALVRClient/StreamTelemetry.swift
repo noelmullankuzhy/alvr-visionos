@@ -391,14 +391,15 @@ final class StreamTelemetry {
         let now = clock()
         lock.lock()
         if displayed, let ts = frameTimestampNs {
+            // Every displayed timestamp (repeats and last-window reuse included) is seen in this window.
+            if presentedThisWindow.insert(ts).inserted && !presentedLastWindow.contains(ts) {
+                uniquePresented += 1
+            }
             if ts == lastPresentedTimestampNs {
                 framesRepeated += 1
             } else {
                 framesPresented += 1
                 lastPresentedTimestampNs = ts
-                if !presentedLastWindow.contains(ts) && presentedThisWindow.insert(ts).inserted {
-                    uniquePresented += 1
-                }
                 for i in 0..<StreamTelemetry.receiveRingSize where receiveRingTimestamps[i] == ts {
                     if presentNs >= receiveRingNs[i] {
                         receiveToPresentMs.add(Double(presentNs - receiveRingNs[i]) / 1_000_000.0)
