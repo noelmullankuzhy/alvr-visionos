@@ -46,6 +46,24 @@ DIAG m5_view t_ms=8 view=0 tangents=1,2,3,4'''))
         self.assertAlmostEqual(right['points'][0]['y_pct'], 50)
         self.assertIsNone(left['visible_area_frac'], 'missing rays cannot imply a boundary')
 
+    def test_cursor_steps_do_not_confirm_and_new_confirms_replace_per_ray(self):
+        rows = report.dots_boundaries(self.records('''DIAG dots_session t_ms=1 event=begin
+DIAG dots t_ms=2 eye=L action=cursor ray_deg=0 ecc_deg=30 yaw_deg=30 pitch_deg=0 via=gaze
+DIAG dots t_ms=3 eye=L action=confirm ray_deg=0 ecc_deg=30 yaw_deg=30 pitch_deg=0 via=step
+DIAG dots t_ms=4 eye=L action=step_out ray_deg=0 ecc_deg=32.5 yaw_deg=32.5 pitch_deg=0 via=step
+DIAG dots t_ms=5 eye=L action=confirm ray_deg=0 ecc_deg=32.5 yaw_deg=32.5 pitch_deg=0 via=step
+DIAG dots t_ms=6 eye=L action=step_in ray_deg=0 ecc_deg=30 yaw_deg=30 pitch_deg=0 via=step
+DIAG dots t_ms=7 eye=L action=confirm ray_deg=0 ecc_deg=30 yaw_deg=30 pitch_deg=0 via=step
+DIAG dots t_ms=8 eye=L action=cursor ray_deg=90 ecc_deg=30 yaw_deg=0 pitch_deg=30 via=gaze
+DIAG dots t_ms=9 eye=R action=cursor ray_deg=90 ecc_deg=30 yaw_deg=0 pitch_deg=30 via=gaze'''))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['confirmed_points'], 1)
+        self.assertEqual(rows[0]['points'][0]['ecc_deg'], 30)
+        cleared = report.dots_boundaries(self.records('''DIAG dots t_ms=1 eye=L action=confirm ray_deg=0 ecc_deg=30 yaw_deg=30 pitch_deg=0 via=step
+DIAG dots t_ms=2 eye=L action=confirm ray_deg=0 ecc_deg=40 yaw_deg=40 pitch_deg=0 via=step
+DIAG dots t_ms=3 eye=L action=clear ray_deg=0 ecc_deg=40 yaw_deg=40 pitch_deg=0 via=gaze'''))
+        self.assertEqual(cleared[0]['points'], [])
+
     def test_both_expands_per_eye_summary_reproduces_polygon_without_marks(self):
         rays = ','.join('{}:45'.format(ray) for ray in range(0, 360, 15))
         records = self.records('''DIAG m5_view t_ms=1 view=0 tangents=1,1,1,1
