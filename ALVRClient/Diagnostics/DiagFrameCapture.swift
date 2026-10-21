@@ -160,13 +160,34 @@ import CompositorServices
 final class DiagFrameCaptureSession {
     private let lock = NSLock()
     private var busy = false
-    init() { DiagCaptureRequests.shared.setAcceptsMarks(true) }
-    deinit { DiagCaptureRequests.shared.setAcceptsMarks(false) }
+    // Request-file poll: a utility timer, never the render thread. The session exists only with diagnostics on.
+    private let requestFile: DiagCaptureRequestFile
+    private let pollQueue = DispatchQueue(label: "uk.lumenio.alvr.capture.request", qos: .utility)
+    private var pollTimer: DispatchSourceTimer?
+    init() {
+        DiagCaptureRequests.shared.setAcceptsMarks(true)
+        DiagCaptureRequests.shared.configureAfterMs(DiagCaptureRequestFile.afterMs(environment: ProcessInfo.processInfo.environment))
+        requestFile = DiagCaptureRequestFile(enabled: Diag.isOn, directory: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("diag"))
+        let timer = DispatchSource.makeTimerSource(queue: pollQueue)
+        timer.schedule(deadline: .now() + 0.25, repeating: 0.25, leeway: .milliseconds(50))
+        timer.setEventHandler { [requestFile] in
+            if requestFile.poll(nowMs: Diag.monotonicMs()) { DiagCaptureRequests.shared.requestStreaming() }
+        }
+        timer.resume()
+        pollTimer = timer
+    }
+    deinit {
+        pollTimer?.cancel()
+        DiagCaptureRequests.shared.setAcceptsMarks(false)
+        DiagCaptureRequests.shared.configureAfterMs(nil)
+    }
 
-    func encode(buffer: MTLCommandBuffer, drawables: [LayerRenderer.Drawable], idle: Bool, chart: CornerChartRenderer?) {
+    // `streamFrame`: stream content was composited into these drawables this frame (captures them as presented).
+    func encode(buffer: MTLCommandBuffer, drawables: [LayerRenderer.Drawable], idle: Bool, streamFrame: Bool = false, chart: CornerChartRenderer?) {
         DiagCaptureRequests.shared.setAcceptsMarks(idle)
         lock.lock()
-        guard !busy, let request = DiagCaptureRequests.shared.take(nowMs: Diag.monotonicMs(), idle: idle) else { lock.unlock(); return }
+        guard !busy, let request = DiagCaptureRequests.shared.take(nowMs: Diag.monotonicMs(), idle: idle, streamFrame: streamFrame) else { lock.unlock(); return }
         busy = true
         lock.unlock()
         let targets = drawables.enumerated().flatMap { index, drawable in
@@ -187,7 +208,7 @@ final class DiagFrameCaptureSession {
         let chartState = chart?.captureSnapshot() ?? ["mode": CornerChartMode.off.rawValue, "eye": NSNull(), "spoke": NSNull(),
                                                      "pct": NSNull(), "ring_percents": CornerChart.ringPercents,
                                                      "cut_percents": CornerChart.cutPercents, "marks": [:]]
-        let trigger: [String: Any] = ["reason": request.eye == nil ? "start_timer" : "corner_mark",
+        let trigger: [String: Any] = ["reason": request.reason,
                                      "eye": request.eye as Any? ?? NSNull(), "pct": request.pct as Any? ?? NSNull(),
                                      "pos_deg": request.positionDegrees as Any? ?? NSNull()]
         DiagFrameCapture.submit(buffer: buffer, targets: targets, directory: directory,

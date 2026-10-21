@@ -409,6 +409,7 @@ final class DiagDrawableSnapshot<View, Map> {
 final class DiagCaptureRequests {
     struct Request {
         let number: Int
+        let reason: String   // start_timer, corner_mark (idle); request_file, after_ms (streaming)
         let eye: String?
         let spoke: Int?
         let pct: Int?
@@ -426,6 +427,10 @@ final class DiagCaptureRequests {
     }
 
     private var firstIdleMs: Int?
+    private var firstStreamMs: Int?
+    private var afterMs: Int?
+    private var afterTaken = false
+    private var filePending = false
     private var timerTaken = false
     private var count = 0
     private var marks: [(String, Int, Int, Double?)] = []
@@ -435,9 +440,35 @@ final class DiagCaptureRequests {
         if acceptsMarks && count + marks.count < 24 { marks.append((eye, spoke, pct, positionDegrees)) }
     }
 
-    func take(nowMs: Int, idle: Bool) -> Request? {
+    // Streaming triggers. Both only ever fire on a frame where stream content was composited (`streamFrame`).
+    func configureAfterMs(_ ms: Int?) {
         lock.lock(); defer { lock.unlock() }
-        guard idle, count < 24 else { return nil }
+        afterMs = ms
+    }
+
+    // Bounded: any number of requests before the next stream frame collapse to one capture.
+    func requestStreaming() {
+        lock.lock(); defer { lock.unlock() }
+        filePending = true
+    }
+
+    func take(nowMs: Int, idle: Bool, streamFrame: Bool = false) -> Request? {
+        lock.lock(); defer { lock.unlock() }
+        guard count < 24 else { return nil }
+        guard idle else {
+            guard streamFrame else { return nil }
+            if firstStreamMs == nil { firstStreamMs = nowMs }
+            let reason: String
+            if filePending {
+                filePending = false; reason = "request_file"
+            } else if let afterMs, !afterTaken, nowMs - firstStreamMs! >= afterMs {
+                afterTaken = true; reason = "after_ms"
+            } else {
+                return nil
+            }
+            count += 1
+            return Request(number: count, reason: reason, eye: nil, spoke: nil, pct: nil, positionDegrees: nil)
+        }
         if firstIdleMs == nil { firstIdleMs = nowMs }
         var mark: (String, Int, Int, Double?)?
         if !marks.isEmpty {
@@ -448,6 +479,40 @@ final class DiagCaptureRequests {
             return nil
         }
         count += 1
-        return Request(number: count, eye: mark?.0, spoke: mark?.1, pct: mark?.2, positionDegrees: mark?.3)
+        return Request(number: count, reason: mark == nil ? "start_timer" : "corner_mark", eye: mark?.0, spoke: mark?.1, pct: mark?.2, positionDegrees: mark?.3)
+    }
+}
+
+// Documents/diag/capture.request: any content; deleted when the request is taken. poll() is for a background timer (never
+// the render thread) and touches the filesystem at most once per second. Diagnostics off (enabled: false) never looks.
+final class DiagCaptureRequestFile {
+    static let name = "capture.request"
+    static let afterMsKey = "ALVR_DIAG_CAPTURE_AFTER_MS"
+    let url: URL
+    private let enabled: Bool
+    private let exists: (URL) -> Bool
+    private let remove: (URL) -> Void
+    private var lastPollMs: Int?
+
+    init(enabled: Bool, directory: URL,
+         exists: @escaping (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) },
+         remove: @escaping (URL) -> Void = { try? FileManager.default.removeItem(at: $0) }) {
+        self.enabled = enabled
+        self.url = directory.appendingPathComponent(Self.name)
+        self.exists = exists
+        self.remove = remove
+    }
+
+    func poll(nowMs: Int) -> Bool {
+        guard enabled else { return false }
+        if let lastPollMs, nowMs - lastPollMs < 1000 { return false }
+        lastPollMs = nowMs
+        guard exists(url) else { return false }
+        remove(url)
+        return true
+    }
+
+    static func afterMs(environment: [String: String]) -> Int? {
+        environment[afterMsKey].flatMap { Int($0) }.flatMap { $0 >= 0 ? $0 : nil }
     }
 }
