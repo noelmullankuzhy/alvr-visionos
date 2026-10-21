@@ -5,15 +5,55 @@ import Foundation
     static func main() {
         for layout in EDRLayout.allCases {
             for running in [false, true] {
-                var expected: Set<EDRControl> = layout.gridArea != nil ? [.gridOptions] : [.steps]
+                var expected: Set<EDRControl> = layout == .match ? [.matchOptions] : layout.gridArea != nil ? [.gridOptions] : [.steps]
                 if running {
-                    if layout.gridArea != nil { expected.insert(.gridHint) }
+                    if layout == .match { expected.insert(.matchActions) }
+                    else if layout.gridArea != nil { expected.insert(.gridHint) }
                     else if layout.isComparison { expected.formUnion([.answers, .navigation]) }
                     else { expected.formUnion([.navigation, .mark]) }
                 }
                 expectEqual(edrVisibleControls(layout: layout, running: running), expected, "only relevant EDR controls for \(layout.rawValue), running=\(running)")
             }
         }
+        for layout in EDRLayout.allCases {
+            for space in [nil, "EDRDiagnostic", "PQDiagnostic", "Other"] as [String?] {
+                expectEqual(pqWindowPlaybackAllowed(space: space, layout: layout),
+                            space == nil || (space == "EDRDiagnostic" && layout == .match), "window playback rule")
+            }
+        }
+        for tangents in [(1.2, 0.8, 1.1, 0.9), (0.8, 1.3, 0.9, 1.2)] {
+            let (left, right, top, bottom) = tangents
+            let centre = EDRView.centre(left: left, right: right, top: top, bottom: bottom, horizontalDegrees: -12)
+            expect(abs((centre.x * (left + right) - left) - tan(-12 * .pi / 180)) < 1e-12, "12 degrees left in tangent space")
+            let projected = EDRView.centre(projectionX: 1 - 2 * left / (left + right),
+                                          projectionY: 2 * top / (top + bottom) - 1,
+                                          horizontalScale: 2 / (left + right), horizontalDegrees: -12)
+            expect(abs(projected.x - centre.x) < 1e-12 && abs(projected.y - centre.y) < 1e-12, "projection and tangents agree")
+            let patches = EDRLayout.match.patches(value: 1.2, centre: centre, aspect: 1.25)
+            expectEqual(patches.count, 1, "one match patch, no labels")
+            let patch = patches[0]
+            expect(abs(patch.width * patch.height - 0.05) < 1e-12, "five percent eye area")
+            expect(abs(patch.width * 1.25 - patch.height) < 1e-12, "square viewport pixels")
+            expect(abs(patch.x + patch.width / 2 - centre.x) < 1e-12 && abs(patch.y + patch.height / 2 - centre.y) < 1e-12, "match at tangent centre")
+        }
+        var match = EDRMatch()
+        expectEqual(match.value, 1, "match starts at SDR white")
+        match.adjust(up: true)
+        expectEqual(match.value, 1.02, "fine step")
+        match.coarse = true
+        match.adjust(up: false)
+        expectEqual(match.value, 0.92, "coarse step")
+        for _ in 0..<100 { match.adjust(up: false) }
+        expectEqual(match.value, 0.1, "lower clamp")
+        for _ in 0..<100 { match.adjust(up: true) }
+        expectEqual(match.value, 4, "upper clamp")
+        for result in EDRMatchResult.allCases {
+            expectEqual(Diag.line(topic: "edr", tMs: 1, fields: match.fields(result, clip: "level-100-pq.mov", immersion: "full")),
+                        "DIAG edr t_ms=1 match=\(result.rawValue) metal_value=4.000 clip=level-100-pq.mov clip_nits=100 immersion=full", "match log")
+        }
+        expectEqual(EDRMatch.clipNits("level-1000-pq.mp4"), 1000, "clip nits")
+        expectEqual(EDRMatch.clipNits("steps-pq.mov"), nil, "non-level clip")
+        expectEqual(EDRMatch.clipNits("level-bad-pq.mov"), nil, "invalid level")
         expectEqual(EDRStep.values, [0, 0.25, 0.5, 1, 1.25, 1.5, 1.75, 2, 2.5, 4], "M2 levels")
         for (layout, area) in [(EDRLayout.onePercent, 0.01), (.tenPercent, 0.1), (.full, 1.0)] {
             let rect = layout.patches(value: 4)[0]
@@ -254,6 +294,21 @@ import Foundation
         Diag.flush()
         expectEqual(lines.filter { $0.contains(" grid=") }.count, 150, "all grid values on new run")
         expect(lines.allSatisfy { $0.hasSuffix("immersion=full") }, "every EDR session line attributes immersion")
+        session.configure(layout: .match, automatic: true, sustained: false)
+        session.beginRun()
+        expectEqual(session.frame().matchValue, 1, "new match run starts at one")
+        session.next()
+        session.recordMatch(.equal, clip: "level-100-pq.mov")
+        Diag.flush()
+        expect(!lines.contains { $0.contains(" match=") }, "no match while changed value awaits frame")
+        let matchFrame = session.frame()
+        expectEqual(matchFrame.matchValue, 1.02, "session pinch up")
+        expectEqual(matchFrame.patches(centre: SIMD2(0.4, 0.5), aspect: 1, pixelHeight: 1000)[0].value, 1.02, "renderer uses match value")
+        session.recordMatch(.equal, clip: "level-100-pq.mov")
+        Diag.flush()
+        expect(lines.last!.contains("match=1 metal_value=1.020 clip=level-100-pq.mov clip_nits=100 immersion=full"), "records presented match")
+        session.back()
+        expectEqual(session.frame().matchValue, 1, "session pinch down")
         try? FileManager.default.removeItem(at: logDirectory)
         finishTests("EDRDiagnostic")
     }
