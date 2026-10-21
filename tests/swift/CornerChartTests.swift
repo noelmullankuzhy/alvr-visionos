@@ -169,12 +169,48 @@ private func testShape() {
     expectEqual(rounded.label, "rounded", "between")
     expect(rounded.superellipseN > 2 && rounded.superellipseN.isFinite, "a squircle exponent")
     expect(near(rounded.diagPctMean, 85), "raw diagonal ring mean")
-    // Unequal axes: rectangle and ellipse predictions per quadrant from that quadrant's axis radii.
+    // Unequal axes: rectangle and ellipse predictions per quadrant from that quadrant's axis radii. Along the fixed
+    // (normalised) diagonal a rectangle a x b is left at sqrt 2 min(a, b), not at its corner sqrt(a^2 + b^2).
     var m = axesAnd(diag: 100)
     m[4] = 80; m[12] = 80
     let wide = CornerShape.classify(m)!
-    expect(near(wide.axisR, 0.9) && near(wide.rectR, (1 + 0.64).squareRoot()), "axes 1 / 0.8: rect corner sqrt(1 + 0.64)")
+    expect(near(wide.axisR, 0.9) && near(wide.rectR, 2.0.squareRoot() * 0.8), "axes 1 / 0.8: rectangle meets the diagonal at sqrt 2 x 0.8")
     expect(near(wide.ellipseR, 1 / ((1 + 1 / 0.64) / 2).squareRoot()), "ellipse radius at the diagonal")
+    m[2] = 80; m[6] = 80; m[10] = 80; m[14] = 80
+    expectEqual(CornerShape.classify(m)!.label, "rectangle", "review regression: axes 100 / 80, diagonals 80 is a rectangle")
+    expect(CornerShape.classify(m)!.superellipseN.isInfinite, "axes 100 / 80, diagonals 80: n infinite")
+    m[2] = 100; m[6] = 100; m[10] = 100; m[14] = 100
+    expectEqual(CornerShape.classify(m)!.label, "rectangle", "diagonals beyond the rectangle prediction: rectangle")
+
+    // Exact superellipses (x/a)^n + (y/b)^n = 1 per quadrant with unequal axes: the diagonal (x = y = s in normalised
+    // units, ring pct = 100 s) is s = (a^-n + b^-n)^(-1/n). n is solved per quadrant and combined.
+    func superellipse(_ n: Double, axes: [Int: Double]) -> [Int: Double] {
+        var p: [Int: Double] = [:]
+        for (k, v) in axes { p[k] = v * 100 }
+        for d in CornerSpokes.diagonals {
+            let a = axes[d.x]!, b = axes[d.y]!
+            p[d.spoke] = 100 * pow(pow(a, -n) + pow(b, -n), -1 / n)
+        }
+        return p
+    }
+    let uneven: [Int: Double] = [0: 1.0, 4: 0.8, 8: 0.9, 12: 0.7]
+    for axes in [[0: 1.0, 4: 0.8, 8: 1.0, 12: 0.8], uneven] {
+        let e = CornerShape.classify(superellipse(2, axes: axes))!
+        expect(near(e.superellipseN, 2, 1e-6), "unequal-axis ellipse: n = 2 (got \(e.superellipseN))")
+        expect(e.quadrantN.allSatisfy { near($0, 2, 1e-6) }, "unequal-axis ellipse: every quadrant n = 2 \(e.quadrantN)")
+        expectEqual(e.label, "ellipse", "unequal-axis ellipse")
+        let r4 = CornerShape.classify(superellipse(4, axes: axes))!
+        expect(near(r4.superellipseN, 4, 1e-6), "unequal-axis squircle: n = 4 (got \(r4.superellipseN))")
+        expectEqual(r4.label, "rounded", "unequal-axis n = 4: rounded")
+        let big = CornerShape.classify(superellipse(60, axes: axes))!
+        expect(big.superellipseN > 40, "unequal-axis near-rectangle: large n (got \(big.superellipseN))")
+        expectEqual(big.label, "rectangle", "unequal-axis n = 60: rectangle")
+    }
+    expectEqual(CornerShape.classify(superellipse(3, axes: uneven))!.quadrantN.count, 4, "n per quadrant")
+    let mixed = superellipse(2, axes: uneven).merging([2: 100]) { $1 }
+    let mixedShape = CornerShape.classify(mixed)!
+    expect(mixedShape.quadrantN[0].isInfinite && near(mixedShape.quadrantN[1], 2, 1e-6), "one square quadrant, the rest elliptical")
+    expect(near(mixedShape.superellipseN, 1 / (0.5 * 3 / 4), 1e-6), "quadrants combine by the mean of 1/n (rectangle = 0)")
     expect(CornerShape.classify([0: 100, 4: 100]) == nil, "needs the 4 axis and 4 diagonal spokes")
     // Decision 65c: rings now reach 55, below an ellipse's ~71% diagonal, so the ellipse case is measurable.
     let at70 = CornerShape.classify(axesAnd(diag: 70))!
@@ -203,7 +239,7 @@ private func testLogFormats() {
     expect(line.hasPrefix("DIAG corner_summary t_ms=7 eye=L marks=16 polygon=1.1000,0.0000;"), "summary polygon from 0 deg: \(line)")
     for field in [" area_frac=1.0000", " r=1.0000,1.0824,1.4142,", " axis_r=1.0000", " diag_r=1.4142", " rect_r=1.4142", " ellipse_r=1.0000",
                   " ratio=1.4142", " rect_ratio=1.4142", " ellipse_ratio=1.0000", " superellipse_n=inf", " diag_pct_mean=100.00",
-                  " diag_floor=false", " shape=rectangle"] {
+                  " diag_floor=false", " shape=rectangle", " superellipse_q=inf,inf,inf,inf"] {
         expect(line.contains(field), "summary has\(field): \(line)")
     }
     marks[3] = nil
@@ -283,6 +319,40 @@ private func testMirrorScript() {
     try? p.run()
     p.waitUntilExit()
     expectEqual(p.terminationStatus, 0, "sh -n capture-mirror.sh")
+
+    // Argument parsing (-c: check the arguments and exit, before any build, capture or folder creation).
+    let out = FileManager.default.temporaryDirectory.appendingPathComponent("capture-mirror-args-\(getpid())").path
+    func run(_ args: [String]) -> (status: Int32, text: String) {
+        let q = Process(), pipe = Pipe()
+        q.executableURL = URL(fileURLWithPath: "/bin/sh")
+        q.arguments = [script] + args + ["-o", out, "-c"]
+        q.standardOutput = pipe
+        q.standardError = pipe
+        try? q.run()
+        q.waitUntilExit()
+        return (q.terminationStatus, String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+    }
+    for args in [[], ["-i", "0.5"], ["-i", "10"], ["-i", ".25"], ["-i", "2."], ["-n", "0"], ["-n", "12"], ["-i", "1.5", "-n", "3"]] {
+        let r = run(args)
+        expectEqual(r.status, 0, "valid \(args): \(r.text)")
+    }
+    let ok = run(["-i", "0.5", "-n", "3"])
+    expect(ok.text.contains("interval=0.5") && ok.text.contains("count=3"), "-c prints the parsed values: \(ok.text)")
+    for (args, says) in [(["-n", "1.5"], "-n"), (["-n", "abc"], "-n"), (["-n", ""], "-n"), (["-n", "-1"], "-n"), (["-n", "1e3"], "-n"),
+                         (["-i", "0"], "-i"), (["-i", "0.0"], "-i"), (["-i", "1.2.3"], "-i"), (["-i", "."], "-i"), (["-i", "abc"], "-i"),
+                         (["-i", ""], "-i"), (["-i", "1e3"], "-i"), (["-i", "-2"], "-i"), (["-i", "2", "-n", "x"], "-n"), (["-i", "x", "-n", "2"], "-i")] {
+        let r = run(args)
+        expectEqual(r.status, 2, "invalid \(args) exits 2: \(r.text)")
+        expect(r.text.contains("Error: \(says) "), "invalid \(args) names \(says): \(r.text)")
+    }
+    expect(!FileManager.default.fileExists(atPath: out), "-c creates nothing")
+
+    // All scratch (Swift source, binary, compiler temp, module cache, logs) lives under <output>/.scratch.
+    let text = (try? String(contentsOfFile: script, encoding: .utf8)) ?? ""
+    expect(text.contains("work=\"$out/.scratch\""), "scratch under the output folder")
+    expect(!text.contains("mktemp"), "no system temp dir")
+    expect(text.contains("TMPDIR=\"$work/tmp\"") && text.contains("-module-cache-path \"$work/mc\"") && text.contains("CLANG_MODULE_CACHE_PATH=\"$work/mc\""),
+           "compiler temp and module cache under the scratch")
 }
 
 @main enum CornerChartTests {
