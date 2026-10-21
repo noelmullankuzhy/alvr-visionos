@@ -2,6 +2,8 @@
 # Pure-Swift unit tests for client helpers, compiled and run on macOS (the app has no Xcode test target).
 # Each tests/swift/<Name>Tests.swift declares the app sources it needs on one line:
 #   // SOURCES: ALVRClient/Foo.swift ALVRClient/Bar.swift
+# and optionally a Metal file to compile for the Mac GPU (its metallib path is the test's first argument):
+#   // METAL: tests/swift/Foo.metal
 # and provides `@main enum <Name>Tests { static func main() { ...; finishTests("<Name>") } }`.
 # Helpers under test must import only Foundation/simd so they build for macOS.
 # Usage (repo root): sh tests/swift/run-tests.sh [Name]
@@ -24,7 +26,12 @@ for t in "$ROOT"/tests/swift/*Tests.swift; do
   done
   # shellcheck disable=SC2086
   xcrun swiftc -parse-as-library -swift-version 5 -o "$OUT/$name" "$ROOT/tests/swift/TestSupport.swift" $srcs "$t"
-  if "$OUT/$name"; then :; else fail=1; fi
+  # Optional `// METAL: tests/swift/Foo.metal`: compiled for the Mac GPU, the metallib path passed as argument 1.
+  metal=$(sed -n 's#^// METAL: ##p' "$t" | head -1)
+  if [ -n "$metal" ]; then
+    xcrun -sdk macosx metal -fmodules-cache-path="$OUT/metal-modcache" -o "$OUT/$name.metallib" "$ROOT/$metal"
+    if "$OUT/$name" "$OUT/$name.metallib"; then :; else fail=1; fi
+  elif "$OUT/$name"; then :; else fail=1; fi
   ran=$((ran + 1))
 done
 echo "swift test files run: $ran"
