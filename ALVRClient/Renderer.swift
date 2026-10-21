@@ -155,6 +155,7 @@ class Renderer {
     var roundTripRenderTime: Double = 0.0
     var lastRoundTripRenderTimestamp: Double = 0.0
     var currentYuvTransform: simd_float4x4 = matrix_identity_float4x4
+    var currentGamutTransform: simd_float3x3 = matrix_identity_float3x3
     
     // Was curious if it improved; it's still juddery.
     var useApplesReprojection = false
@@ -548,7 +549,10 @@ class Renderer {
         fragmentConstants.setConstantValue(&currentYuvTransform.columns.1, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform1.rawValue)
         fragmentConstants.setConstantValue(&currentYuvTransform.columns.2, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform2.rawValue)
         fragmentConstants.setConstantValue(&currentYuvTransform.columns.3, type: .float4, index: ALVRFunctionConstant.encodingYUVTransform3.rawValue)
-        
+        fragmentConstants.setConstantValue(&currentGamutTransform.columns.0, type: .float3, index: ALVRFunctionConstant.gamutToDisplayP3_0.rawValue)
+        fragmentConstants.setConstantValue(&currentGamutTransform.columns.1, type: .float3, index: ALVRFunctionConstant.gamutToDisplayP3_1.rawValue)
+        fragmentConstants.setConstantValue(&currentGamutTransform.columns.2, type: .float3, index: ALVRFunctionConstant.gamutToDisplayP3_2.rawValue)
+
         let fragmentFunction = try library?.makeFunction(name: "videoFrameFragmentShader_" + variantName, constantValues: fragmentConstants)
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
@@ -852,8 +856,13 @@ class Renderer {
                     needsPipelineRebuild = true
                 }
                 currentYuvTransform = nextYuvTransform
+                let nextGamutTransform = VideoHandler.getGamutTransformForVideoFormat(videoFormat)
+                if nextGamutTransform != currentGamutTransform {
+                    needsPipelineRebuild = true
+                }
+                currentGamutTransform = nextGamutTransform
             }
-            
+
             if needsPipelineRebuild {
                 lastReconfigureTime = CACurrentMediaTime()
                 let rebuildThread = Thread {
@@ -1720,7 +1729,10 @@ class Renderer {
         let pixelBuffer = queuedFrame.imageBuffer
         let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let formatStr = VideoHandler.coreVideoPixelFormatToStr[format, default: "unknown"]
-        
+        if let videoFormat = EventHandler.shared.videoFormat {
+            VideoHandler.logColourSelectionOnce(videoFormat: videoFormat, pixelFormat: format)
+        }
+
         if VideoHandler.isFormatSecret(format) {
             renderEncoder.setRenderPipelineState(videoFramePipelineState_SecretYpCbCrFormats)
         }

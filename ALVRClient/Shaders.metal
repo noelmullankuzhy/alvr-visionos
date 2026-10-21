@@ -120,6 +120,10 @@ constant float4 ENCODING_YUV_TRANSFORM_0 [[ function_constant(ALVRFunctionConsta
 constant float4 ENCODING_YUV_TRANSFORM_1 [[ function_constant(ALVRFunctionConstantEncodingYUVTransform1) ]];
 constant float4 ENCODING_YUV_TRANSFORM_2 [[ function_constant(ALVRFunctionConstantEncodingYUVTransform2) ]];
 constant float4 ENCODING_YUV_TRANSFORM_3 [[ function_constant(ALVRFunctionConstantEncodingYUVTransform3) ]];
+// Columns of the linear source-primaries -> linear Display P3 matrix (ColourPipeline.swift; identity for PQ/HLG).
+constant float3 GAMUT_TO_DISPLAY_P3_0 [[ function_constant(ALVRFunctionConstantGamutToDisplayP3_0) ]];
+constant float3 GAMUT_TO_DISPLAY_P3_1 [[ function_constant(ALVRFunctionConstantGamutToDisplayP3_1) ]];
+constant float3 GAMUT_TO_DISPLAY_P3_2 [[ function_constant(ALVRFunctionConstantGamutToDisplayP3_2) ]];
 
 float2 TextureToEyeUV(float2 textureUV, bool isRightEye) {
     // flip distortion horizontally for right eye
@@ -299,13 +303,22 @@ half3 rgb2hsv(half3 rgb) {
     return hsv;
 }
 
-half4 videoFrameFragmentShader_common(half3 color_in) {
-    half3 color = EncodingNonlinearToLinearRGB_half(color_in, ENCODING_GAMMA);
-    
-    half4 colorOut = half4(color.rgb, 1.0);
+// color_in: sRGB-EOTF-decoded RGB in the stream's primaries, still carrying the server's encoding gamma.
+// All maths in float; half only for the chroma-key mask and the final write.
+half4 videoFrameFragmentShader_common(float3 color_in) {
+    float3 linearSource = EncodingNonlinearToLinearRGB(color_in, ENCODING_GAMMA);
+    float3 color = linearSource;
+    // CompositorServices expects extended-linear Display P3. RealityKit's interpretation of its texture is
+    // UNVERIFIED, so that path keeps the previous (unconverted) output.
+    if (!REALITYKIT_ENABLED) {
+        const float3x3 gamutToDisplayP3 = float3x3(GAMUT_TO_DISPLAY_P3_0, GAMUT_TO_DISPLAY_P3_1, GAMUT_TO_DISPLAY_P3_2);
+        color = gamutToDisplayP3 * linearSource;
+    }
+
+    half4 colorOut = half4(half3(color), 1.0);
     if (CHROMAKEY_ENABLED) {
         half4 chromaKeyHSV = half4(rgb2hsv(half3(CHROMAKEY_COLOR)), 1.0);
-        half4 newHSV = half4(rgb2hsv(color.rgb), 1.0);
+        half4 newHSV = half4(rgb2hsv(half3(linearSource)), 1.0);
         half mask = colorclose_hsv(newHSV.rgb, chromaKeyHSV.rgb, half2(CHROMAKEY_LERP_DIST_RANGE));
         if (!REALITYKIT_ENABLED && mask <= 0.0) {
             discard_fragment();
@@ -322,17 +335,9 @@ half4 videoFrameFragmentShader_common(half3 color_in) {
     // Brighten the scene to examine blocking artifacts/smearing
     //color = pow(color, 1.0 / 2.4);
 
-    /*const float3x3 linearToDisplayP3 = {
-        float3(1.2249, -0.0420, -0.0197),
-        float3(-0.2247, 1.0419, -0.0786),
-        float3(0.0, 0.0, 1.0979),
-    };*/
-    
-    //technically not accurate, since sRGB is below 1.0, but it makes colors pop a bit
-    //color = linearToDisplayP3 * color;
 }
 
-fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]], texture2d<half> in_tex_y, texture2d<half> in_tex_uv) {
+fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]], texture2d<float> in_tex_y, texture2d<float> in_tex_uv) {
     
     float2 sampleCoord;
     if (FFR_ENABLED) {
@@ -344,24 +349,29 @@ fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]
     constexpr sampler colorSampler(mip_filter::none,
                                    mag_filter::linear,
                                    min_filter::linear);
-    half4 ySample = in_tex_y.sample(colorSampler, sampleCoord);
-    half4 uvSample = in_tex_uv.sample(colorSampler, sampleCoord);
-    half4 ycbcr = half4(ySample.r, uvSample.rg, 1.0f);
-    
-    const matrix_half4x4 transform = matrix_half4x4(
-        half4(ENCODING_YUV_TRANSFORM_0),
-        half4(ENCODING_YUV_TRANSFORM_1),
-        half4(ENCODING_YUV_TRANSFORM_2),
-        half4(ENCODING_YUV_TRANSFORM_3)
+    float4 ySample = in_tex_y.sample(colorSampler, sampleCoord);
+    float4 uvSample = in_tex_uv.sample(colorSampler, sampleCoord);
+    float4 ycbcr = float4(ySample.r, uvSample.rg, 1.0f);
+
+    // Matrix and range from ColourPipeline.yuvToRGBMatrix (H.273 quantisation for the stream's bit depth).
+    const float4x4 transform = float4x4(
+        ENCODING_YUV_TRANSFORM_0,
+        ENCODING_YUV_TRANSFORM_1,
+        ENCODING_YUV_TRANSFORM_2,
+        ENCODING_YUV_TRANSFORM_3
     );
-    
-    half3 rgb_uncorrect = half3((transform * ycbcr).rgb);
-    half3 color = NonlinearToLinearRGB_half(rgb_uncorrect);
-    
+
+    float3 rgb_uncorrect = (transform * ycbcr).rgb;
+    float3 color = NonlinearToLinearRGB(rgb_uncorrect);
+
     return videoFrameFragmentShader_common(color);
 }
 
-fragment half4 videoFrameFragmentShader_SecretYpCbCrFormats(ColorInOut in [[stage_in]], texture2d<half> in_tex_y) {
+// Private (*_sRGB) YCbCr texture formats: the sampler itself applies YCbCr->RGB (matrix/range from the buffer, by the
+// driver) and the sRGB EOTF, returning RGB in the stream's primaries. It is not documented to convert primaries
+// (UNVERIFIED), so the common stage applies the same encoding gamma and primaries->P3 matrix as the explicit path;
+// ENCODING_YUV_TRANSFORM_* is not used here, so nothing is converted twice.
+fragment half4 videoFrameFragmentShader_SecretYpCbCrFormats(ColorInOut in [[stage_in]], texture2d<float> in_tex_y) {
     
     float2 sampleCoord;
     if (FFR_ENABLED) {
@@ -374,7 +384,7 @@ fragment half4 videoFrameFragmentShader_SecretYpCbCrFormats(ColorInOut in [[stag
                                    mag_filter::linear,
                                    min_filter::linear);
     
-    half3 color = in_tex_y.sample(colorSampler, sampleCoord).rgb;
+    float3 color = in_tex_y.sample(colorSampler, sampleCoord).rgb;
     
     return videoFrameFragmentShader_common(color);
 }

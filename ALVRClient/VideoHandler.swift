@@ -382,9 +382,11 @@ struct VideoHandler {
                     hevc_exts[kCMFormatDescriptionExtension_FieldCount] = 1 as NSNumber
                     hevc_exts[kCMFormatDescriptionExtension_ChromaLocationBottomField] = kCVImageBufferChromaLocation_Left
                     hevc_exts[kCMFormatDescriptionExtension_ChromaLocationTopField] = kCVImageBufferChromaLocation_Left
-                    hevc_exts[kCMFormatDescriptionExtension_ColorPrimaries] = (bpc == 10) ? kCVImageBufferColorPrimaries_ITU_R_2020 : kCVImageBufferColorPrimaries_ITU_R_709_2
+                    // Bit depth says nothing about gamut: ALVR's SDR streams (8- and 10-bit) signal BT.709 + sRGB.
+                    // The SPS VUI is not parsed here, so an HDR-mode (BT.2020) stream hitting this fallback is mislabelled.
+                    hevc_exts[kCMFormatDescriptionExtension_ColorPrimaries] = kCVImageBufferColorPrimaries_ITU_R_709_2
                     hevc_exts[kCMFormatDescriptionExtension_TransferFunction] = kCVImageBufferTransferFunction_sRGB
-                    hevc_exts[kCMFormatDescriptionExtension_YCbCrMatrix] = (bpc == 10) ? kCVImageBufferColorPrimaries_ITU_R_2020 : kCVImageBufferColorPrimaries_ITU_R_709_2
+                    hevc_exts[kCMFormatDescriptionExtension_YCbCrMatrix] = kCVImageBufferYCbCrMatrix_ITU_R_709_2
                     //hevc_exts[kCMFormatDescriptionExtension_Depth] = 24 as NSNumber
                     //hevc_exts[kCMFormatDescriptionExtension_FormatName] = "av01" as NSString
                     hevc_exts[kCMFormatDescriptionExtension_FullRangeVideo] = fullrange as NSNumber
@@ -805,13 +807,16 @@ struct VideoHandler {
                  kCVPixelFormatType_444YpCbCr10PackedBiPlanarVideoRange:
                 return [MTLPixelFormat.init(rawValue: MTLPixelFormatYCBCR10_444_2P_PACKED_sRGB)!, MTLPixelFormat.invalid] // MTLPixelFormatYCBCR10_444_2P_PACKED
 
-            // Guess 8-bit biplanar otherwise
+            // Unknown: report it once, then fall back to 8-bit biplanar planes (a 10-bit buffer read this way is wrong)
             default:
-                let formatStr = coreVideoPixelFormatToStr[format, default: "unknown"]
-                print("Warning: Pixel format \(formatStr) (\(format)) is not currently accounted for! Returning 8-bit vals")
+                if !loggedUnknownFormats.contains(format) {
+                    loggedUnknownFormats.insert(format)
+                    print("ALVRCOLOUR unknown_format=\(ColourPipeline.fourCC(format))")
+                }
                 return [MTLPixelFormat.r8Unorm, MTLPixelFormat.rg8Unorm]
         }
     }
+    private static var loggedUnknownFormats = Set<OSType>()
     
     static func isFormatSecret(_ format: OSType) -> Bool
     {
@@ -861,108 +866,40 @@ struct VideoHandler {
         }
     }
     
+    // Primaries, transfer, matrix, range and bit depth, each read from its own format description extension.
+    static func getColourSelectionForVideoFormat(_ videoFormat: CMFormatDescription) -> ColourSelection {
+        let exts = videoFormat.extensions
+        func string(_ key: CFString) -> String? { (exts[key] as? NSString).map { $0 as String } }
+        func number(_ key: CFString) -> NSNumber? { exts[key] as? NSNumber }
+        return ColourPipeline.select(
+            primaries: string(kCMFormatDescriptionExtension_ColorPrimaries),
+            transfer: string(kCMFormatDescriptionExtension_TransferFunction),
+            matrix: string(kCMFormatDescriptionExtension_YCbCrMatrix),
+            fullRange: number(kCMFormatDescriptionExtension_FullRangeVideo).map { $0.boolValue },
+            bitDepth: number(kCMFormatDescriptionExtension_BitsPerComponent)?.intValue)
+    }
+
     static func getYUVTransformForVideoFormat(_ videoFormat: CMFormatDescription) -> simd_float4x4 {
-        let fmtYCbCrMatrixRaw = videoFormat.extensions["CVImageBufferYCbCrMatrix" as CFString]
-        let fmtYCbCrMatrix = (fmtYCbCrMatrixRaw != nil ? fmtYCbCrMatrixRaw as! CFString : "unknown" as CFString)
+        return getColourSelectionForVideoFormat(videoFormat).yuvToRGB
+    }
 
-        // Bless this page for ending my stint of plugging in random values
-        // from other projects:
-        // https://kdashg.github.io/misc/colors/from-coeffs.html
-        let ycbcrJPEGToRGB = simd_float4x4([
-            simd_float4(+1.0000, +1.0000, +1.0000, +0.0000), // Y
-            simd_float4(+0.0000, -0.3441, +1.7720, +0.0000), // Cb
-            simd_float4(+1.4020, -0.7141, +0.0000, +0.0000), // Cr
-            simd_float4(-0.7010, +0.5291, -0.8860, +1.0000)]  // offsets
-        );
+    static func getGamutTransformForVideoFormat(_ videoFormat: CMFormatDescription) -> simd_float3x3 {
+        return getColourSelectionForVideoFormat(videoFormat).sourceToDisplayP3
+    }
 
-        // BT.601 Full range (8-bit)
-        let bt601ToRGBFull8bit = simd_float4x4([
-            simd_float4(+1.0000000, +1.0000000, +1.0000000, +0.0000), // Y
-            simd_float4(+0.0000000, -0.3454912, +1.7789764, +0.0000), // Cb
-            simd_float4(+1.4075197, -0.7169478, -0.0000000, +0.0000), // Cr
-            simd_float4(-0.7065197, +0.5333027, -0.8929764, +1.0000)]
-        );
-
-        // BT.2020 Full range (8-bit)
-        let bt2020ToRGBFull8bit = simd_float4x4([
-            simd_float4(+1.0000000, +1.0000000, +1.0000000, +0.0000), // Y
-            simd_float4(-0.0000000, -0.1652010, +1.8888071, +0.0000), // Cb
-            simd_float4(+1.4804055, -0.5736025, +0.0000000, +0.0000), // Cr
-            simd_float4(-0.7431055, +0.3708504, -0.9481071, +1.0000)]
-        );
- 
-        // BT.709 Full range (8-bit)
-        let bt709ToRGBFull8bit = simd_float4x4([
-            simd_float4(+1.0000000, +1.0000000, +1.0000000, +0.0000), // Y
-            simd_float4(+0.0000000, -0.1880618, +1.8629055, +0.0000), // Cb
-            simd_float4(+1.5810000, -0.4699673, +0.0000000, +0.0000), // Cr
-            simd_float4(-0.7936000, +0.3303048, -0.9351055, +1.0000)]
-        );
-
-        // BT.601 Full range (10-bit)
-        let bt601ToRGBFull10bit = simd_float4x4([
-            simd_float4(+1.0000000, +1.0000000, +1.0000000, +0.0000), // Y
-            simd_float4(+0.0000000, -0.3444730, +1.7737339, +0.0000), // Cb
-            simd_float4(+1.4033718, -0.7148350, +0.0000000, +0.0000), // Cr
-            simd_float4(-0.7023718, +0.5301718, -0.8877339, +1.0000)]
-        );
-
-        // BT.2020 Full range (10-bit)
-        let bt2020ToRGBFull10bit = simd_float4x4([
-            simd_float4(+1.0000000, +1.0000000, +1.0000000, +0.0000), // Y
-            simd_float4(-0.0000000, -0.1647141, +1.8832409, +0.0000), // Cb
-            simd_float4(+1.4760429, -0.5719122, +0.0000000, +0.0000), // Cr
-            simd_float4(-0.7387429, +0.3686732, -0.9425409, +1.0000)]
-        );
-
-        // BT.709 Full range (10-bit)
-        let bt709ToRGBFull10bit = simd_float4x4([
-            simd_float4(+1.0000000, +1.0000000, +1.0000000, +0.0000), // Y
-            simd_float4(+0.0000000, -0.1875076, +1.8574157, +0.0000), // Cb
-            simd_float4(+1.5763409, -0.4685823, +0.0000000, +0.0000), // Cr
-            simd_float4(-0.7889409, +0.3283656, -0.9296157, +1.0000)]
-        );
-
-        // BT.2020 Limited range
-        /*let bt2020ToRGBLimited = simd_float4x4([
-            simd_float4(+1.1632, +1.1632, +1.1632, +0.0000), // Y
-            simd_float4(+0.0002, -0.1870, +2.1421, +0.0000), // Cb
-            simd_float4(+1.6794, -0.6497, +0.0008, +0.0000), // Cr
-            simd_float4(-0.91607960784, +0.34703254902, -1.14866392157, +1.0000)]  // offsets
-        );*/
-
-        // BT.709 Limited range
-        /*let bt709ToRGBLimited = simd_float4x4([
-            simd_float4(+1.1644, +1.1644, +1.1644, +0.0000), // Y
-            simd_float4(+0.0001, -0.2133, +2.1125, +0.0000), // Cb
-            simd_float4(+1.7969, -0.5342, -0.0002, +0.0000), // Cr
-            simd_float4(-0.97506392156, 0.30212823529, -1.1333145098, +1.0000)]  // offsets
-        );*/
-
-        let bpc = getBpcForVideoFormat(videoFormat)
-        if bpc == 10 {
-            switch(fmtYCbCrMatrix) {
-                case kCVImageBufferYCbCrMatrix_ITU_R_601_4:
-                    return bt601ToRGBFull10bit;
-                case kCVImageBufferYCbCrMatrix_ITU_R_709_2:
-                    return bt709ToRGBFull10bit;
-                case kCVImageBufferYCbCrMatrix_ITU_R_2020:
-                    return bt2020ToRGBFull10bit;
-                default:
-                    return ycbcrJPEGToRGB;
-            }
+    // One `ALVRCOLOUR ...` line whenever the stream's colour selection or the shader path changes.
+    private static var lastColourLogLine: String? = nil
+    private static var lastColourLogKey: (CMFormatDescription, OSType)? = nil
+    static func logColourSelectionOnce(videoFormat: CMFormatDescription, pixelFormat: OSType) {
+        if let key = lastColourLogKey, key.0 === videoFormat, key.1 == pixelFormat {
+            return
         }
-        else {
-            switch(fmtYCbCrMatrix) {
-                case kCVImageBufferYCbCrMatrix_ITU_R_601_4:
-                    return bt601ToRGBFull8bit;
-                case kCVImageBufferYCbCrMatrix_ITU_R_709_2:
-                    return bt709ToRGBFull8bit;
-                case kCVImageBufferYCbCrMatrix_ITU_R_2020:
-                    return bt2020ToRGBFull8bit;
-                default:
-                    return ycbcrJPEGToRGB;
-            }
+        lastColourLogKey = (videoFormat, pixelFormat)
+        let path = isFormatSecret(pixelFormat) ? "secret" : "explicit"
+        let line = getColourSelectionForVideoFormat(videoFormat).logLine(path: path) + " pixel_format=\(ColourPipeline.fourCC(pixelFormat))"
+        if line != lastColourLogLine {
+            lastColourLogLine = line
+            print(line)
         }
     }
     
