@@ -46,7 +46,7 @@ def summary(mode, sent, packets, elapsed, late):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('host')
-    p.add_argument('--port', type=int, default=9945)
+    p.add_argument('--port', type=int, default=9944)
     p.add_argument('--mode', choices=['udp', 'tcp'], default='udp')
     p.add_argument('--mbps', type=float, default=100)
     p.add_argument('--fps', type=int, default=90)

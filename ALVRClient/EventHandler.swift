@@ -114,7 +114,9 @@ class EventHandler: ObservableObject {
     var eventsWatchThread : Thread?
         
     var alvrInitialized = false
-    var streamingActive = false
+    var streamingActive = false {
+        willSet { if Diag.isOn { DiagWorkGate.setStreaming(newValue) } }
+    }
     
     
     @Published var connectionState: ConnectionState = .disconnected

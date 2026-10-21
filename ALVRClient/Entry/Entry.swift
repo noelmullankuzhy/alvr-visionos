@@ -376,6 +376,8 @@ struct Entry: View {
                             .disabled(!Diag.isOn || EventHandler.shared.streamingActive)
                             .onChange(of: gStore.settings.renderQualitySweep) { saveAction() }
 
+                        if Diag.isOn { DiagBenchView() }
+
                         Button {
                             openWindow(id: "InputDebug")
                         } label: {
