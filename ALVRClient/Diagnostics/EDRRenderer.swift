@@ -71,6 +71,7 @@ final class EDRRenderer {
     let drawing: EDRDrawing
     let badge: DiagEyeRenderer?
     let runID = EDRSession.shared.currentRun
+    private var anchorMissingLogged = false
     init(_ layer: LayerRenderer) throws {
         self.layer = layer
         badge = Diag.isOn ? DiagEyeRenderer(layer) : nil
@@ -106,8 +107,14 @@ final class EDRRenderer {
         drawables = frame.queryDrawable().map { [$0] } ?? []
 #endif
         guard !drawables.isEmpty, let buffer = queue.makeCommandBuffer() else { return }
+        // The compositor needs the device pose each frame was rendered for; without it nothing in this space was
+        // shown on device (21 Oct). The patches are drawn in view space, so the current pose keeps them head-locked.
+        let presentation = LayerRenderer.Clock.Instant.epoch.duration(to: timing.presentationTime).timeInterval
+        let anchor = WorldTracker.shared.worldTracking.queryDeviceAnchor(atTimestamp: presentation)
+        if anchor == nil, !anchorMissingLogged { anchorMissingLogged = true; Diag.log("edr", ["device_anchor": "missing"]) }
         let patches = EDRSession.shared.frame()
         for drawable in drawables {
+            drawable.deviceAnchor = anchor
             for (index, view) in drawable.views.enumerated() {
                 let map = view.textureMap
                 drawing.encode(buffer: buffer, colour: drawable.colorTextures[map.textureIndex],
