@@ -242,7 +242,7 @@ struct ALVRClientApp: App {
         // Pinned to .mixed: a .full space would hide that window.
         ImmersiveSpace(id: "InputDebugSpace") {
             CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
-                let system = MetalClientSystem(layerRenderer)
+                let system = MetalClientSystem(layerRenderer, displayFullImmersion: false)
                 system.startRenderLoop()
             }
         }
@@ -262,7 +262,6 @@ struct ALVRClientApp: App {
 
         ImmersiveSpace(id: "RealityKitClient") {
             RealityKitClientView()
-                .onDisappear { EventHandler.streamImmersion.closed() }
         }
         .disablePersistentSystemOverlaysForVisionOS2(shouldDisable: ALVRClientApp.gStore.settings.disablePersistentSystemOverlays ? .hidden : .automatic)
         .immersionStyle(selection: $realityKitImmersionStyle, in: .mixed, .progressive)
@@ -272,7 +271,7 @@ struct ALVRClientApp: App {
         ImmersiveSpace(id: "MetalDiagnosticsOffline") {
             CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
                 guard Diag.isOn else { return }
-                let system = MetalClientSystem(layerRenderer, offlineDiagnostics: true)
+                let system = MetalClientSystem(layerRenderer, offlineDiagnostics: true, displayFullImmersion: false)
                 system.startRenderLoop()
                 // Manual leave releases ownership. Connection dismissal is awaited by the
                 // entry action, which retains ownership until dismissImmersiveSpace returns.
@@ -300,9 +299,8 @@ struct ALVRClientApp: App {
 
         ImmersiveSpace(id: "MetalClient") {
             CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
-                EventHandler.streamImmersion.opened(fullImmersion: false)
-                alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), "STREAMSPACE id=MetalClient immersion=mixed")
-                let system = MetalClientSystem(layerRenderer, streamingSpace: true)
+                let system = MetalClientSystem(layerRenderer, displayFullImmersion: false)
+                system.renderer.logStreamingSpace(id: "MetalClient")
                 system.startRenderLoop()
             }
         }
@@ -312,9 +310,8 @@ struct ALVRClientApp: App {
 
         ImmersiveSpace(id: "MetalClientFull") {
             CompositorLayer(configuration: ContentStageConfiguration(immersion: "full")) { layerRenderer in
-                EventHandler.streamImmersion.opened(fullImmersion: true)
-                alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), "STREAMSPACE id=MetalClientFull immersion=full")
-                let system = MetalClientSystem(layerRenderer, streamingSpace: true)
+                let system = MetalClientSystem(layerRenderer, displayFullImmersion: true)
+                system.renderer.logStreamingSpace(id: "MetalClientFull")
                 system.startRenderLoop()
             }
         }

@@ -107,7 +107,7 @@ class Renderer {
     let mtlVertexDescriptor: MTLVertexDescriptor
     let mtlVertexDescriptorNoUV: MTLVertexDescriptor
     // Video frame pipelines (explicit planes, private formats), published with the stream colour state and generation
-    // they were built for (decisions 63c (4), 63e (3)); a frame draws only with pipelines built for its own state.
+    // they were built for. Each renderer owns its slot; the state key also includes its display headroom.
     let videoFramePipelines = VideoPipelineSlot<FoveationVars?, (biplanar: MTLRenderPipelineState, secret: MTLRenderPipelineState)>(gate: EventHandler.videoStreams)
 var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var fullscreenQuadBuffer:MTLBuffer!
@@ -191,8 +191,15 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var chromaKeyLerpDistRange = simd_float2(0.005, 0.1);
     
     let renderOwnership: MetalRenderOwnership
+    let displayHeadroom: Float
+    private let displayFullImmersion: Bool
+    private let displayHeadroomSource: String
 
-    init(_ layerRenderer: LayerRenderer?, offlineDiagnostics: Bool = false) {
+    init(_ layerRenderer: LayerRenderer?, offlineDiagnostics: Bool = false, displayFullImmersion: Bool = false) {
+        let headroomOverride = UserDefaults.standard.double(forKey: HDRPipeline.headroomDefaultsKey)
+        self.displayFullImmersion = layerRenderer != nil && displayFullImmersion
+        self.displayHeadroom = HDRPipeline.headroom(defaultsValue: headroomOverride, fullImmersion: layerRenderer != nil && displayFullImmersion)
+        self.displayHeadroomSource = headroomOverride >= 1 ? "override" : "measured"
         self.renderOwnership = MetalRenderOwnership(offlineDiagnostics: offlineDiagnostics)
         self.layerRenderer = layerRenderer
         let rendererName = layerRenderer == nil ? "realitykit" : "metal"
@@ -308,6 +315,12 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         }
     }
     
+    func logStreamingSpace(id: String) {
+        let line = "STREAMSPACE id=\(id) immersion=\(displayFullImmersion ? "full" : "mixed")"
+            + " headroom=\(displayHeadroom) headroom_src=\(displayHeadroomSource)"
+        alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), line)
+    }
+
     func rebuildRenderPipelines(chromaKey snapshot: ChromaKeySnapshot? = nil) {
         let chromaKey = snapshot ?? ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings)
         chromaKeyEnabled = chromaKey.enabled
@@ -344,7 +357,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         }
 
         // Both variants are built from one snapshot of one stream generation (decision 63e (3)): the requested colour
-        // state (with that stream's encoding gamma and headroom) and the foveation captured at its STREAMING_STARTED.
+        // state (with that stream's encoding gamma and this renderer's display headroom) and the foveation captured at its STREAMING_STARTED.
         // A build that finishes after the stream stopped or restarted is discarded by publish. None is requested
         // until the first frame (its bind requests one).
         if let inputs = videoFramePipelines.buildInputs() {
@@ -605,7 +618,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         fragmentConstants.setConstantValue(&gamutTransform.columns.1, type: .float3, index: ALVRFunctionConstant.gamutToOutput_1.rawValue)
         fragmentConstants.setConstantValue(&gamutTransform.columns.2, type: .float3, index: ALVRFunctionConstant.gamutToOutput_2.rawValue)
         var hdrPQScale = Float(10000 / colour.stream.referenceWhiteNits)
-        var headroom = colour.headroom
+        var headroom = colour.headroom // Derived from this renderer's immutable displayHeadroom.
         fragmentConstants.setConstantValue(&hdrPQ, type: .bool, index: ALVRFunctionConstant.hdrPQ.rawValue)
         fragmentConstants.setConstantValue(&hdrPQScale, type: .float, index: ALVRFunctionConstant.hdrPQScale.rawValue)
         fragmentConstants.setConstantValue(&headroom, type: .float, index: ALVRFunctionConstant.edrHeadroom.rawValue)
@@ -979,7 +992,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             
             // Any change of the frame's colour state (yuv, gamut, PQ) rebuilds; until the matching pipelines are
             // published the frame is not drawn (beginRenderStreamingFrame).
-            if let queuedFrame, let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit), videoPipelinesNeedBuild(for: colour) {
+            if let queuedFrame, let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit, displayHeadroom: displayHeadroom), videoPipelinesNeedBuild(for: colour) {
                 needsPipelineRebuild = true
             }
 
@@ -1903,7 +1916,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         // The frame's own colour state and the pipelines built for exactly it (decision 63c (4)); otherwise request
         // them and skip this frame rather than draw it with another state's constants. PQ in a format with no raw
         // plane binding is dropped (decision 63e (1), logged once by VideoHandler).
-        guard let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit), !colour.dropFrames else {
+        guard let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit, displayHeadroom: displayHeadroom), !colour.dropFrames else {
             renderEncoder.endEncoding()
             return nil
         }

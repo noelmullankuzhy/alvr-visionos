@@ -886,27 +886,27 @@ struct VideoHandler {
 
     // Colour state of the frame's own stream: its format description, its decoded buffer's actual pixel format (the
     // decoder may ignore the explicit 10-bit request) and the stream context captured at STREAMING_STARTED (decision
-    // 63e (2): no UI setting is read here). Cached per (stream, format description, pixel format, renderer) under a
-    // lock; renderer threads only read the immutable result. nil for a frame decoded before any stream started.
-    static func streamColourState(for frame: QueuedFrame, realityKit: Bool) -> StreamColourState? {
+    // 63e (2): no UI setting is read here). Cached per (stream, format description, pixel format, renderer kind,
+    // display headroom) under a lock; renderer threads only read the immutable result. nil for a frame decoded before any stream started.
+    static func streamColourState(for frame: QueuedFrame, realityKit: Bool, displayHeadroom: Float) -> StreamColourState? {
         guard let videoFormat = frame.videoFormat, let stream = frame.stream else { return nil }
         let pixelFormat = CVPixelBufferGetPixelFormatType(frame.imageBuffer)
         colourStateLock.lock()
         defer { colourStateLock.unlock() }
-        if let cached = cachedColourState, cached.stream == stream, cached.videoFormat === videoFormat, cached.pixelFormat == pixelFormat, cached.realityKit == realityKit {
+        if let cached = cachedColourState, cached.stream == stream, cached.videoFormat === videoFormat, cached.pixelFormat == pixelFormat, cached.realityKit == realityKit, cached.displayHeadroom == displayHeadroom {
             return cached.state
         }
         let transfer = videoFormat.extensions[kCMFormatDescriptionExtension_TransferFunction] as? String
         // PQ binds raw planes of any depth or nothing (decision 63e (1)); SDR binds as before.
         let planeBitDepth = HDRPipeline.requiresExplicitPlanes(transfer: transfer) ? HDRPipeline.pqPlaneBitDepth(pixelFormat: pixelFormat) : getPlaneBitDepthForFormat(pixelFormat)
         let state = StreamColourState(selection: getColourSelectionForVideoFormat(videoFormat, planeBitDepth: planeBitDepth, output: stream.output),
-                                      planeBitDepth: planeBitDepth, stream: stream, realityKit: realityKit)
-        cachedColourState = (stream, videoFormat, pixelFormat, realityKit, state)
+                                      planeBitDepth: planeBitDepth, stream: stream, displayHeadroom: displayHeadroom, realityKit: realityKit)
+        cachedColourState = (stream, videoFormat, pixelFormat, realityKit, displayHeadroom, state)
         logColourState(state, pixelFormat: pixelFormat)
         return state
     }
     private static let colourStateLock = NSLock()
-    private static var cachedColourState: (stream: StreamContext, videoFormat: CMFormatDescription, pixelFormat: OSType, realityKit: Bool, state: StreamColourState)? = nil
+    private static var cachedColourState: (stream: StreamContext, videoFormat: CMFormatDescription, pixelFormat: OSType, realityKit: Bool, displayHeadroom: Float, state: StreamColourState)? = nil
 
     // Code depth of the planes getTextureTypesForFormat binds: r8Unorm holds 8-bit codes, r16Unorm the CV 10-bit
     // biplanar formats (10 bits in the MSBs of 16). nil for the private formats, whose sampler does its own YCbCr.

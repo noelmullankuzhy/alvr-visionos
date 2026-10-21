@@ -120,7 +120,6 @@ struct EntryControls: View {
 
                     saveAction()
                     print("Opening Immersive Space")
-                    EventHandler.streamImmersion.closed()
                     if useRealityKit {
                         if !DummyMetalRenderer.haveRenderInfo {
                             var dummySpaceIsOpened = false
@@ -153,13 +152,10 @@ struct EntryControls: View {
                         
                         switch await openImmersiveSpace(id: "RealityKitClient") {
                         case .opened:
-                            EventHandler.streamImmersion.openCompleted(succeeded: true, fullImmersion: false)
-                            alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), "STREAMSPACE id=RealityKitClient immersion=mixed")
                             immersiveSpaceIsShown = true
                         case .error, .userCancelled:
                             fallthrough
                         @unknown default:
-                            EventHandler.streamImmersion.openCompleted(succeeded: false, fullImmersion: false)
                             immersiveSpaceIsShown = false
                             showImmersiveSpace = false
                         }

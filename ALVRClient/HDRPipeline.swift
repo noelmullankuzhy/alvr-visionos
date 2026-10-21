@@ -17,8 +17,9 @@
 //
 //  Decision 63e: PQ content is never drawn through the SDR/sRGB path. Any non-packed biplanar Y'CbCr buffer (8- or
 //  10-bit) is bound as raw normalised planes and runs the PQ conversion; other formats are dropped. The HDR setting,
-//  headroom, output policy and encoding gamma are captured once per stream (StreamContext, VideoStreamGate), and
-//  pipeline builds snapshot one generation's inputs; stale-generation builds are discarded (VideoPipelineSlot).
+//  reference white, output policy and encoding gamma are captured once per stream (StreamContext, VideoStreamGate), and
+//  headroom is captured once per renderer. Pipeline builds snapshot one generation's inputs plus the renderer's
+//  display headroom; stale-generation builds are discarded (VideoPipelineSlot).
 //
 
 import CoreVideo
@@ -257,21 +258,19 @@ final class HDRProbeFlag {
 }
 
 // Immutable inputs of one stream (decision 63e (2)), captured once at STREAMING_STARTED by VideoStreamGate: the HDR
-// setting, the display headroom, the SDR output policy and the server's encoding gamma. Decode and render threads read
+// setting, reference white, the SDR output policy and the server's encoding gamma. Decode and render threads read
 // only this, never the UI settings. generation increases with every stream start.
 struct StreamContext: Equatable {
     let generation: UInt64
     let hdrEnabled: Bool
-    let headroom: Float
     let output: ColourOutput
     let encodingGamma: Float
     let referenceWhiteNits: Double
 
-    init(generation: UInt64, hdrEnabled: Bool, headroom: Float, output: ColourOutput, encodingGamma: Float,
+    init(generation: UInt64, hdrEnabled: Bool, output: ColourOutput, encodingGamma: Float,
          referenceWhiteNits: Double = HDRPipeline.referenceWhiteNits) {
         self.generation = generation
         self.hdrEnabled = hdrEnabled
-        self.headroom = headroom
         self.output = output
         self.encodingGamma = encodingGamma
         self.referenceWhiteNits = referenceWhiteNits
@@ -301,7 +300,7 @@ struct StreamColourState: Equatable {
     let dropFrames: Bool
     // 8-bit PQ planes: drawn on the PQ path, with one precision warning per stream.
     let lowPrecisionPQ: Bool
-    // EDR roll-off limit: the stream's headroom with the HDR setting on, SDR range (1.0) with it off.
+    // EDR roll-off constant: this renderer's display headroom with HDR on, SDR range (1.0) with it off.
     let headroom: Float
     // GAMUT_TO_OUTPUT constants.
     let gamutToOutput: simd_float3x3
@@ -309,7 +308,7 @@ struct StreamColourState: Equatable {
     var yuvToRGB: simd_float4x4 { selection.yuvToRGB }
     var encodingGamma: Float { stream.encodingGamma }
 
-    init(selection: ColourSelection, planeBitDepth: Int?, stream: StreamContext, realityKit: Bool) {
+    init(selection: ColourSelection, planeBitDepth: Int?, stream: StreamContext, displayHeadroom: Float, realityKit: Bool) {
         self.stream = stream
         self.selection = selection
         if selection.isPQ {
@@ -331,7 +330,7 @@ struct StreamColourState: Equatable {
             // SDR: the previous constants exactly (RealityKit never set a gamut).
             gamutToOutput = realityKit ? matrix_identity_float3x3 : selection.sourceToOutput
         }
-        headroom = stream.hdrEnabled ? stream.headroom : 1
+        headroom = stream.hdrEnabled ? displayHeadroom : 1
     }
 }
 
@@ -362,10 +361,10 @@ final class VideoStreamGate<Payload> {
 
     // STREAMING_STARTED: captures the stream's inputs once.
     @discardableResult
-    func streamStarted(hdrEnabled: Bool, headroom: Float, output: ColourOutput, encodingGamma: Float, referenceWhiteNits: Double = HDRPipeline.referenceWhiteNits, payload: Payload) -> StreamContext {
+    func streamStarted(hdrEnabled: Bool, output: ColourOutput, encodingGamma: Float, referenceWhiteNits: Double = HDRPipeline.referenceWhiteNits, payload: Payload) -> StreamContext {
         locked("streamStarted") {
             generation += 1
-            let context = StreamContext(generation: generation, hdrEnabled: hdrEnabled, headroom: headroom, output: output, encodingGamma: encodingGamma, referenceWhiteNits: referenceWhiteNits)
+            let context = StreamContext(generation: generation, hdrEnabled: hdrEnabled, output: output, encodingGamma: encodingGamma, referenceWhiteNits: referenceWhiteNits)
             stream = (context, payload)
             return context
         }
@@ -409,8 +408,8 @@ final class VideoPipelineSlot<Payload, Pipelines> {
         }
     }
 
-    // Everything a build needs, from one generation: the requested colour state (with its stream's gamma and
-    // headroom) and that stream's payload. nil when nothing is requested for the current stream.
+    // Everything a build needs: the requested colour state (stream gamma and renderer display headroom)
+    // and that stream's payload. nil when nothing is requested for the current stream.
     func buildInputs() -> (colour: StreamColourState, payload: Payload)? {
         gate.locked("buildInputs") {
             guard let requested, isCurrent(requested), let current = gate.currentLocked else { return nil }
@@ -453,47 +452,5 @@ struct HDRProbeClock {
         if let last = lastMs, nowMs >= last, nowMs - last < cadenceMs { return false }
         lastMs = nowMs
         return true
-    }
-}
-
-// A stream can arrive before Enter. Resolve its display inputs only once the streaming space opens.
-// Callbacks run under the lock so a stop cannot race a delayed stream start.
-final class StreamImmersionGate {
-    private let lock = NSLock()
-    private var fullImmersion: Bool?
-    private var pending: ((Bool) -> Void)?
-
-    func whenOpened(_ start: @escaping (Bool) -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
-        if let fullImmersion { start(fullImmersion) }
-        else { pending = start }
-    }
-
-    func opened(fullImmersion: Bool) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.fullImmersion = fullImmersion
-        let start = pending
-        pending = nil
-        start?(fullImmersion)
-    }
-
-    // RealityKit resolves its open result asynchronously; failed/cancelled opens never release a pending stream.
-    func openCompleted(succeeded: Bool, fullImmersion: Bool) {
-        if succeeded { opened(fullImmersion: fullImmersion) }
-        else { closed() }
-    }
-
-    func closed() {
-        lock.lock()
-        defer { lock.unlock() }
-        fullImmersion = nil
-    }
-
-    func cancelPendingStream() {
-        lock.lock()
-        defer { lock.unlock() }
-        pending = nil
     }
 }
