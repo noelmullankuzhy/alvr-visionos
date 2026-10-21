@@ -26,7 +26,8 @@ import simd
         let projection = simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0, 0.1 / 99.9, -1), SIMD4(0, 0, 10 / 99.9, 0)))
         let placement = DiagEye.placement(tangents: SIMD4(1, 1, 1, 1))
         for layout in EDRLayout.allCases {
-            let patches = layout.patches(value: 4)
+            let patches = layout.patches(value: 4, aspect: viewport.width / viewport.height,
+                                         pixelHeight: viewport.height)
             let buffer = queue.makeCommandBuffer()!
             for (slice, eye) in [DiagEye.left, .right].enumerated() {
                 ramp.encode(buffer: buffer, colour: colour, depth: depth, slice: slice, viewport: viewport, patches: patches, projection: projection)
@@ -59,7 +60,9 @@ import simd
                             if rgb == .zero { black += 1 } else { cyanOrMagenta += 1 }
                         } else if u >= 0 && u < 1 && v >= 0 && v < 1 {
                             let patch = patches.last { u >= $0.x && u < $0.x + $0.width && v >= $0.y && v < $0.y + $0.height }
-                            expectEqual(rgb, SIMD3(repeating: patch?.value ?? 0), "all pixels outside badge preserved, including 1% patch")
+                            // Compare the stored binary16 value; fine grid levels (1/24) are not exact Float16s.
+                            let expected = Float(Float16(patch?.value ?? 0))
+                            expectEqual(rgb, SIMD3(repeating: expected), "all pixels outside badge preserved, including 1% patch")
                         }
                     }
                 }
