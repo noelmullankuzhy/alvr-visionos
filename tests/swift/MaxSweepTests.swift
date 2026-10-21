@@ -23,6 +23,14 @@ import Foundation
         s = RQSchedule.make(diagnostics: true, enabled: true)!
         expectEqual(s.tick(now: 0, enabled: true, streaming: false, supported: false, previous: 0, maximum: 1), .unsupported, "old OS")
         expectEqual(s.tick(now: 1, enabled: true, streaming: false, supported: false, previous: 0, maximum: 1), .none, "unsupported once")
+        s = RQSchedule.make(diagnostics: true, enabled: true)!
+        _ = s.tick(now: 0, enabled: true, streaming: false, supported: true, previous: 0.9, maximum: 0.75)
+        expectEqual(s.tick(now: 23000, enabled: true, streaming: false, supported: true, previous: 0.5, maximum: 0.75), .finish(0.5, next: 0.75), "within allocation ceiling")
+        expectEqual(s.tick(now: 46000, enabled: true, streaming: false, supported: true, previous: 0.75, maximum: 0.75), .finish(0.75, next: 0.9), "never request above max")
+        s = RQSchedule.make(diagnostics: true, enabled: true)!
+        _ = s.tick(now: 0, enabled: true, streaming: false, supported: true, previous: 0.7, maximum: 1)
+        expectEqual(s.tick(now: 1, enabled: false, streaming: false, supported: true, previous: 0.5, maximum: 1), .restore(0.7), "disable restores during settle")
+        expectEqual(Diag.line(topic: "rq", tMs: 0, fields: ["unsupported": 1]), "DIAG rq t_ms=0 unsupported=1", "unsupported line")
         expectEqual(Diag.line(topic: "rq", tMs: 0, fields: RQReport.start(defaultQuality: 0.8, maximum: 1)), "DIAG rq t_ms=0 default=0.800 max=1.000", "start format")
         let fields = RQReport.step(step: 0.5, actual: 0.49, drawable: 0, view: 1, width: 100, height: 90,
                                    screen: "100x90", physical: "80x70", gpu: Array(1...100).map(Double.init), missed: 3, frames: 100, footprint: 64)

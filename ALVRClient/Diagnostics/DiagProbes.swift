@@ -28,6 +28,7 @@ enum DiagProbes {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         Diag.start(enabled: true, directory: docs.appendingPathComponent("diag"),
                    console: { alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), $0) })
+        CodecSupport.start()
         let device = MTLCreateSystemDefaultDevice()
         var headroom = unavailable
 #if XCODE_BETA_26
@@ -57,6 +58,7 @@ enum DiagProbes {
         if #available(visionOS 26.0, *) {
             colourFormats = capabilities.supportedColorFormats(options: [])
             progressiveColourFormats = formats(capabilities.supportedColorFormats(options: [.progressiveImmersionEnabled]))
+            RQRenderer.configure(defaultQuality: capabilities.defaultRenderQuality.rawValue)
             defaultQuality = String(format: "%.3f", capabilities.defaultRenderQuality.rawValue)
             maxQuality = String(format: "%.3f", configuration.maxRenderQuality.rawValue)
         }

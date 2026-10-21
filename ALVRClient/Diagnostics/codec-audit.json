@@ -1,0 +1,29 @@
+[
+  {
+    "bitDepth" : 10,
+    "chroma" : "420",
+    "encoderStatus" : -12908,
+    "parameterSets" : [
+
+    ],
+    "reason" : "create"
+  },
+  {
+    "bitDepth" : 10,
+    "chroma" : "422",
+    "encoderStatus" : -12908,
+    "parameterSets" : [
+
+    ],
+    "reason" : "create"
+  },
+  {
+    "bitDepth" : 10,
+    "chroma" : "444",
+    "encoderStatus" : -12908,
+    "parameterSets" : [
+
+    ],
+    "reason" : "create"
+  }
+]

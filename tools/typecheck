@@ -1,0 +1,6 @@
+#!/bin/sh
+# Use the GM's client checker and its generated assets/framework, without xcodebuild.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$repo/local-scratch/module-cache}"
+exec sh /Users/noel/Projects/Personal/vr-gaming/tools/typecheck-client.sh "$repo"

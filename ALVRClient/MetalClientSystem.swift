@@ -44,6 +44,7 @@ class MetalClientSystem {
     }
     
     func renderLoop() {
+        defer { renderer.stopQualitySweep() }
     
         layerRenderer.waitUntilRunning()
         
@@ -71,6 +72,7 @@ class MetalClientSystem {
                 }
                 break
             } else if layerRenderer.state == .paused {
+                renderer.stopQualitySweep()
                 layerRenderer.waitUntilRunning()
                 //EventHandler.shared.handleHeadsetRemovedOrReentry()
                 continue

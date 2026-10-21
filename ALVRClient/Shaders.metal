@@ -424,3 +424,22 @@ vertex float4 diagEDRVertex(uint id [[vertex_id]], constant float &depth [[buffe
 fragment float4 diagEDRFragment(constant float &value [[buffer(0)]]) {
     return float4(value, value, value, 1.0);
 }
+
+struct RQVertex {
+    float4 position [[position]];
+    uint layer [[render_target_array_index]];
+};
+vertex RQVertex diagRQVertex(uint id [[vertex_id]], constant float &depth [[buffer(0)]],
+                            constant uint &layer [[buffer(1)]]) {
+    const float2 positions[] = {float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1)};
+    return {float4(positions[id], depth, 1), layer};
+}
+
+// M5 fixed centre target: 1 logical pixel black/white line pairs, vertical on
+// the left and horizontal on the right. The rate map determines physical sampling.
+fragment float4 diagRQFragment(float4 position [[position]], constant float2 &centre [[buffer(0)]]) {
+    float2 p = position.xy - centre;
+    if (abs(p.x) >= 128 || abs(p.y) >= 128) discard_fragment();
+    float value = fmod(floor(p.x < 0 ? position.x : position.y), 2.0);
+    return float4(value, value, value, 1.0);
+}
