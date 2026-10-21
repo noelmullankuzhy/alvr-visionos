@@ -36,21 +36,29 @@ import Foundation
                             var on: [PQControlAction] = []
                             if selection != nil && allowed {
                                 if path == .window {
-                                    on = (space == "PQDiagnostic" ? [.stop, .dismissSpace] : []) + [.play(.window)]
+                                    on = (space == "PQDiagnostic" ? [.stop, .dismissSpace] : []) + [.play(.window, b)]
                                 } else if space == "PQDiagnostic" {
-                                    on = [.play(.immersive)]
+                                    on = [.play(.immersive, b)]
                                 } else {
-                                    on = [.stop] + (space != nil ? [.dismissSpace] : []) + [.openImmersive]
+                                    on = [.stop] + (space != nil ? [.dismissSpace] : []) + [.openImmersive(b)]
                                 }
                             }
                             expectEqual(controls.actions(path, on: true), on, "switch paths in order; window never dismisses EDR")
                         }
-                        expectEqual(PQControls.restartAfterSelectionChange(playing: playing, to: c), playing.map { .play($0) }, "changing clip replays same path")
+                        expectEqual(PQControls.restartAfterSelectionChange(playing: playing, to: c), playing.map { .play($0, c) }, "changing clip replays same path")
                         expectEqual(PQControls.restartAfterSelectionChange(playing: playing, to: nil), playing == nil ? nil : .stop, "removing selection stops playback")
                     }
                 }
             }
         }
+        let pressed = PQControls(space: nil, layout: .match, selection: b, playing: nil)
+        let immersivePress = pressed.actions(.immersive, on: true)
+        let windowPress = pressed.actions(.window, on: true)
+        let refreshed = PQClipSelection.restore(clips: clips, current: c, rememberedName: a.lastPathComponent)
+        expectEqual(refreshed, c, "refresh during entry keeps latest selection")
+        expectEqual(immersivePress, [.stop, .openImmersive(b)], "entry retains URL selected at press despite subsequent refresh/selection")
+        expectEqual(windowPress, [.play(.window, b)], "window press captures URL")
+        expectEqual(PQControls.restartAfterSelectionChange(playing: .immersive, to: c), .play(.immersive, c), "next/prev captures new clip before asynchronous effects")
         finishTests("PQControls")
     }
 }
