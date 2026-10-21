@@ -45,6 +45,13 @@ import Foundation
         }
         expectEqual(PQSchedule.step(time: .nan, isSteps: true), -1, "indefinite time")
         expectEqual(PQSchedule.step(time: 2, isSteps: false), -1, "gradient has no steps")
+        for (time, index) in [(0.0, 0), (4.999, 0), (5, 1), (35, 7), (40, 7), (60, 7)] {
+            expectEqual(PQSchedule.step(time: time, clip: "split-1920x1080-30.mov"), index, "split five-second boundaries")
+        }
+        expectEqual(PQSchedule.step(time: -1, clip: "split.mov"), -1, "negative split time")
+        expectEqual(PQSchedule.step(time: .infinity, clip: "split.mov"), -1, "invalid split time")
+        expectEqual(PQSchedule.step(time: 2, clip: "steps.mov"), 1, "existing steps filename")
+        expectEqual(PQSchedule.step(time: 2, clip: "gradient.mov"), -1, "gradient filename")
         let window = PQPlaybackContext(clip: "first steps.mov", path: "window")
         let immersive = PQPlaybackContext(clip: "second.mov", path: "realitykit")
         expectEqual(Diag.line(topic: "pq", tMs: 44, fields: window.statusFields(status: 2, error: "cannot open")),

@@ -13,6 +13,14 @@ struct PQPlaybackContext {
 
 // tools/diag/clip-engine.swift: seven two-second levels, last level held on extension.
 enum PQSchedule {
+    static func step(time: Double, clip: String) -> Int {
+        if clip.contains("split") {
+            guard time.isFinite, time >= 0 else { return -1 }
+            return Int(min(7, time / 5))
+        }
+        return step(time: time, isSteps: clip.contains("steps"))
+    }
+
     static func step(time: Double, isSteps: Bool) -> Int {
         guard isSteps, time.isFinite, time >= 0 else { return -1 }
         return Int(min(6, time / 2))
