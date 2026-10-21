@@ -50,11 +50,7 @@ final class RQRenderer {
     }
     var active: Bool { schedule.active }
     init(device: MTLDevice, library: MTLLibrary) throws {
-        let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = library.makeFunction(name: "diagRQVertex")
-        descriptor.fragmentFunction = library.makeFunction(name: "diagRQFragment")
-        descriptor.colorAttachments[0].pixelFormat = .rgba16Float
-        descriptor.depthAttachmentPixelFormat = .depth32Float
+        let descriptor = RQPipeline.descriptor(library: library)
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         let d = MTLDepthStencilDescriptor()
         d.depthCompareFunction = .always; d.isDepthWriteEnabled = true

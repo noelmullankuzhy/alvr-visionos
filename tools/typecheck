@@ -3,4 +3,5 @@
 set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$repo/local-scratch/module-cache}"
-exec sh /Users/noel/Projects/Personal/vr-gaming/tools/typecheck-client.sh "$repo"
+checker="${ALVR_TYPECHECK:-$repo/tools/typecheck-client.sh}"
+exec sh "$checker" "$repo"
