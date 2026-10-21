@@ -40,6 +40,11 @@ import Foundation
                     "DIAG edr t_ms=42 step=0 value=0.000 layout=split mode=auto hold_s=60", "step log contract")
         expectEqual(Diag.line(topic: "edr", tMs: 43, fields: step.markFields(layout: .split)),
                     "DIAG edr t_ms=43 mark=true value=0.000 layout=split", "visual threshold marker")
+        for (time, index) in [(0.0, 0), (1.999, 0), (2, 1), (12, 6), (14, 6), (60, 6)] {
+            expectEqual(PQSchedule.step(time: time, isSteps: true), index, "generator's two-second schedule")
+        }
+        expectEqual(PQSchedule.step(time: .nan, isSteps: true), -1, "indefinite time")
+        expectEqual(PQSchedule.step(time: 2, isSteps: false), -1, "gradient has no steps")
         // Exercise the actual shader entry and make bypass regressions fail without needing a Metal device.
         let shader = try! String(contentsOfFile: "ALVRClient/Shaders.metal")
         let ramp = shader.components(separatedBy: "fragment float4 diagEDRFragment").last!
