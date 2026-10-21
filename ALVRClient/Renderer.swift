@@ -180,6 +180,8 @@ class Renderer {
     
     init(_ layerRenderer: LayerRenderer?) {
         self.layerRenderer = layerRenderer
+        let rendererName = layerRenderer == nil ? "realitykit" : "metal"
+        StreamTelemetry.shared.updateFormat { $0.renderer = rendererName }
         if layerRenderer == nil {
             isRealityKit = true
         }
@@ -959,7 +961,11 @@ class Renderer {
             frameIsSuitableForDisplaying = false
             print("Missing video format, no frame")
         }
-        
+        StreamTelemetry.shared.recordRender(frameTimestampNs: queuedFrame?.timestamp, displayed: renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil, presentNs: vsyncTimeNs)
+        let telemetryViewport0 = mainDrawable.views[0].textureMap.viewport
+        let telemetryViewport1 = mainDrawable.views.count > 1 ? mainDrawable.views[1].textureMap.viewport : MTLViewport()
+        StreamTelemetry.shared.noteDrawable(pixelFormat: mainDrawable.colorTextures[0].pixelFormat.rawValue, view0Width: Int(telemetryViewport0.width), view0Height: Int(telemetryViewport0.height), view1Width: Int(telemetryViewport1.width), view1Height: Int(telemetryViewport1.height))
+
         if !(renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil) {
             // Things to do once if no frame is rendering (show the wireframe)
             if EventHandler.shared.totalFramesRendered > 300 {
@@ -1730,7 +1736,8 @@ class Renderer {
         
         //print("Pixel format \(formatStr) (\(format))")
         let textureTypes = VideoHandler.getTextureTypesForFormat(CVPixelBufferGetPixelFormatType(pixelBuffer))
-        
+        StreamTelemetry.shared.noteDecoderOutput(pixelFormat: format, lumaTextureFormat: textureTypes[0].rawValue, chromaTextureFormat: textureTypes[1].rawValue, name: formatStr)
+
         for i in 0...1 {
             var textureOut:CVMetalTexture! = nil
             var err:OSStatus = 0

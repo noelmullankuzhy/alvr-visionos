@@ -1246,7 +1246,9 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             rkFramesRendered -= 1 // Ensure whichRkFrame is still correct next time around
             return
         }
-        
+        // Views are stacked vertically in one texture, currentRenderWidth x currentRenderHeight each.
+        StreamTelemetry.shared.noteDrawable(pixelFormat: drawable.pixelFormat.rawValue, view0Width: currentRenderWidth, view0Height: currentRenderHeight, view1Width: renderViewCount > 1 ? currentRenderWidth : 0, view1Height: renderViewCount > 1 ? currentRenderHeight : 0)
+
         var deviceTransform = matrix_identity_float4x4
         objc_sync_enter(self.rkFramePoolLock)
         if !self.rkFramePool.isEmpty {
@@ -1669,7 +1671,8 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             frameIsSuitableForDisplaying = false
             print("Missing video format, no frame")
         }
-        
+        StreamTelemetry.shared.recordRender(frameTimestampNs: queuedFrame?.timestamp, displayed: renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil, presentNs: UInt64(max(vsyncTime, 0) * Double(NSEC_PER_SEC)))
+
         // TODO: why does this cause framerate to go down to 45?
         /*guard let commandBuffer = commandQueue.makeCommandBuffer() else {
             fatalError("Failed to create command buffer")
