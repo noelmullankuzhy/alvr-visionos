@@ -66,12 +66,27 @@ swift tools/diag/make-pq-clips.swift --kind grid --area 10 --range fine --lo 600
 Each still is 1920×1080, 30 fps, 30 seconds, HEVC Main10, limited-range
 PQ / BT.2020 with neutral chroma. These dimensions/cadence/duration are fixed.
 `--area 1|10|50` selects total cell area as a percentage of the frame (default
-10); labels are excluded from that area. `--range coarse` (default) gives 25
+10); labels are excluded from that area. `--surround NITS` fills the area
+outside the grid and between labels with a PQ level (default 0, limited-range
+black). For example, `--surround 203` uses the 203-nit reference white to
+separate surround adaptation from the cell values. The manifest records its
+source nits and luma code; filenames add `-sur203` when set. `--range coarse`
+(default) gives 25
 log-spaced values from 100 to 10000 nits. `--range fine` gives 25 log-spaced
 values from `--lo` to `--hi` (defaults 600 and 2000 nits; require
 0 < lo < hi ≤ 10000). Endpoints are included. Files are named, for example,
 `grid-10-coarse-1920x1080-30.mov` or `grid-10-fine-1920x1080-30.mov`.
 Use separate fresh directories for each run, including different fine bounds.
+
+Both `grid` and `level` accept `--mastering-peak NITS` (BT.2020 primaries,
+D65 white, 0.0050 cd/m² minimum luminance) and the paired `--max-cll NITS`
+`--max-fall NITS`. They write ST 2086 and CEA-861.3 byte payloads through
+VideoToolbox and record requested values plus format-description readback bytes
+in the manifest. Metadata adds suffixes such as `-md1000-cll1000-fall400`.
+Each supplied value must be greater than zero and at most 10000 nits; maxFALL
+must not exceed maxCLL. With no metadata options, clips retain today's tagging.
+The checker verifies requested extensions and byte values against the format
+description. These metadata flags are limited to grid and level clips.
 
 The continuous grid is exactly centred with cell side
 `sqrt(frameWidth * frameHeight * area / 100) / 5`. Its requested area is exact.
@@ -82,7 +97,7 @@ and limited 10-bit PQ luma code, and label bounds. Thus pixel quantisation is
 explicit rather than silently claiming an exact integer-pixel area. The checker
 independently reconstructs the layout and log sequence, decodes every frame to
 limited P010, and checks an interior lattice in **every cell** (±3 codes), plus
-the black surround (code 64), excluding labels and boundary ringing.
+the configured surround (code 64 for black), excluding labels and boundary ringing.
 The cell body inset is `ceil(max(8 pixels, 20% of the continuous cell side))`,
 which gives 8/19/41 pixels for the 1%/10%/50% grids. Each `GRID_BODY` line
 reports the file, cell, sampled body mean code, expected code, maximum absolute
