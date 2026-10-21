@@ -16,6 +16,51 @@ func expectEqual<T: Equatable>(_ actual: T, _ expected: T, _ message: String = "
     expect(actual == expected, "\(message) expected \(expected), got \(actual)", file: file, line: line)
 }
 
+/// Forces one lock order between two lock-guarded calls on two threads, with the gate's test seams and semaphores (no sleeps):
+/// the holder takes the gate lock at `holderEntry` and stays in the critical section until the waiter has reached
+/// the lock at `waiterEntry`, so the waiter's call runs strictly after the holder's.
+final class LockOrder {
+    private let mutex = NSLock()
+    private var holderEntry: String?
+    private var waiterEntry: String?
+    private let holderIn = DispatchSemaphore(value: 0)
+    private let waiterEntered = DispatchSemaphore(value: 0)
+    private var waiterWasWaiting = false
+
+    func beforeLock(_ entry: String) {
+        mutex.lock()
+        let hit = entry == waiterEntry
+        if hit { waiterEntry = nil }
+        mutex.unlock()
+        if hit { waiterEntered.signal() }
+    }
+
+    func inLock(_ entry: String) {
+        mutex.lock()
+        let hit = entry == holderEntry
+        if hit { holderEntry = nil }
+        mutex.unlock()
+        guard hit else { return }
+        holderIn.signal()
+        waiterWasWaiting = waiterEntered.wait(timeout: .now() + 10) == .success
+    }
+
+    /// True when both calls finished and the waiter reached the lock while the holder held it.
+    func run(holderEntry: String, _ holder: @escaping () -> Void, waiterEntry: String, _ waiter: @escaping () -> Void) -> Bool {
+        mutex.lock()
+        self.holderEntry = holderEntry
+        self.waiterEntry = waiterEntry
+        waiterWasWaiting = false
+        mutex.unlock()
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { holder(); done.signal() }
+        guard holderIn.wait(timeout: .now() + 10) == .success else { return false }
+        Thread.detachNewThread { waiter(); done.signal() }
+        let finished = done.wait(timeout: .now() + 10) == .success && done.wait(timeout: .now() + 10) == .success
+        return finished && waiterWasWaiting
+    }
+}
+
 func finishTests(_ name: String) -> Never {
     print("\(name): \(testChecks) checks, \(testFailures) failures")
     exit(testFailures == 0 ? 0 : 1)

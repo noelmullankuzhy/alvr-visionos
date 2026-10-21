@@ -66,9 +66,14 @@ struct GPU {
 
 // The constants Renderer.buildRenderPipelineForVideoFrameWithDevice sets for this stream state; applyGamut mirrors
 // Shaders.metal videoFrameFragmentShader_output (!REALITYKIT_ENABLED || HDR_PQ).
-func params(_ s: StreamColourState, realityKit: Bool, encodingGamma: Float, headroom: Float) -> KernelParams {
+// Encoding gamma and headroom come from the state's own stream (decision 63e (3)).
+func params(_ s: StreamColourState, realityKit: Bool) -> KernelParams {
     KernelParams(yuvTransform: s.yuvToRGB, gamutToOutput: s.gamutToOutput, pqScale: Float(10000 / HDRPipeline.referenceWhiteNits),
-                 encodingGamma: encodingGamma, headroom: headroom, hdrPQ: s.hdrPQ ? 1 : 0, applyGamut: (!realityKit || s.hdrPQ) ? 1 : 0)
+                 encodingGamma: s.encodingGamma, headroom: s.headroom, hdrPQ: s.hdrPQ ? 1 : 0, applyGamut: (!realityKit || s.hdrPQ) ? 1 : 0)
+}
+
+func stream(hdr: Bool = true, headroom: Float, gamma: Float) -> StreamContext {
+    StreamContext(generation: 1, hdrEnabled: hdr, headroom: headroom, output: .srgb, encodingGamma: gamma)
 }
 
 func close(_ got: simd_float3, _ expected: simd_float3, abs absTol: Float, rel: Float) -> Bool {
@@ -94,14 +99,15 @@ enum HDRGPUTests {
         let gpu = GPU(device: device, pipeline: pipeline, queue: device.makeCommandQueue()!)
         print("HDRGPUTests on \(device.name)")
         testPQNeutral(gpu)
+        testPQEightBit(gpu)
         testBT2020Primaries(gpu)
         testSDRPassthrough(gpu)
         finishTests("HDRGPUTests")
     }
 
-    static func pqState(realityKit: Bool) -> StreamColourState {
-        let s = ColourPipeline.select(primaries: "ITU_R_2020", transfer: "SMPTE_ST_2084_PQ", matrix: "ITU_R_2020", fullRange: false, bitDepth: 10, planeBitDepth: 10, output: .srgb)
-        return StreamColourState(selection: s, planeBitDepth: 10, hdrEnabled: true, realityKit: realityKit)
+    static func pqState(realityKit: Bool, headroom: Float = 100, bits: Int = 10) -> StreamColourState {
+        let s = ColourPipeline.select(primaries: "ITU_R_2020", transfer: "SMPTE_ST_2084_PQ", matrix: "ITU_R_2020", fullRange: false, bitDepth: 10, planeBitDepth: bits, output: .srgb)
+        return StreamColourState(selection: s, planeBitDepth: bits, stream: stream(headroom: headroom, gamma: 2.2), realityKit: realityKit)
     }
 
     // PQ neutral greys, BT.2020 NCL limited 10-bit codes 509/573/723 (100/203/1000 nits nominal). Golden EDR values of
@@ -110,7 +116,7 @@ enum HDRGPUTests {
         let codes = [simd_int3(509, 512, 512), simd_int3(573, 512, 512), simd_int3(723, 512, 512)]
         let golden: [Float] = [0.492181, 1.003463, 4.946758]
         for realityKit in [false, true] {
-            let out = gpu.run(codes: codes, bits: 10, params: params(pqState(realityKit: realityKit), realityKit: realityKit, encodingGamma: 2.2, headroom: 100))
+            let out = gpu.run(codes: codes, bits: 10, params: params(pqState(realityKit: realityKit), realityKit: realityKit))
             for (i, g) in golden.enumerated() {
                 expect(close(out[i], simd_float3(repeating: g), abs: 1e-4, rel: 2e-3), "PQ neutral code \(codes[i].x) -> EDR \(g) (realityKit \(realityKit)), got \(out[i])")
             }
@@ -119,9 +125,23 @@ enum HDRGPUTests {
                 expect(abs(Double(out[i].x) * 203 / nits - 1) < 0.01, "code \(codes[i].x) ~ \(nits) nits, got \(Double(out[i].x) * 203)")
             }
             // At the assumed 2.0 headroom 1000 nits rolls off to 2 - 0.5 exp(-(4.946758 - 1.5) / 0.5) = 1.999491.
-            let rolled = gpu.run(codes: [codes[2], codes[1]], bits: 10, params: params(pqState(realityKit: realityKit), realityKit: realityKit, encodingGamma: 2.2, headroom: HDRPipeline.assumedHeadroom))
+            let rolled = gpu.run(codes: [codes[2], codes[1]], bits: 10, params: params(pqState(realityKit: realityKit, headroom: HDRPipeline.assumedHeadroom), realityKit: realityKit))
             expect(close(rolled[0], simd_float3(repeating: 1.999491), abs: 2e-4, rel: 0), "1000 nits at headroom 2 -> 1.999491, got \(rolled[0])")
             expect(close(rolled[1], simd_float3(repeating: 1.003463), abs: 1e-4, rel: 2e-3), "203 nits below the knee unchanged at headroom 2, got \(rolled[1])")
+        }
+    }
+
+    // Decision 63e (1): 8-bit PQ planes (r8Unorm/rg8Unorm) run the PQ conversion. BT.2020 NCL limited 8-bit codes
+    // 127/143/181 (100/203/1000 nits nominal); golden EDR of the rounded codes, (code - 16) / 219 through ST 2084 over
+    // 203 nits. The SDR path would give 0.220/0.296/0.528.
+    static func testPQEightBit(_ gpu: GPU) {
+        let codes = [simd_int3(127, 128, 128), simd_int3(143, 128, 128), simd_int3(181, 128, 128)]
+        let golden: [Float] = [0.486612, 0.992562, 4.998830]
+        for realityKit in [false, true] {
+            let out = gpu.run(codes: codes, bits: 8, params: params(pqState(realityKit: realityKit, bits: 8), realityKit: realityKit))
+            for (i, g) in golden.enumerated() {
+                expect(close(out[i], simd_float3(repeating: g), abs: 1e-4, rel: 2e-3), "8-bit PQ code \(codes[i].x) -> EDR \(g) (realityKit \(realityKit)), got \(out[i])")
+            }
         }
     }
 
@@ -134,7 +154,7 @@ enum HDRGPUTests {
             ("blue", simd_int3(94, 772, 491), 0.995224, simd_float3(-0.0613, -0.0105, 1.0168)),
         ]
         for realityKit in [false, true] {
-            let out = gpu.run(codes: cases.map { $0.1 }, bits: 10, params: params(pqState(realityKit: realityKit), realityKit: realityKit, encodingGamma: 2.2, headroom: 100))
+            let out = gpu.run(codes: cases.map { $0.1 }, bits: 10, params: params(pqState(realityKit: realityKit), realityKit: realityKit))
             for (i, c) in cases.enumerated() {
                 let expected = c.3 * c.2
                 expect(close(out[i], expected, abs: 2e-3, rel: 2e-3), "BT.2020 \(c.0) -> linear P3 \(expected) (realityKit \(realityKit)), got \(out[i])")
@@ -152,14 +172,15 @@ enum HDRGPUTests {
             for output in [ColourOutput.srgb, .p3] {
                 let s = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "ITU_R_709_2", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 8, planeBitDepth: 8, output: output)
                 for realityKit in [false, true] {
-                    let state = StreamColourState(selection: s, planeBitDepth: 8, hdrEnabled: hdr, realityKit: realityKit)
-                    let out = gpu.run(codes: greys, bits: 8, params: params(state, realityKit: realityKit, encodingGamma: 1, headroom: 2))
+                    let state = StreamColourState(selection: s, planeBitDepth: 8, stream: stream(hdr: hdr, headroom: 2, gamma: 1), realityKit: realityKit)
+                    let out = gpu.run(codes: greys, bits: 8, params: params(state, realityKit: realityKit))
                     for (i, g) in golden.enumerated() {
                         expect(close(out[i], simd_float3(repeating: g), abs: 2e-3, rel: 2e-3), "SDR grey \(greys[i].x) -> \(g) (\(output), realityKit \(realityKit), hdr \(hdr)), got \(out[i])")
                     }
                     let colour = simd_int3(150, 90, 200)
                     let gamma: Float = 1.5
-                    let got = gpu.run(codes: [colour], bits: 8, params: params(state, realityKit: realityKit, encodingGamma: gamma, headroom: 2))[0]
+                    let gammaState = StreamColourState(selection: s, planeBitDepth: 8, stream: stream(hdr: hdr, headroom: 2, gamma: gamma), realityKit: realityKit)
+                    let got = gpu.run(codes: [colour], bits: 8, params: params(gammaState, realityKit: realityKit))[0]
                     let rgb = s.yuvToRGB * simd_float4(Float(colour.x) / 255, Float(colour.y) / 255, Float(colour.z) / 255, 1)
                     let lin = simd_float3(ColourPipeline.srgbEOTF(rgb.x), ColourPipeline.srgbEOTF(rgb.y), ColourPipeline.srgbEOTF(rgb.z))
                     let src = simd_float3(ColourPipeline.encodingGammaToLinear(lin.x, gamma: gamma), ColourPipeline.encodingGammaToLinear(lin.y, gamma: gamma), ColourPipeline.encodingGammaToLinear(lin.z, gamma: gamma))

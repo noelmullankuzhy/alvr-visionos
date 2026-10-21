@@ -4,6 +4,10 @@
 // probe levels decoded from 10-bit limited-range BT.2020 codes, and the HDRPROBE log line and 250 ms cadence.
 // Decision 63c: PQ output in Display P3, headroom 2.0, the per-stream colour state (HDR off and refused streams keep
 // the previous path) and the pipeline slot that publishes pipelines with the state they were built for.
+// Decision 63e: PQ is never drawn through the SDR/sRGB path (8- and 10-bit biplanar planes run the PQ conversion,
+// other formats are dropped); the HDR setting is captured once per stream (StreamContext); pipeline builds snapshot
+// one generation's inputs and stale-generation builds are discarded (VideoStreamGate, both lock orders forced).
+import CoreVideo
 import Foundation
 import simd
 
@@ -36,7 +40,10 @@ enum HDRPipelineTests {
         testSelection()
         testHeadroomDefault()
         testStreamColourState()
+        testEightBitPQRendersPQ()
+        testSettingCapturedPerStream()
         testPipelineSlot()
+        testReconnectPublishInterleaving()
         testSDRShadeUnchanged()
         testPQShade()
         testProbeLevelsDecode()
@@ -135,10 +142,11 @@ enum HDRPipelineTests {
         expect(!sdr.isPQ, "sRGB stream is not PQ")
         expectEqual(sdr.output, .srgb, "SDR keeps the ColourOutput policy")
         expect(!ColourPipeline.select(primaries: nil, transfer: "ITU_R_2100_HLG", matrix: nil, fullRange: false, bitDepth: 10).isPQ, "HLG is not PQ")
-        expect(HDRPipeline.requiresExplicitPlanes(transfer: "SMPTE_ST_2084_PQ", hdrEnabled: true), "PQ with HDR on needs explicit 10-bit planes (no sRGB-decoding private sampler)")
-        expect(!HDRPipeline.requiresExplicitPlanes(transfer: "SMPTE_ST_2084_PQ", hdrEnabled: false), "HDR off keeps today's decoder output, even for a PQ stream")
-        expect(!HDRPipeline.requiresExplicitPlanes(transfer: "IEC_sRGB", hdrEnabled: true), "sRGB keeps today's decoder output")
-        expect(!HDRPipeline.requiresExplicitPlanes(transfer: nil, hdrEnabled: true), "unsignalled keeps today's decoder output")
+        // Decision 63e (1): PQ always requests explicit 10-bit planes (no sRGB-decoding private sampler), whatever the
+        // HDR setting; SDR keeps the decoder's default output.
+        expect(HDRPipeline.requiresExplicitPlanes(transfer: "SMPTE_ST_2084_PQ"), "PQ requests explicit 10-bit planes")
+        expect(!HDRPipeline.requiresExplicitPlanes(transfer: "IEC_sRGB"), "sRGB keeps today's decoder output")
+        expect(!HDRPipeline.requiresExplicitPlanes(transfer: nil), "unsignalled keeps today's decoder output")
     }
 
     // Decision 63c (2): assumed headroom 2.0 until the headset measures it; ALVRHDRHeadroom >= 1 overrides.
@@ -153,63 +161,175 @@ enum HDRPipelineTests {
         ColourPipeline.select(primaries: "ITU_R_2020", transfer: "SMPTE_ST_2084_PQ", matrix: "ITU_R_2020", fullRange: false, bitDepth: 10, planeBitDepth: planeBitDepth, output: .srgb)
     }
 
-    // Decision 63c (1), (3), (4): the per-stream colour state is a pure function of the stream, the decoded format's
-    // plane depth, the HDR setting and the renderer.
+    static func context(generation: UInt64 = 1, hdr: Bool = true, headroom: Float = 2, output: ColourOutput = .srgb, gamma: Float = 1) -> StreamContext {
+        StreamContext(generation: generation, hdrEnabled: hdr, headroom: headroom, output: output, encodingGamma: gamma)
+    }
+
+    static func pqState(_ pixelFormat: OSType, stream: StreamContext = context(), realityKit: Bool = false) -> StreamColourState {
+        let bits = HDRPipeline.pqPlaneBitDepth(pixelFormat: pixelFormat)
+        return StreamColourState(selection: pqSelection(planeBitDepth: bits), planeBitDepth: bits, stream: stream, realityKit: realityKit)
+    }
+
+    // Decision 63e (1): the stream colour state as the renderer binds it. PQ never takes the SDR/sRGB path: every
+    // non-packed biplanar format is bound as raw normalised planes (8 or 10 bit) and runs the PQ conversion; packed
+    // and unknown formats are dropped.
     static func testStreamColourState() {
         let toP3 = simd_float3x3(columns: (simd_float3(ColourPipeline.primariesConversion(from: .bt2020, to: .displayP3).columns.0),
                                            simd_float3(ColourPipeline.primariesConversion(from: .bt2020, to: .displayP3).columns.1),
                                            simd_float3(ColourPipeline.primariesConversion(from: .bt2020, to: .displayP3).columns.2)))
+        let tenBit: [OSType] = [kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+                                kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange, kCVPixelFormatType_444YpCbCr10BiPlanarFullRange]
+        let eightBit: [OSType] = [kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                                  kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
+                                  kCVPixelFormatType_Lossy_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange]
+        let dropped: [OSType] = [0x70343230 /* p420 */, 0x2D786630 /* -xf0 */, kCVPixelFormatType_Lossless_420YpCbCr10PackedBiPlanarVideoRange,
+                                 kCVPixelFormatType_32BGRA, kCVPixelFormatType_420YpCbCr8Planar, 0x3F3F3F3F]
         for realityKit in [false, true] {
-            // PQ, HDR on, explicit 10-bit planes: HDR path, BT.2020 -> P3 on both renderers.
-            let pq = StreamColourState(selection: pqSelection(planeBitDepth: 10), planeBitDepth: 10, hdrEnabled: true, realityKit: realityKit)
-            expect(pq.hdrPQ && !pq.pqRefused && pq.explicitPlanes, "PQ on explicit 10-bit planes takes the HDR path (realityKit \(realityKit))")
-            expectEqual(pq.gamutToOutput, toP3, "PQ gamut BT.2020 -> P3 (realityKit \(realityKit))")
-            // The decoder ignored the explicit request (private packed format, or 8-bit planes): HDR refused for the
-            // stream, which then takes exactly the HDR-off path.
-            for planes in [nil, 8] as [Int?] {
-                let refused = StreamColourState(selection: pqSelection(planeBitDepth: planes), planeBitDepth: planes, hdrEnabled: true, realityKit: realityKit)
-                let off = StreamColourState(selection: pqSelection(planeBitDepth: planes), planeBitDepth: planes, hdrEnabled: false, realityKit: realityKit)
-                expect(refused.pqRefused && !refused.hdrPQ && !refused.explicitPlanes, "PQ on planes \(String(describing: planes)) refused (realityKit \(realityKit))")
-                expectEqual(refused.gamutToOutput, off.gamutToOutput, "refused = HDR-off gamut")
-                expect(!off.pqRefused && !off.hdrPQ, "HDR off: never refused, never HDR")
+            for hdr in [true, false] {
+                let stream = context(hdr: hdr, headroom: 3)
+                for (formats, bits) in [(tenBit, 10), (eightBit, 8)] {
+                    for f in formats {
+                        let s = pqState(f, stream: stream, realityKit: realityKit)
+                        expectEqual(s.binding, .explicitPlanes(bitDepth: bits), "PQ \(ColourPipeline.fourCC(f)) bound as raw \(bits)-bit planes (hdr \(hdr))")
+                        expect(s.hdrPQ && !s.dropFrames, "PQ \(ColourPipeline.fourCC(f)) runs the PQ conversion (hdr \(hdr), realityKit \(realityKit))")
+                        expectEqual(s.selection.planeBitDepth, bits, "yuvToRGB quantised for \(bits)-bit planes")
+                        expectEqual(s.gamutToOutput, toP3, "PQ gamut BT.2020 -> P3")
+                        expectEqual(s.lowPrecisionPQ, bits == 8, "8-bit PQ precision warning flag")
+                        // HDR setting off: still PQ, rolled off into SDR range (headroom 1) instead of the EDR headroom.
+                        expectEqual(s.headroom, hdr ? 3 : 1, "headroom from the stream's captured setting")
+                    }
+                }
+                for f in dropped {
+                    let s = pqState(f, stream: stream, realityKit: realityKit)
+                    expectEqual(s.binding, .drop, "PQ on \(ColourPipeline.fourCC(f)): frames dropped, never drawn through another path")
+                    expect(s.dropFrames && !s.hdrPQ, "dropped state flags")
+                }
             }
-            // HDR off on a PQ stream: the previous path, no gamut conversion added.
-            let off = StreamColourState(selection: pqSelection(planeBitDepth: 10), planeBitDepth: 10, hdrEnabled: false, realityKit: realityKit)
-            expectEqual(off.gamutToOutput, matrix_identity_float3x3, "HDR off, PQ stream: identity gamut as before (realityKit \(realityKit))")
-            expect(!off.explicitPlanes, "HDR off: decoder's default planes")
         }
-        // SDR: Metal keeps the ColourOutput gamut, RealityKit keeps identity (decision 63c (1): unchanged SDR).
-        let sdrP3 = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "ITU_R_709_2", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 8, planeBitDepth: 8, output: .p3)
-        for hdr in [false, true] {
-            let metal = StreamColourState(selection: sdrP3, planeBitDepth: 8, hdrEnabled: hdr, realityKit: false)
-            let rk = StreamColourState(selection: sdrP3, planeBitDepth: 8, hdrEnabled: hdr, realityKit: true)
-            expectEqual(metal.gamutToOutput, sdrP3.sourceToOutput, "SDR Metal gamut = ColourOutput conversion (HDR setting \(hdr))")
-            expectEqual(rk.gamutToOutput, matrix_identity_float3x3, "SDR RealityKit gamut identity, as before (HDR setting \(hdr))")
-            expect(!metal.hdrPQ && !metal.pqRefused && !rk.hdrPQ && !rk.pqRefused, "SDR never HDR or refused")
-            expectEqual(metal.yuvToRGB, sdrP3.yuvToRGB, "yuvToRGB from the selection")
+        // SDR: the previous binding and constants exactly, whatever the HDR setting: Metal keeps the ColourOutput gamut,
+        // RealityKit identity; decoder-default planes (private formats on device).
+        for output in [ColourOutput.srgb, .p3] {
+            let sdr = ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "ITU_R_709_2", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 8, planeBitDepth: 8, output: output)
+            for hdr in [false, true] {
+                let metal = StreamColourState(selection: sdr, planeBitDepth: 8, stream: context(hdr: hdr, output: output), realityKit: false)
+                let rk = StreamColourState(selection: sdr, planeBitDepth: 8, stream: context(hdr: hdr, output: output), realityKit: true)
+                expectEqual(metal.binding, .decoderDefault, "SDR keeps the decoder-default binding")
+                expectEqual(metal.gamutToOutput, sdr.sourceToOutput, "SDR Metal gamut = ColourOutput conversion")
+                expectEqual(rk.gamutToOutput, matrix_identity_float3x3, "SDR RealityKit gamut identity, as before")
+                expect(!metal.hdrPQ && !metal.dropFrames && !metal.lowPrecisionPQ, "SDR never PQ or dropped")
+                expectEqual(metal.yuvToRGB, sdr.yuvToRGB, "yuvToRGB from the selection")
+                expectEqual(metal.encodingGamma, 1, "encoding gamma from the stream context")
+            }
         }
     }
 
-    // Decision 63c (4): pipelines are published with the colour state they were built for, and used only for it.
+    // Render level (decision 63e tests): an 8-bit PQ frame takes the PQ path. The shader mirror on the r8Unorm sample
+    // of 8-bit limited codes gives the PQ EDR goldens (independent: double-precision ST 2084 for the rounded codes), far
+    // from what the SDR/sRGB path would show.
+    static func testEightBitPQRendersPQ() {
+        let s = pqState(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, stream: context(hdr: true, headroom: 100))
+        expectEqual(s.binding, .explicitPlanes(bitDepth: 8), "8-bit PQ binds raw planes")
+        for (code, edr, sdrPath) in [(127, 0.486612, 0.220436), (143, 0.992562, 0.295598), (181, 4.998830, 0.527872)] as [(Int, Double, Double)] {
+            let sample = simd_float4(Float(code) / 255, 128.0 / 255, 128.0 / 255, 1)
+            let out = HDRPipeline.shade(sample: sample, colour: s)
+            for c in 0..<3 {
+                expect(nearRel(Double(out[c]), edr, 0.003), "8-bit PQ code \(code) -> EDR \(edr), got \(out)")
+                expect(abs(Double(out[c]) - sdrPath) > 0.1, "8-bit PQ code \(code) is not the SDR-path value \(sdrPath)")
+            }
+        }
+    }
+
+    // Decision 63e (2): the HDR setting is captured once at STREAMING_STARTED; toggling it mid-stream does not change
+    // the running stream's state, the next stream picks it up.
+    static func testSettingCapturedPerStream() {
+        let gate = VideoStreamGate<String>()
+        var uiSetting = true
+        let first = gate.streamStarted(hdrEnabled: uiSetting, headroom: 2, output: .srgb, encodingGamma: 1, payload: "fov1")
+        let frameA = pqState(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, stream: gate.currentStream!)
+        uiSetting = false
+        let frameB = pqState(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, stream: gate.currentStream!)
+        expect(gate.currentStream == first && first.hdrEnabled, "the running stream keeps HDR on after the toggle")
+        expect(frameA == frameB && frameB.headroom == 2, "frames after the toggle keep the stream's state and pipelines key")
+        let second = gate.streamStarted(hdrEnabled: uiSetting, headroom: 2, output: .srgb, encodingGamma: 1, payload: "fov2")
+        expect(second.generation == first.generation + 1 && !second.hdrEnabled, "the next stream captures the new setting")
+        expectEqual(pqState(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, stream: second).headroom, 1, "HDR off: SDR-range roll-off")
+        gate.streamStopped()
+        expect(gate.currentStream == nil, "stopped: no stream")
+    }
+
+    static func sdrState(_ stream: StreamContext, output: ColourOutput = .srgb) -> StreamColourState {
+        StreamColourState(selection: ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "ITU_R_709_2", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 8, planeBitDepth: 8, output: output),
+                          planeBitDepth: 8, stream: stream, realityKit: false)
+    }
+
+    // Decision 63c (4) / 63e (3): pipelines are published with the colour state and generation they were built for,
+    // and used only for exactly that state on the current generation.
     static func testPipelineSlot() {
-        let srgb = StreamColourState(selection: ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "ITU_R_709_2", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 8, planeBitDepth: 8, output: .srgb), planeBitDepth: 8, hdrEnabled: false, realityKit: false)
-        let p3 = StreamColourState(selection: ColourPipeline.select(primaries: "ITU_R_709_2", transfer: "ITU_R_709_2", matrix: "ITU_R_709_2", fullRange: false, bitDepth: 8, planeBitDepth: 8, output: .p3), planeBitDepth: 8, hdrEnabled: false, realityKit: false)
+        let gate = VideoStreamGate<String>()
+        let slot = VideoPipelineSlot<String, String>(gate: gate)
+        let stream = gate.streamStarted(hdrEnabled: false, headroom: 2, output: .srgb, encodingGamma: 1, payload: "fov1")
+        let srgb = sdrState(stream)
+        let p3 = sdrState(stream, output: .p3)
         expect(srgb != p3 && srgb.yuvToRGB == p3.yuvToRGB && srgb.hdrPQ == p3.hdrPQ, "states differ only in gamut")
-        let slot = VideoPipelineSlot<String>()
-        expect(slot.requestedColour == nil && slot.pipelines(for: srgb) == nil, "nothing requested or published at start")
+        expect(slot.buildInputs() == nil && slot.pipelines(for: srgb) == nil, "nothing requested or published at start")
         expect(slot.request(srgb), "first request rebuilds")
         expect(!slot.request(srgb), "same state: no rebuild")
         expect(slot.pipelines(for: srgb) == nil, "not drawn before its pipelines are published")
+        let inputs = slot.buildInputs()
+        expect(inputs?.colour == srgb && inputs?.payload == "fov1", "build inputs: requested state with its own stream's foveation")
         expect(slot.publish("A", builtFor: srgb), "build for the requested state published")
         expectEqual(slot.pipelines(for: srgb), "A", "published pipelines for their own state")
         expect(slot.request(p3), "gamut-only change rebuilds")
         expect(slot.pipelines(for: p3) == nil, "the P3 frame never draws with the sRGB pipelines")
         expect(!slot.publish("stale", builtFor: srgb), "a build for a state no longer requested is dropped")
-        expect(slot.pipelines(for: p3) == nil, "still nothing for P3")
         expect(slot.publish("B", builtFor: p3), "P3 build published")
         expectEqual(slot.pipelines(for: p3), "B", "P3 pipelines")
         expect(slot.pipelines(for: srgb) == nil, "an old-state frame never draws with the new pipelines")
-        expectEqual(slot.requestedColour, p3, "requested state")
+        // A build that snapshotted generation 1 and finishes after a reconnect is discarded, and its inputs are never
+        // mixed with generation 2's (foveation, gamma, colour come from one snapshot).
+        let old = slot.buildInputs()!
+        let next = gate.streamStarted(hdrEnabled: true, headroom: 2, output: .srgb, encodingGamma: 2.2, payload: "fov2")
+        expect(!slot.publish("old", builtFor: old.colour), "stale-generation build discarded")
+        expect(slot.pipelines(for: p3) == nil, "generation-1 frames are not drawn after the reconnect")
+        expect(slot.buildInputs() == nil, "no build inputs until the new stream requests its state")
+        expect(!slot.request(p3), "a stale-generation frame cannot request a build")
+        let fresh = sdrState(next)
+        expect(slot.request(fresh), "new stream requests its own state")
+        let newInputs = slot.buildInputs()
+        expect(newInputs?.colour == fresh && newInputs?.payload == "fov2" && newInputs?.colour.encodingGamma == 2.2, "generation-2 inputs only")
+        expect(slot.publish("C", builtFor: fresh), "generation-2 build published")
+        gate.streamStopped()
+        expect(slot.pipelines(for: fresh) == nil && !slot.publish("C", builtFor: fresh), "stopped: nothing drawn or published")
+    }
+
+    // Decision 63e tests: reconnect vs build publish, both lock orders forced with the gate's seams (no sleeps).
+    static func testReconnectPublishInterleaving() {
+        for publishFirst in [true, false] {
+            let order = LockOrder()
+            let gate = VideoStreamGate<String>(beforeLock: { order.beforeLock($0) }, inLock: { order.inLock($0) })
+            let slot = VideoPipelineSlot<String, String>(gate: gate)
+            let first = gate.streamStarted(hdrEnabled: true, headroom: 2, output: .srgb, encodingGamma: 1, payload: "fov1")
+            let colour = pqState(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, stream: first)
+            _ = slot.request(colour)
+            let inputs = slot.buildInputs()!
+            var published: Bool?
+            var second: StreamContext?
+            let publish = { published = slot.publish("P", builtFor: inputs.colour) }
+            let reconnect = { second = gate.streamStarted(hdrEnabled: true, headroom: 2, output: .srgb, encodingGamma: 1, payload: "fov2") }
+            let forced = publishFirst
+                ? order.run(holderEntry: "publish", publish, waiterEntry: "streamStarted", reconnect)
+                : order.run(holderEntry: "streamStarted", reconnect, waiterEntry: "publish", publish)
+            expect(forced, "lock order forced (publishFirst \(publishFirst))")
+            expectEqual(published, publishFirst, "publish succeeds only before the reconnect (publishFirst \(publishFirst))")
+            expect(slot.pipelines(for: colour) == nil, "after the reconnect generation-1 pipelines are never used (publishFirst \(publishFirst))")
+            if let second {
+                let next = pqState(kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, stream: second)
+                expect(slot.request(next) && slot.pipelines(for: next) == nil, "the new stream builds its own pipelines (publishFirst \(publishFirst))")
+                expectEqual(slot.buildInputs()?.payload, "fov2", "new build snapshots the new stream's foveation")
+            } else {
+                expect(false, "reconnect ran")
+            }
+        }
     }
 
     // SDR: shade() is exactly sRGB EOTF -> encoding gamma -> gamut matrix, as before HDR (no roll-off, any headroom).
