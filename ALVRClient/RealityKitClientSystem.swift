@@ -1341,19 +1341,22 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             copyTextureToTexture(commandBuffer, texture, drawable, vrrBuffer)
         }
 
+        // The frame's own vsync prediction; the completion handler below re-predicts for the submit report.
+        let predictedVsyncNs = UInt64(max(frame.vsyncTime, 0) * Double(NSEC_PER_SEC))
         commandBuffer.addCompletedHandler { (_ commandBuffer)-> Swift.Void in
             if EventHandler.shared.alvrInitialized && EventHandler.shared.lastSubmittedTimestamp != timestamp {
                 vsyncTime = self.visionProVsyncPrediction.nextFrameTime
-                
+
                 let currentTimeNs = UInt64(CACurrentMediaTime() * Double(NSEC_PER_SEC))
                 let vsyncTimeNs = UInt64(vsyncTime * Double(NSEC_PER_SEC))
+                StreamTelemetry.shared.recordSubmitTiming(vsyncNs: predictedVsyncNs, completionNs: currentTimeNs)
                 //print("Finished:", queuedFrame!.timestamp)
                 //print((vsyncTime - CACurrentMediaTime()) * 1000.0)
                 //print("blit", (CACurrentMediaTime() - submitTime) * 1000.0)
                 let lastRenderTime = (CACurrentMediaTime() - startUpdateTime) + self.visionProVsyncPrediction.vsyncDelta
                 self.visionProVsyncPrediction.rkAvgRenderTime = (self.visionProVsyncPrediction.rkAvgRenderTime + lastRenderTime) * 0.5
                 Task(priority: .high) {
-                    alvr_report_submit(timestamp, vsyncTimeNs &- currentTimeNs)
+                    alvr_report_submit(timestamp, FramePacing.submitQueueNs(vsyncNs: vsyncTimeNs, completionNs: currentTimeNs))
                 }
                
                 //print("blit roundtrip", CACurrentMediaTime() - self.lastUpdate, timestamp)
