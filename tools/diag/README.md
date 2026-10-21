@@ -45,6 +45,85 @@ The manifest schedule records start/duration, test/reference nits and limited
 it decodes limited P010, checks interior grids on both halves and the gap on
 every frame (±3 codes for HEVC), excluding labels and boundary ringing.
 
+## PQ grid
+
+Measure the HDR **video** path using 25 seamless square cells on black, in the
+same snake reading order as the Metal EDR grid: A1→A5, B5→B1, C1→C5,
+D5→D1, E1→E5. Row letters A–E sit left of the grid; column numbers 1–5
+sit above it. Labels are neutral 100-nit grey, outside every cell.
+
+```sh
+export CLANG_MODULE_CACHE_PATH="$PWD/build/clang-module-cache"
+mkdir -p build/tmp
+export TMPDIR="$PWD/build/tmp"
+for area in 1 10 50; do
+    swift tools/diag/make-pq-clips.swift --kind grid --area "$area" --range coarse --out "build/pq-grid/$area"
+    swift tools/diag/check-clips.swift "build/pq-grid/$area/pq-manifest.json"
+done
+swift tools/diag/make-pq-clips.swift --kind grid --area 10 --range fine --lo 600 --hi 2000 --out build/pq-grid/fine
+```
+
+Each still is 1920×1080, 30 fps, 30 seconds, HEVC Main10, limited-range
+PQ / BT.2020 with neutral chroma. These dimensions/cadence/duration are fixed.
+`--area 1|10|50` selects total cell area as a percentage of the frame (default
+10); labels are excluded from that area. `--range coarse` (default) gives 25
+log-spaced values from 100 to 10000 nits. `--range fine` gives 25 log-spaced
+values from `--lo` to `--hi` (defaults 600 and 2000 nits; require
+0 < lo < hi ≤ 10000). Endpoints are included. Files are named, for example,
+`grid-10-coarse-1920x1080-30.mov` or `grid-10-fine-1920x1080-30.mov`.
+Use separate fresh directories for each run, including different fine bounds.
+
+The continuous grid is exactly centred with cell side
+`sqrt(frameWidth * frameHeight * area / 100) / 5`. Its requested area is exact.
+Each shared boundary rounds to the nearest pixel, preserving seamless tiling;
+raster cell widths/heights can differ by one pixel. The manifest records the
+continuous geometry, actual raster bounds/area, every named cell's source nits
+and limited 10-bit PQ luma code, and label bounds. Thus pixel quantisation is
+explicit rather than silently claiming an exact integer-pixel area. The checker
+independently reconstructs the layout and log sequence, decodes every frame to
+limited P010, and checks an interior lattice in **every cell** (±3 codes), plus
+the black surround (code 64), excluding labels and boundary ringing.
+
+Push the selected directory using `push-clips.sh`, reload clips in the PQ player,
+and play in a **window** first. Follow the snake from dim to bright and record
+the **first cell that stops getting brighter** relative to its predecessor,
+including its name, manifest nits, area and playback path. Use a fine range to
+bracket that transition. Repeat in **immersive** playback, keeping the viewing
+conditions and apparent video size comparable. If every cell keeps brightening,
+record that the knee lies above the tested range; do not infer a measured knee.
+Compare the video result with the Metal EDR grid separately: decision 65o found
+windowed AVKit brightening through 1000 nits against a 203-nit reference, while
+the Metal layer stopped near 1.45× SDR white. Source PQ nits and perceived
+plateaus do not directly measure panel luminance.
+
+Encoder-free regression tests:
+`sh tests/swift/run-tests.sh GridClip`, `sh tests/swift/run-tests.sh SplitClip`,
+and `sh tests/swift/run-tests.sh ClipEncoding`.
+
+## PQ level match
+
+`level` provides a static cross-path brightness target: one centred 10%-area
+square at the requested source nits, black surround, and the numeric nits label
+in 100-nit grey in a separate black top band. It uses the same Main10 limited
+PQ / BT.2020 encoding, fixed at 1920×1080, 30 fps, **60 seconds**. Continuous
+area and pixel rounding follow the grid convention above.
+
+```sh
+swift tools/diag/make-pq-clips.swift --kind level --nits 203,400,600,800,1000,1500,2000,4000 --out build/pq-grid/levels
+swift tools/diag/check-clips.swift build/pq-grid/levels/pq-manifest.json
+sh tests/swift/run-tests.sh LevelClip
+```
+
+`--nits` accepts one value (default 203) or a comma-separated list, each greater
+than zero and at most 10000. Filenames are `level-203-1920x1080-30.mov`, etc.
+Each manifest entry records nits/code, continuous and raster patch geometry,
+and label geometry/code. The checker reconstructs these independently and
+checks patch interiors and black surround on every frame at ±3 codes,
+excluding the label and boundary ringing. Select the same level in windowed
+and immersive video playback and compare its apparent brightness with the
+corresponding Metal target, recording both playback path and nits. The label
+names the source luminance; it is not a panel measurement.
+
 JSON manifests contain successful files, dimensions, fps, frame count, actual
 compressed-sample average bitrate, requested bitrate, and the profile/tier/level,
 chroma format and bit depths read from the encoder's actual `hvcC` configuration.
