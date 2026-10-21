@@ -182,6 +182,15 @@ DIAG diag t_ms=31 file_recovered=true dropped_lines=7
         self.assertIn('Knee: no data', self.render(baseline, '\n'.join(sender.splitlines()[:-1])))
         self.assertIn('Knee: no data', self.render(baseline))
 
+    def test_zero_duration_final_update_is_not_lost(self):
+        sender = self.ladder([(0, 2, 50)])
+        lines = (self.sink(1, 5000000, 0, 0) + self.sink(2, 10000000, 0, 0) +
+                 self.sink(2, 10000000, 2, 1, summary=True))
+        out = self.render(lines, sender)
+        self.assertIn('loss_delta=2', out)
+        self.assertIn('reorder_delta=1', out)
+        self.assertIn('Knee: no data', out)
+
     def test_sender_malformed_and_wrong_schema(self):
         sender = self.ladder([(0, 2, 50)])
         out = self.render('', sender + '\ngarbage\n[]\n{"fps": NaN}\n{"mode":"udp","mbps":50}\n')
@@ -230,6 +239,37 @@ DIAG diag t_ms=31 file_recovered=true dropped_lines=7
         self.assertEqual([h[1] for h in headers], list(range(12)))
         self.assertEqual([h[3] for h in headers], [0, 1, 2, 3, 4, 4, 5, 5, 6, 6, 7, 7])
         self.assertEqual(sent_at, [0, 0.25, 0.5, 0.75, 0.75, 0.75, 1, 1, 1.25, 1.25, 1.5, 1.5])
+
+    def test_ladder_send_errors_preserve_sequence_and_json_contract(self):
+        from unittest import mock
+        import contextlib
+        import io
+        ladder_spec = importlib.util.spec_from_file_location('netprobe_ladder', SCRIPT.with_name('netprobe-ladder.py'))
+        ladder = importlib.util.module_from_spec(ladder_spec)
+        ladder_spec.loader.exec_module(ladder)
+        clock, attempted = [0.0], []
+        sock = mock.MagicMock()
+        sock.__enter__.return_value = sock
+
+        def failed_send(data):
+            attempted.append(data)
+            raise OSError('synthetic send failure')
+
+        sock.send.side_effect = failed_send
+        output = io.StringIO()
+        with mock.patch.object(ladder.socket, 'socket', return_value=sock),                 mock.patch.object(ladder.time, 'monotonic', side_effect=lambda: clock[0]),                 mock.patch.object(ladder.time, 'monotonic_ns', return_value=0),                 mock.patch.object(ladder.time, 'time', return_value=123),                 mock.patch.object(ladder.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)),                 contextlib.redirect_stdout(output):
+            ladder.main(['headset', '9944', '0.032,0.064', '1', '4', '1200'])
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([row['send_errors'] for row in rows[1:-1]], [4, 8])
+        self.assertTrue(all(row['sent_mbps'] == 0 for row in rows[1:-1]))
+        self.assertEqual(rows[-1]['packets'], 12)
+        self.assertEqual([ladder.np.HEADER.unpack(data[:28])[1] for data in attempted], list(range(12)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'sender.jsonl'
+            path.write_text(output.getvalue())
+            parsed, bad = report.read_sender(path)
+        self.assertEqual(bad, [])
+        self.assertEqual(len(parsed), 4)
 
     def test_decode_no_false_pass_and_aggregate_sessions(self):
         template = ('DIAG decode t_ms=1 clip=a sessions=2 mode=paced width=10 height=20 '

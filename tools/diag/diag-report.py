@@ -82,22 +82,60 @@ def read_logs(directory):
     return records, malformed, errors
 
 
+def reject_json_constant(value):
+    raise ValueError('nonfinite JSON number: ' + value)
+
+
 def read_sender(path):
+    """Read netprobe-ladder's metadata -> timed steps -> footer contract."""
     records, malformed = [], []
     if path is None:
         return records, malformed
+    stage, previous_end, frames = 'metadata', 0.0, 0
     with path.open('rb') as stream:
         for index, raw in enumerate(stream, 1):
             source = '{}:{}'.format(path.name, index)
             try:
-                obj = json.loads(raw.decode('utf-8'), parse_constant=lambda x: None)
-                if not isinstance(obj, dict) or obj.get('mode') not in ('udp', 'tcp'):
-                    raise ValueError('sender object requires mode=udp/tcp')
-                for key in ('requested_mbps', 'mbps', 'fps', 'packets', 'payload_mbps'):
-                    if key in obj and (isinstance(obj[key], bool) or number(obj[key]) is None):
-                        raise ValueError('invalid sender number')
-                records.append(dict(fields=obj, source=source))
-            except (ValueError, UnicodeError):
+                obj = json.loads(raw.decode('utf-8'), parse_constant=reject_json_constant)
+                if not isinstance(obj, dict):
+                    raise ValueError('expected a JSON object')
+                if stage == 'metadata':
+                    kind = 'metadata'
+                    numeric = ('start_wall', 'port', 'fps', 'packet_size')
+                    integers = ('port', 'fps', 'packet_size')
+                    if not isinstance(obj.get('host'), str) or not obj['host']:
+                        raise ValueError('metadata requires host')
+                elif stage == 'steps' and 't_start_s' in obj:
+                    kind = 'step'
+                    numeric = ('t_start_s', 'mbps_req', 'sent_mbps', 'late_frames',
+                               'send_errors', 'frames', 'elapsed_s')
+                    integers = ('late_frames', 'send_errors', 'frames')
+                elif stage == 'steps' and records[-1]['kind'] == 'step':
+                    kind = 'footer'
+                    numeric = ('total_s', 'packets', 'frames')
+                    integers = ('packets', 'frames')
+                else:
+                    raise ValueError('unexpected sender record')
+                for key in numeric:
+                    if not isinstance(obj.get(key), (int, float)) or isinstance(obj[key], bool) or number(obj[key]) is None or obj[key] < 0:
+                        raise ValueError('missing or invalid number')
+                if any(not isinstance(obj[key], int) for key in integers):
+                    raise ValueError('expected integer count')
+                if kind == 'metadata':
+                    if not 1 <= obj['port'] <= 65535 or obj['fps'] <= 0 or not 28 <= obj['packet_size'] <= 65507:
+                        raise ValueError('invalid metadata')
+                    stage = 'steps'
+                elif kind == 'step':
+                    if obj['mbps_req'] <= 0 or obj['elapsed_s'] <= 0 or obj['frames'] <= 0 or obj['t_start_s'] < previous_end - 0.002:
+                        raise ValueError('invalid or overlapping step')
+                    previous_end = obj['t_start_s'] + obj['elapsed_s']
+                    frames += obj['frames']
+                else:
+                    if obj['total_s'] < previous_end - 0.002 or obj['frames'] != frames:
+                        raise ValueError('footer disagrees with steps')
+                    stage = 'finished'
+                records.append(dict(fields=obj, source=source, kind=kind))
+            except (ValueError, UnicodeError, TypeError):
                 malformed.append(source)
     return records, malformed
 
@@ -162,72 +200,152 @@ def network_runs(records):
     return runs
 
 
+# All three clocks in these logs are unrelated. active_seconds is the sink's
+# first-to-last receipt duration; it removes time spent listening before receipt.
+# JSON times are rounded to milliseconds on both hosts. This tolerance only
+# accommodates that rounding; it is not a network latency correction.
+TIME_EPSILON = 0.002
+COUNTERS = ('bytes', 'loss', 'reorder', 'duplicates', 'stale', 'invalid',
+            'foreign', 'frame_complete', 'hist_overflow')
+
+
+def network_intervals(run):
+    """Difference cumulative counters on the first-receipt time axis."""
+    # Percentiles/counters may change without a visible increase in the rounded
+    # active_seconds (e.g. a late loss repair in the final summary). Keep the
+    # latest snapshot at that endpoint before differencing, including its source.
+    snapshots = []
+    for record in run:
+        end = number(record['fields'].get('active_seconds'))
+        if snapshots and end is not None and end == number(snapshots[-1]['fields'].get('active_seconds')):
+            snapshots[-1] = record
+        else:
+            snapshots.append(record)
+    intervals, previous = [], None
+    for record in snapshots:
+        f = record['fields']
+        end = number(f.get('active_seconds'))
+        start = number(previous['fields'].get('active_seconds')) if previous else 0.0
+        if end is not None and start is not None and end > start:
+            deltas = {}
+            for key in COUNTERS:
+                before = number(previous['fields'].get(key)) if previous else 0
+                after = number(f.get(key))
+                value = after - before if before is not None and after is not None else None
+                # Loss alone can decrease when late packets repair old gaps.
+                deltas[key] = value if value is None or value >= 0 or key == 'loss' else None
+            intervals.append(dict(start=start, end=end, deltas=deltas, record=record,
+                                  baseline=previous['source'] if previous else 'run origin (zero counters)'))
+        previous = record
+    return intervals
+
+
+def knee_passes(loss_pct, completion_p99_ms, fps):
+    """Both independent measured thresholds must be available and pass."""
+    return (loss_pct is not None and completion_p99_ms is not None and fps is not None and
+            fps > 0 and 0 <= loss_pct <= 0.1 and 0 <= completion_p99_ms <= 1000 / fps)
+
+
 def network_report(records, senders, alignment_ok=True):
     lines = [
-        'Sender JSON objects align with sink runs by step order, including TCP. '
-        'Each object uses mode, requested_mbps (or mbps), fps, packets and payload_mbps; '
-        'plain netprobe-send.py summaries lack requested rate and fps.', '',
-        'Completion p99 uses spread_p99_ms (first-to-last receipt of complete frames). '
-        'Loss % = sink loss / sender packets × 100 for final summaries only; '
-        'trailing loss is unknown. Interval loss/reorder/distributions are cumulative. '
-        'A passing knee is an observed bound, not proof that trailing packets arrived.', '',
+        'One continuous sender ladder corresponds to one UDP sink run. '
+        'Step bounds are t_start_s .. t_start_s + elapsed_s, relative to the first sender step. '
+        'Sink interval endpoints use active_seconds (first-to-last receipt), excluding listener idle time. '
+        'This aligns relative receipt times, not host wall clocks or absolute one-way latency.', '',
+        'Received rates and counter deltas below cover only wholly contained receipt intervals; '
+        'coverage_s and whole_step state their scope. Boundary-crossing intervals are not prorated. '
+        'Counter differences can include repairs of loss from earlier steps. '
+        'Per-step jitter and cumulative p99 cannot be obtained by subtracting run snapshots. '
+        'Loss percent requires a matching packet denominator; the footer only supplies a run total. '
+        'Trailing loss remains unknown.', '',
     ]
-    if not alignment_ok:
-        lines += ['sender alignment disabled: malformed JSON lines may hide steps; no knee inferred.', '']
-    passing = []
+    metadata = next((r for r in senders if r['kind'] == 'metadata'), None)
+    steps = [r for r in senders if r['kind'] == 'step']
+    footer = next((r for r in senders if r['kind'] == 'footer'), None)
     runs = network_runs(records)
-    for index, run in enumerate(runs):
-        sender = senders[index] if index < len(senders) else None
-        sf = sender['fields'] if sender else {}
-        last = run[-1]['fields']
-        aligned = alignment_ok and (not sender or sf.get('mode') == last.get('mode'))
-        requested = number(sf.get('requested_mbps', sf.get('mbps'))) if aligned else None
-        fps = number(sf.get('fps')) if aligned else None
-        period = 1000 / fps if fps is not None and fps > 0 else None
-        final = last.get('summary') == 'true'
-        packets = number(sf.get('packets')) if aligned else None
-        loss = number(last.get('loss'))
-        loss_pct = 100 * loss / packets if final and packets is not None and packets > 0 and loss is not None and 0 <= loss <= packets else None
-        complete = number(last.get('frame_complete'))
-        tail = number(last.get('spread_p99_ms', last.get('burst_tail_p99_ms')))
-        valid = (last.get('mode') == 'udp' and final and aligned and
-                 requested is not None and requested > 0 and period is not None and
-                 loss_pct is not None and tail is not None and tail >= 0 and
-                 complete is not None and complete > 0 and not sf.get('error') and
-                 number(last.get('hist_overflow', '0')) == 0)
-        passed = valid and loss_pct <= 0.1 and tail <= period
+    udp_runs = [run for run in runs if run[0]['fields'].get('mode') == 'udp']
+    aligned = alignment_ok and metadata is not None and len(udp_runs) == 1
+    if not alignment_ok:
+        lines += ['sender alignment disabled: malformed sender lines.', '']
+    elif metadata is not None and len(udp_runs) != 1:
+        lines += ['sender alignment disabled: expected exactly one UDP sink run; found {}.'.format(len(udp_runs)), '']
+    run = udp_runs[0] if aligned else []
+    intervals = network_intervals(run)
+    fps = number(metadata['fields'].get('fps')) if metadata else None
+    origin = number(steps[0]['fields'].get('t_start_s')) if steps else 0
+    passing = []
+    for index, step in enumerate(steps, 1):
+        sf = step['fields']
+        start = sf['t_start_s'] - origin
+        end = start + sf['elapsed_s']
+        contained = [window for window in intervals
+                     if window['start'] >= start - TIME_EPSILON and window['end'] <= end + TIME_EPSILON]
+        whole = bool(contained and abs(contained[0]['start'] - start) <= TIME_EPSILON and
+                     abs(contained[-1]['end'] - end) <= TIME_EPSILON and
+                     all(abs(a['end'] - b['start']) <= TIME_EPSILON for a, b in zip(contained, contained[1:])))
+
+        def delta(key):
+            values = [window['deltas'][key] for window in contained]
+            return sum(values) if values and all(value is not None for value in values) else None
+
+        byte_count, loss, reorder = delta('bytes'), delta('loss'), delta('reorder')
+        duration = sum(w['end'] - w['start'] for w in contained)
+        rate = byte_count * 8 / duration / 1e6 if byte_count is not None and byte_count >= 0 and duration > 0 else None
+        # A prefix from run origin has the same distribution scope as the first
+        # step. Later steps' percentiles cannot be recovered from cumulative p99s.
+        last = contained[-1]['record']['fields'] if contained else {}
+        prefix = whole and abs(start) <= TIME_EPSILON
+        completed = delta('frame_complete')
+        tail = number(last.get('spread_p99_ms', last.get('burst_tail_p99_ms'))) if prefix else None
+        if completed is None or completed <= 0 or delta('hist_overflow') != 0:
+            tail = None
+        packets = number(footer['fields'].get('packets')) if footer and len(steps) == 1 and whole else None
+        loss_pct = 100 * loss / packets if packets is not None and packets > 0 and loss is not None and 0 <= loss <= packets else None
+        final = bool(run and run[-1]['fields'].get('summary') == 'true')
+        eligible = whole and final and footer is not None and sf['send_errors'] == 0 and byte_count is not None and byte_count > 0
+        passed = eligible and knee_passes(loss_pct, tail, fps)
         if passed:
-            passing.append((requested, index + 1))
-        status = 'PASS' if passed else ('FAIL' if valid else NO)
-        lines += ['### Step {} ({})'.format(index + 1, cell(last.get('mode'))), '',
-                  'requested={} Mb/s; received={} Mb/s; loss={}{}; '
-                  'frame_period_ms={}; completion_p99_ms={}; knee eligibility={}.'.format(
-                      fmt(requested), fmt(number(last.get('mbps'))), fmt(loss_pct),
-                      '%' if loss_pct is not None else '', fmt(period), fmt(tail), status), '']
-        if not final:
-            lines += ['incomplete run: no final summary; excluded from knee.', '']
-        if sender and sf.get('mode') != last.get('mode'):
-            lines += ['sender/sink mode mismatch; no aligned sender measurements.', '']
-        if sender:
-            lines += table([dict(sf, source=sender['source'])], ['source'] + list(sf)) + ['']
-        lines += measurements(run, ('mode', 'mbps', 'loss', 'reorder', 'jitter_ms', 'spread_p99_ms')) + ['']
+            passing.append((sf['mbps_req'], index))
+        coverage = '{}..{}'.format(fmt(contained[0]['start']), fmt(contained[-1]['end'])) if contained else NO
+        lines += ['### Step {} (UDP ladder)'.format(index), '',
+                  'Sources: ' + ', '.join(map(cell, [step['source']] + [w['record']['source'] for w in contained])), '',
+                  'time_s={}..{}; requested={} Mb/s; sent={} Mb/s; received={} Mb/s; '
+                  'coverage_s={}; whole_step={}; loss_delta={}; reorder_delta={}; loss_pct={}; '
+                  'jitter_ms=no data; completion_p99_ms={}; frame_period_ms={}; knee eligibility={}.'.format(
+                      fmt(start), fmt(end), fmt(sf['mbps_req']), fmt(sf['sent_mbps']), fmt(rate),
+                      coverage, str(whole).lower(), fmt(loss), fmt(reorder), fmt(loss_pct), fmt(tail),
+                      fmt(1000 / fps if fps else None), 'PASS' if passed else ('FAIL' if eligible and loss_pct is not None and tail is not None else NO)), '']
+        window_rows = []
+        for window in contained:
+            row = dict(window['deltas'], start_s=fmt(window['start']), end_s=fmt(window['end']),
+                       source=window['record']['source'], baseline=window['baseline'])
+            window_rows.append(row)
+        lines += table(window_rows, ('start_s', 'end_s') + COUNTERS + ('source', 'baseline')) + ['']
+    boundaries = [sf['fields']['t_start_s'] - origin for sf in steps[1:]]
+    crossing = []
+    for window in intervals:
+        if any(window['start'] + TIME_EPSILON < bound < window['end'] - TIME_EPSILON for bound in boundaries):
+            crossing.append(dict(source=window['record']['source'], start_s=fmt(window['start']),
+                                 end_s=fmt(window['end']), note='crosses step boundary'))
+    if crossing:
+        lines += table(crossing, ('source', 'start_s', 'end_s', 'note')) + ['']
     best = max(passing) if passing else None
     lines += ['Knee: {}{}'.format(fmt(best[0]) + ' Mb/s' if best else NO,
-                                  ' (step {})'.format(best[1]) if best else ''), '',
-              'Unmatched sender steps: {}'.format(max(0, len(senders) - len(runs))), '']
-    # Retain unpaired sender numbers and sink errors too.
-    for sender in senders[len(runs):]:
-        lines += table([dict(sender['fields'], source=sender['source'])],
-                       ['source'] + list(sender['fields'])) + ['']
-    errors = [r for r in records if 'mbps' not in r['fields']]
-    if errors:
-        lines += measurements(errors) + ['']
-    if not records:
-        lines += ['TCP bulk throughput: no data', '']
-    elif not any(r['fields'].get('mode') == 'tcp' for r in records):
-        lines += ['TCP bulk throughput: no data', '']
-    else:
-        lines += ['TCP bulk throughput is the recorded mbps in TCP steps above.', '']
+                                  ' (step {})'.format(best[1]) if best else ''), '']
+    if len(steps) > 1:
+        lines += ['Per-step packet denominators: no data (footer packets cover the entire ladder). '
+                  'Later-step completion p99: no data (only cumulative distributions are logged).', '']
+    if metadata and not footer:
+        lines += ['Sender footer: no data (incomplete ladder).', '']
+    if run and run[-1]['fields'].get('summary') != 'true':
+        lines += ['Sink final summary: no data (incomplete run).', '']
+    lines += ['Sender metadata, steps and footer (original fields):', '']
+    for sender in senders:
+        lines += table([dict(sender['fields'], source=sender['source'])], ['source'] + list(sender['fields'])) + ['']
+    lines += ['Sink run snapshots (original fields; percentiles and jitter are cumulative run state):', '']
+    lines += measurements(records) + ['']
+    tcp = [r for r in records if r['fields'].get('mode') == 'tcp' and 'mbps' in r['fields']]
+    lines += ['TCP bulk throughput (recorded mbps):', ''] + measurements(tcp, ('mbps', 'summary')) + ['']
     return lines
 
 
@@ -425,7 +543,7 @@ def generate(directory, sender_path=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path, help='directory of pulled diag-*.log files')
-    parser.add_argument('--sender-log', type=Path, help='optional sender ladder JSON lines, one object per sink run')
+    parser.add_argument('--sender-log', type=Path, help='netprobe-ladder.py JSON lines: metadata, timed steps, footer')
     parser.add_argument('-o', '--output', type=Path, help='write Markdown here (default: stdout)')
     args = parser.parse_args()
     if not args.directory.is_dir():
