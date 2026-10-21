@@ -6,7 +6,7 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.alvr.client.ALVR</string>
+		<string>$(ALVR_APP_GROUP)</string>
 	</array>
 </dict>
 </plist>
