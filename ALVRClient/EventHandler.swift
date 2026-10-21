@@ -875,7 +875,7 @@ class EventHandler: ObservableObject {
                     sendBootstrapTrackingIfNeeded()
                 }
                 Settings.clearSettingsCache()
-                // Declare this stream's interaction profile before any controller input goes out.
+                // Choose this stream's interaction profile once (fixed for the stream), declare it, then open the gate.
                 WorldTracker.inputGate.streamStarted(profile: WorldTracker.shared.currentInputProfile())
             case ALVR_EVENT_STREAMING_STOPPED.rawValue:
                 print("streaming stopped")

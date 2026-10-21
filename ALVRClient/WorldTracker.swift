@@ -323,7 +323,7 @@ class WorldTracker {
         inputGate.send(pathId, value)
     }
 
-    // The profile to declare for the connected controllers and the emulation mode.
+    // The profile to declare at STREAMING_STARTED for the connected controllers and the emulation mode.
     func currentInputProfile() -> ControllerInputProfile {
         let psvr2Connected = GCController.controllers().contains { $0.vendorName?.contains("PlayStation VR") ?? false }
         let emulationMode = Settings.getAlvrSettings()?.headset.controllers?.emulation_mode ?? ""
@@ -599,8 +599,8 @@ class WorldTracker {
                 }
                 if let alvrSettings = Settings.getAlvrSettings() {
                     let emulationMode = alvrSettings.headset.controllers?.emulation_mode ?? ""
-                    // Re-declares only during a stream; a new stream declares in streamStarted.
-                    WorldTracker.inputGate.profileChanged(profile: ControllerInputProfile.active(emulationMode: emulationMode, psvr2Connected: detectedPsvr))
+                    // The stream's profile is fixed at STREAMING_STARTED; a change here is only logged.
+                    WorldTracker.inputGate.controllersChanged(profile:ControllerInputProfile.active(emulationMode: emulationMode, psvr2Connected: detectedPsvr))
                 }
                 for stylus in GCStylus.styli {
                     do {
@@ -2209,10 +2209,12 @@ class WorldTracker {
                     elements.stickClick = buttons["Thumbstick Button"]?.pressedInput.isPressed ?? false
                     elements.stickTouched = buttons["Thumbstick Button"]?.touchedInput?.isTouched ?? false
 
-                    // Undeclared means the gate drops everything anyway.
-                    let profile = WorldTracker.inputGate.declaredProfile ?? .questTouch
-                    WorldTracker.inputGate.send(PSVR2SenseInputs.inputs(isLeft: isLeft, elements: elements, profile: profile, homeButtonReachesApp: homeButtonReachesApp,
-                                                                        includeTrigger: (isLeft ? leftPinchTrigger : rightPinchTrigger) <= 0.0))
+                    // Mapped inside the gate with the stream's own profile, in the same critical section as delivery.
+                    let includeTrigger = (isLeft ? leftPinchTrigger : rightPinchTrigger) <= 0.0
+                    WorldTracker.inputGate.send { profile in
+                        PSVR2SenseInputs.inputs(isLeft: isLeft, elements: elements, profile: profile, homeButtonReachesApp: homeButtonReachesApp,
+                                                includeTrigger: includeTrigger)
+                    }
                 }
             }
             if !isPsvr {
