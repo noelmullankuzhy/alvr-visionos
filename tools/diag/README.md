@@ -21,7 +21,8 @@ limited-range P010 (10-bit 4:2:0), real-time mode, no frame reordering, and a
 one-second maximum keyframe interval. Bitrate is a target, not a strict cap.
 
 PQ defaults: 1920×1080 at 30 fps, a 14-second full-field neutral step sequence,
-then a five-second horizontal gradient from 0 to 10000 nits (linear in nits).
+a 40-second labelled split comparison,
+and a five-second horizontal gradient from 0 to 10000 nits (linear in nits).
 Decision 63 steps are 0.05/0.25/0.5/1/2/4/4.926 × 203 nits, held two seconds each:
 10.15, 50.75, 101.5, 203, 406, 812, 999.978 nits. Limited luma is
 `round(64 + 876 * ST2084(nits/10000))`; neutral chroma is 512. Tags on the pixel
@@ -29,6 +30,20 @@ buffers and encoder are BT.2020 / SMPTE ST 2084 / BT.2020 NCL (VUI 9/16/9).
 These are source luminances, not claims about panel output or headroom. No
 mastering-display or content-light-level SEI metadata is synthesized.
 `--seconds` truncates or extends each clip; the final step is held on extension.
+
+Use `swift tools/diag/make-pq-clips.swift --kind split --out build/pq-split`
+for just `split-1920x1080-30.mov`. The left patch stays at 203 nits
+(BT.2408 HDR reference white); `--reference-nits N` selects another reference.
+The right patch holds 100, 203, 300, 400, 600, 800, 1000, then 203 nits,
+five seconds each. A centred black gap occupies 2% of the width (rounded to
+an even pixel count). Large `REF 203` and test-nits labels occupy a separate
+black top band; digit height is at least 8% of the frame. Labels use 203-nit
+PQ white and do not alter either measurement patch below the band.
+The manifest schedule records start/duration, test/reference nits and limited
+10-bit luma codes for both halves, plus band/gap geometry. Validate with
+`swift tools/diag/check-clips.swift build/pq-split/pq-manifest.json`:
+it decodes limited P010, checks interior grids on both halves and the gap on
+every frame (±3 codes for HEVC), excluding labels and boundary ringing.
 
 JSON manifests contain successful files, dimensions, fps, frame count, actual
 compressed-sample average bitrate, requested bitrate, and the profile/tier/level,
@@ -182,6 +197,16 @@ diagnostics (EDR ramp / PQ player)** under Advanced Settings, without a stream.
 The controls are absent when diagnostics is off. Keep the controls window to
 the side of the measurement area; both diagnostic spaces use mixed immersion.
 Exit a diagnostic before entering a stream. Stop/exit also releases the player.
+
+**PQ split comparison:** Reload clips and select `split-1920x1080-30.mov`.
+Compare the broad patch areas below the labels, using the left `REF 203` as
+the fixed reference. Above 203 on the right, **right brighter than left means
+visible headroom; equal means clipped**. The 203-nit holds should match, and
+100 should be darker. Record the highest distinguishable level in both window
+and immersive playback. These observations assess the playback path; source
+nits do not measure physical panel luminance. With a custom reference, compare
+against that labelled value instead. The player logs zero-based split steps
+0–7 at five-second boundaries, alongside clip, path and current playback time.
 
 **EDR ramp:** unfoveated, per-eye `rgba16Float`, extended-linear Display P3.
 The separate fragment writes neutral values directly, with opaque alpha and

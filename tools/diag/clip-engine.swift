@@ -9,11 +9,6 @@ struct Failure: Error, CustomStringConvertible {
 func check(_ status: OSStatus, _ operation: String) throws {
     if status != noErr { throw Failure("\(operation): OSStatus \(status)") }
 }
-func pqCode(_ nits: Double) -> UInt16 {
-    let p = pow(nits / 10000, 2610.0 / 16384)
-    let pq = pow((3424.0 / 4096 + 2413.0 / 128 * p) / (1 + 2392.0 / 128 * p), 2523.0 / 32)
-    return UInt16((64 + 876 * pq).rounded())
-}
 let levels = [0.05, 0.25, 0.5, 1, 2, 4, 4.926].map { $0 * 203 }
 
 final class Sink {
@@ -51,7 +46,7 @@ final class Sink {
     }
 }
 
-func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int, kind: String, content: String, noiseAmplitude: Double = 1, encoderBitrate: Int? = nil, limited: Bool = false) throws -> [String: Any] {
+func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int, kind: String, content: String, noiseAmplitude: Double = 1, encoderBitrate: Int? = nil, limited: Bool = false, referenceNits: Double = 203) throws -> [String: Any] {
     let writer = try AVAssetWriter(outputURL: out, fileType: .mov)
     let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil)
     input.expectsMediaDataInRealTime = false
@@ -97,6 +92,9 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
     writer.startSession(atSourceTime: .zero)
     let count = max(1, Int((seconds * Double(fps)).rounded()))
     guard let pool = VTCompressionSessionGetPixelBufferPool(session) else { throw Failure("no pixel pool") }
+    let split = SplitClip(referenceNits: referenceNits)
+    var labelStep = -1
+    var labelRows: [[UInt16]] = []
     for frame in 0..<count {
         try autoreleasepool {
             var pixel: CVPixelBuffer?
@@ -114,15 +112,26 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
                 return UInt16(minimum + random % range) << 6
             }
             // P010 stores each limited-range 10-bit code in the high bits of a 16-bit word.
+            let splitStep = min(7, frame / (5 * fps))
+            if kind == "split" && labelStep != splitStep {
+                labelRows = split.labelRows(width: width, height: height, step: splitStep)
+                labelStep = splitStep
+            }
             var row = [UInt16](repeating: 0, count: width)
             for x in 0..<width {
-                if kind == "steps" { row[x] = pqCode(levels[min(levels.count - 1, frame / (2 * fps))]) << 6 }
+                if kind == "split" { row[x] = split.patchCode(x: x, width: width, step: splitStep) << 6 }
+                else if kind == "steps" { row[x] = pqCode(levels[min(levels.count - 1, frame / (2 * fps))]) << 6 }
                 else if kind == "gradient" { row[x] = pqCode(Double(x) / Double(width - 1) * 10000) << 6 }
                 else { row[x] = UInt16(64 + ((x + frame * 37) % 877)) << 6 }
             }
             for line in 0..<height {
                 row.withUnsafeBufferPointer { src in
                     y.advanced(by: line * yStride).update(from: src.baseAddress!, count: width)
+                }
+                if kind == "split" && line < labelRows.count {
+                    labelRows[line].withUnsafeBufferPointer { src in
+                        y.advanced(by: line * yStride).update(from: src.baseAddress!, count: width)
+                    }
                 }
                 // Moving horizontal structure as well as the moving vertical ramp.
                 if kind == "stress" && (line + frame * 13) % 128 < 16 {
@@ -179,15 +188,23 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
              "nits": $0.element, "lumaCode": Double(pqCode($0.element))]
         }
     }
+    if kind == "split" {
+        result["schedule"] = split.schedule(seconds: Double(count) / Double(fps))
+        result["referenceNits"] = referenceNits
+        result["labelBandHeight"] = SplitClip.bandHeight(height: height)
+        result["digitHeight"] = SplitClip.digitHeight(height: height)
+        result["gapStart"] = split.gap(width: width).lowerBound
+        result["gapWidth"] = split.gap(width: width).count
+    }
     if kind == "gradient" { result["gradientNits"] = [0, 10000] }
     return result
 }
 
 func calibratedEncode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int,
-                      kind: String, content: String, overload: Bool) throws -> [String: Any] {
+                      kind: String, content: String, overload: Bool, referenceNits: Double = 203) throws -> [String: Any] {
     try calibrateClip(bitrate: bitrate, targeted: content == "noise" && !overload, overload: overload, encode: { amplitude, hint, limited in
         try encode(out: out, width: width, height: height, fps: fps, seconds: seconds, bitrate: bitrate,
-                   kind: kind, content: content, noiseAmplitude: amplitude, encoderBitrate: hint, limited: limited)
+                   kind: kind, content: content, noiseAmplitude: amplitude, encoderBitrate: hint, limited: limited, referenceNits: referenceNits)
     }, discard: {
         if FileManager.default.fileExists(atPath: out.path) { try FileManager.default.removeItem(at: out) }
     }, reportRetry: { achieved, drops, amplitude in
@@ -200,17 +217,21 @@ func main() throws {
     let overload = CommandLine.arguments.contains("--stress")
     let args = Array(CommandLine.arguments.dropFirst()).filter { $0 != "--stress" }
     if args.contains("--help") {
-        print("--out DIR [--sizes 3840x2160,5120x2880,7680x4320,3648x2912] [--fps 90,120] [--seconds 5] [--bitrate 40000000] [--content default|noise] [--stress (uncapped noise overload)]; PQ defaults: 1920x1080, 30fps, 14s steps + 5s gradient. --seconds overrides each clip.")
+        print("--out DIR [--sizes 3840x2160,5120x2880,7680x4320,3648x2912] [--fps 90,120] [--seconds 5] [--bitrate 40000000] [--content default|noise] [--stress (uncapped noise overload)]; PQ defaults: 1920x1080, 30fps, 14s steps + 5s gradient + 40s split. --kind split selects only split; --reference-nits 203 sets its left patch. --seconds overrides each clip.")
         return
     }
-    let known = ["--out", "--sizes", "--fps", "--seconds", "--bitrate", "--kind", "--content"]
+    let known = ["--out", "--sizes", "--fps", "--seconds", "--bitrate", "--kind", "--content", "--reference-nits"]
     guard args.count % 2 == 0 else { throw Failure("expected --option value; use --help") }
     for i in stride(from: 0, to: args.count, by: 2) {
         guard known.contains(args[i]) else { throw Failure("unknown option \(args[i])") }
         options[args[i]] = args[i + 1]
     }
     guard let directory = options["--out"] else { throw Failure("--out required") }
-    let isPQ = options["--kind"] == "pq"
+    let requestedKind = options["--kind"] ?? "stress"
+    guard ["pq", "split", "stress"].contains(requestedKind) else { throw Failure("--kind pq|split|stress") }
+    let isPQ = requestedKind != "stress"
+    guard let referenceNits = Double(options["--reference-nits"] ?? "203"),
+          referenceNits.isFinite, referenceNits > 0, referenceNits <= 10000 else { throw Failure("invalid --reference-nits (0 < nits <= 10000)") }
     let content = options["--content"] ?? "default"
     guard ["default", "noise"].contains(content), !isPQ || content == "default" else { throw Failure("--content default|noise (noise only for stress)") }
     guard !overload || (!isPQ && content == "noise") else { throw Failure("--stress requires --content noise") }
@@ -229,12 +250,12 @@ func main() throws {
         guard parts.count == 2, parts.allSatisfy({ $0 >= 2 && $0 <= 16384 && $0 % 2 == 0 }) else { throw Failure("invalid even dimensions: \(size)") }
         for rate in rates {
             guard let fps = Int(rate), fps > 0, fps <= 240 else { throw Failure("invalid fps") }
-            for kind in (isPQ ? ["steps", "gradient"] : ["stress"]) {
+            for kind in (requestedKind == "split" ? ["split"] : (isPQ ? ["steps", "gradient", "split"] : ["stress"])) {
                 let url = out.appendingPathComponent("\(kind)-\(size)-\(fps).mov")
                 guard !FileManager.default.fileExists(atPath: url.path) else { throw Failure("file exists: \(url.path)") }
                 do {
-                    let duration = options["--seconds"] == nil && kind == "steps" ? 14 : seconds
-                    let clip = try calibratedEncode(out: url, width: parts[0], height: parts[1], fps: fps, seconds: duration, bitrate: bitrate, kind: kind, content: content, overload: overload)
+                    let duration = options["--seconds"] == nil ? (kind == "steps" ? 14 : (kind == "split" ? 40 : seconds)) : seconds
+                    let clip = try calibratedEncode(out: url, width: parts[0], height: parts[1], fps: fps, seconds: duration, bitrate: bitrate, kind: kind, content: content, overload: overload, referenceNits: referenceNits)
                     clips.append(clip)
                     print("Wrote \(url.lastPathComponent)")
                 } catch {

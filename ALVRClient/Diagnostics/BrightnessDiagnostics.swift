@@ -38,7 +38,7 @@ import RealityKit
             MainActor.assumeIsolated {
                 guard let self else { return }
                 Diag.log("pq", ["path": context.path, "clip": context.clip, "current_s": time.seconds,
-                                "step": PQSchedule.step(time: time.seconds, isSteps: selected.lastPathComponent.contains("steps")),
+                                "step": PQSchedule.step(time: time.seconds, clip: context.clip),
                                 "rate": self.player.rate, "waiting": self.player.reasonForWaitingToPlay?.rawValue ?? "none"])
             }
         }
