@@ -7,7 +7,8 @@
 //   pinch right / left: ring out / in; hold (>= 0.5 s) right: record and next; hold left: back.
 //   d-pad up or right / down or left: ring out / in; A: record; B: back.
 // Logs once: per view eye, tangents, drawable size (corner), the visible-area API result (corner api=unavailable);
-// per record: corner eye pos ring_pct tan_x tan_y; per eye completed: corner_summary with the visible tangent polygon.
+// per record: corner eye pos_deg ring_pct tan_x tan_y; per eye completed: corner_summary with the visible tangent
+// polygon and the boundary shape (CornerShape) with its raw numbers.
 //
 
 import Foundation
@@ -65,9 +66,9 @@ final class CornerChartRenderer {
         defer { lock.unlock() }
         for event in session.apply(action) {
             switch event {
-            case let .mark(eye, pos, pct):
+            case let .mark(eye, spoke, pct):
                 guard let t = tangents[eye] else { continue }
-                Diag.log("corner", CornerChart.markFields(eye, pos, pct, t))
+                Diag.log("corner", CornerChart.markFields(eye, spoke, pct, t))
             case let .summary(eye):
                 guard let t = tangents[eye] else { continue }
                 Diag.log("corner_summary", CornerChart.summaryFields(eye, t, marks: session.marks[eye] ?? [:]))
@@ -139,7 +140,7 @@ final class CornerChartRenderer {
             geometryKey = key
             var vertices: [SIMD4<Float>] = []
             for (eye, v, t, vp) in views where session.lit(eye) {
-                let selected = session.eye == eye ? (session.pos, session.pct) : nil
+                let selected = session.eye == eye ? (session.spoke, session.pct) : nil
                 for q in CornerChart.geometry(t, widthPx: vp.width, heightPx: vp.height, selected: selected, status: session.statusText) {
                     let r = q.rect
                     for (x, y) in [(r.x0, r.y0), (r.x1, r.y0), (r.x0, r.y1), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)] {

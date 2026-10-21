@@ -1,41 +1,52 @@
 //
 //  CornerChart.swift
 //
-// Corner chart (GM decision 65): measures where each eye's visible area ends, for the render corner trim (decision 60).
-// Per eye, in that eye's own tangent space, nested outlines at 100 ... 75% of the drawable's tangent extent on each
-// side, numbered at every corner and edge midpoint. The wearer keeps the head still, looks into each corner/edge and
-// steps the highlighted ring until it is the outermost one still seen; the marks give the visible tangent polygon.
-// Geometry is NDC quads (x right, y up) so it is drawn without a projection; the device side is CornerChartRenderer.
-// Foundation-only so it is unit tested on macOS (tests/swift/CornerChartTests.swift).
+// Corner chart (GM decision 65): measures where each eye's visible area ends and its shape (rectangle, rounded or
+// ellipse), for the render corner trim (decision 60). Per eye, in that eye's own tangent space, 16 spokes every 22.5
+// degrees (0 = right, counter-clockwise) with rings at 100 ... 75% of the eye's tangent extent along each spoke. Spoke
+// angles are in drawable-normalised space (each quadrant scaled by its own tangent extents), so the diagonals end at
+// the drawable corners and every ring is the nested rectangle at that percentage. The wearer keeps the head still,
+// looks along each spoke and steps the highlighted ring until it is the outermost one still seen; the marks give the
+// visible tangent polygon and the shape. Geometry is NDC quads (x right, y up), drawn without a projection by
+// CornerChartRenderer. Foundation-only so it is unit tested on macOS (tests/swift/CornerChartTests.swift).
 //
 
 import Foundation
 
 enum CornerEye: String { case left = "L", right = "R" }
 
-// Walking order: clockwise from top left.
-enum CornerPos: String, CaseIterable {
-    case TL, T, TR, R, BR, B, BL, L
-
-    // Outward direction (x right, y up).
-    var dir: (x: Double, y: Double) {
-        switch self {
-        case .TL: return (-1, 1)
-        case .T: return (0, 1)
-        case .TR: return (1, 1)
-        case .R: return (1, 0)
-        case .BR: return (1, -1)
-        case .B: return (0, -1)
-        case .BL: return (-1, -1)
-        case .L: return (-1, 0)
-        }
-    }
-}
-
 enum CornerChartMode: String, CaseIterable {
     case off = "Off", both = "Both eyes", left = "Left only", right = "Right only"
 
     init(setting: String) { self = CornerChartMode(rawValue: setting) ?? .off }
+}
+
+enum CornerSpokes {
+    static let count = 16
+    static let axes = [0, 4, 8, 12]
+    // Diagonal spoke -> its quadrant's (horizontal, vertical) axis spokes.
+    static let diagonals: [(spoke: Int, x: Int, y: Int)] = [(2, 0, 4), (6, 8, 4), (10, 8, 12), (14, 0, 12)]
+
+    static func degrees(_ k: Int) -> Double { Double(k) * 360 / Double(count) }
+
+    static func degText(_ k: Int) -> String {
+        let d = degrees(k)
+        return d == d.rounded() ? String(format: "%.0f", d) : String(format: "%.1f", d)
+    }
+
+    // The spoke's 100% point in normalised drawable units (the drawable is [-1, 1] on both axes).
+    static func unit(_ k: Int) -> (u: Double, v: Double) {
+        let a = degrees(k) * Double.pi / 180
+        let m = max(abs(cos(a)), abs(sin(a)))
+        func snap(_ x: Double) -> Double { abs(x) < 1e-9 ? 0 : abs(abs(x) - 1) < 1e-9 ? (x < 0 ? -1 : 1) : x }
+        return (snap(cos(a) / m), snap(sin(a) / m))
+    }
+
+    // Outward normal of the drawable edge the spoke ends on (both components at a corner).
+    static func normal(_ k: Int) -> (x: Double, y: Double) {
+        let p = unit(k)
+        return (abs(p.u) == 1 ? p.u : 0, abs(p.v) == 1 ? p.v : 0)
+    }
 }
 
 // Tangent magnitudes of one view, in gimmeTangents order (left, right, bottom, top).
@@ -48,14 +59,13 @@ struct CornerTangents: Equatable {
 
     init(simd t: SIMD4<Float>) { self.init(left: Double(t.x), right: Double(t.y), bottom: Double(t.z), top: Double(t.w)) }
 
-    // Signed tangent of a ring's corner or edge midpoint.
-    func point(_ pos: CornerPos, pct: Int) -> (x: Double, y: Double) {
-        let p = Double(pct) / 100
-        let d = pos.dir
-        let x = d.x < 0 ? -p * left : d.x > 0 ? p * right : p * (right - left) / 2
-        let y = d.y < 0 ? -p * bottom : d.y > 0 ? p * top : p * (top - bottom) / 2
-        return (x, y)
+    // Signed tangent of a spoke's ring point.
+    func point(spoke k: Int, pct: Double) -> (x: Double, y: Double) {
+        let p = pct / 100, n = CornerSpokes.unit(k)
+        return (p * n.u * (n.u < 0 ? left : right), p * n.v * (n.v < 0 ? bottom : top))
     }
+
+    func point(spoke k: Int, pct: Int) -> (x: Double, y: Double) { point(spoke: k, pct: Double(pct)) }
 
     // The view's projection: tangent -left..right -> NDC -1..1, -bottom..top -> -1..1.
     func ndc(x: Double, y: Double) -> (x: Double, y: Double) {
@@ -63,14 +73,48 @@ struct CornerTangents: Equatable {
     }
 }
 
+// Boundary shape from the marks, in normalised drawable units (axis spokes reach 1 at 100%, diagonals sqrt 2).
+// Per quadrant with axis radii a, b: a rectangle's corner is at sqrt(a^2 + b^2), an ellipse through the axis points
+// crosses the diagonal at 1 / sqrt((1/a^2 + 1/b^2) / 2). rectangle: diagonals >= 0.95 of the rectangle corner;
+// ellipse: <= 1.05 of the ellipse radius; rounded between. superellipse_n solves 2 (r / (sqrt2 a))^n = 1 on the means
+// (2 = ellipse, infinite = rectangle).
+struct CornerShape {
+    let radii: [Double]
+    let axisR, diagR, rectR, ellipseR, ratio, rectRatio, ellipseRatio, superellipseN, diagPctMean: Double
+    let diagFloor: Bool
+    let label: String
+
+    static func radius(_ k: Int, pct: Double) -> Double {
+        let n = CornerSpokes.unit(k)
+        return pct / 100 * (n.u * n.u + n.v * n.v).squareRoot()
+    }
+
+    static func classify(_ pcts: [Int: Double]) -> CornerShape? {
+        guard (CornerSpokes.axes + CornerSpokes.diagonals.map(\.spoke)).allSatisfy({ pcts[$0] != nil }) else { return nil }
+        func r(_ k: Int) -> Double { radius(k, pct: pcts[k]!) }
+        func mean(_ xs: [Double]) -> Double { xs.reduce(0, +) / Double(xs.count) }
+        let axisR = mean(CornerSpokes.axes.map(r))
+        let diagR = mean(CornerSpokes.diagonals.map { r($0.spoke) })
+        let rectR = mean(CornerSpokes.diagonals.map { (r($0.x) * r($0.x) + r($0.y) * r($0.y)).squareRoot() })
+        let ellipseR = mean(CornerSpokes.diagonals.map { 1 / ((1 / (r($0.x) * r($0.x)) + 1 / (r($0.y) * r($0.y))) / 2).squareRoot() })
+        let corner = 2.0.squareRoot() * axisR
+        let n = diagR >= corner ? Double.infinity : log(2) / log(corner / diagR)
+        let label = diagR >= 0.95 * rectR ? "rectangle" : diagR <= 1.05 * ellipseR ? "ellipse" : "rounded"
+        let diagPcts = CornerSpokes.diagonals.map { pcts[$0.spoke]! }
+        return CornerShape(radii: (0..<CornerSpokes.count).compactMap { k in pcts[k].map { radius(k, pct: $0) } },
+                           axisR: axisR, diagR: diagR, rectR: rectR, ellipseR: ellipseR, ratio: diagR / axisR,
+                           rectRatio: rectR / axisR, ellipseRatio: ellipseR / axisR, superellipseN: n, diagPctMean: mean(diagPcts),
+                           diagFloor: diagPcts.contains { $0 <= Double(CornerChart.ringPercents.last!) }, label: label)
+    }
+}
+
 enum CornerChart {
     static let ringPercents = [100, 98, 96, 94, 92, 90, 88, 85, 80, 75]
-    static let polygonOrder: [CornerPos] = [.BL, .B, .BR, .R, .TR, .T, .TL, .L]
     static let linePx = 3.0, padPx = 2.0, maxLabelPx = 48.0, minLabelPx = 6.0
 
     struct Rect: Equatable { var x0, y0, x1, y1: Double }
     struct Quad { let rect: Rect; let color: SIMD4<Float> }
-    struct Label { let pct: Int; let pos: CornerPos; let text: String; let rect: Rect; let vertical: Bool }
+    struct Label { let pct: Int; let spoke: Int; let text: String; let rect: Rect; let vertical: Bool }
 
     static let palette: [SIMD4<Float>] = [[1, 1, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1, 1], [0, 1, 0, 1],
                                           [1, 0.5, 0, 1], [0.4, 0.6, 1, 1], [1, 0.3, 0.3, 1], [1, 1, 1, 1], [1, 1, 0, 1]]
@@ -81,14 +125,19 @@ enum CornerChart {
         return Rect(x0: lo.x, y0: lo.y, x1: hi.x, y1: hi.y)
     }
 
+    static func spokeNdc(_ t: CornerTangents, _ k: Int, _ pct: Int) -> (x: Double, y: Double) {
+        let p = t.point(spoke: k, pct: pct)
+        return t.ndc(x: p.x, y: p.y)
+    }
+
     // 7-segment glyph widths: 0.55 h per character, 0.2 h between (horizontal) or 0.25 h between rows (vertical).
     static func textSize(_ text: String, h: Double, vertical: Bool) -> (w: Double, h: Double) {
         let n = Double(text.count)
         return vertical ? (0.55 * h, n * h + (n - 1) * 0.25 * h) : (n * 0.55 * h + (n - 1) * 0.2 * h, h)
     }
 
-    // Every ring's number at every position, just inside its own line and clear of the next ring in (band-limited
-    // size, capped); left/right edge numbers stack vertically so they fit the narrow side bands.
+    // Every ring's number on every spoke, just inside its own line and clear of the next ring in (band-limited
+    // size, capped); numbers on the left/right edges stack vertically so they fit the narrow side bands.
     static func labels(_ t: CornerTangents, widthPx w: Double, heightPx h: Double) -> [Label] {
         let dx = 2 / w, dy = 2 / h, inset = linePx + padPx
         var out: [Label] = []
@@ -98,25 +147,26 @@ enum CornerChart {
             func avail(_ bandNdc: Double?, _ scale: Double) -> Double { bandNdc.map { $0 / scale - linePx - 2 * padPx } ?? .infinity }
             let side = (l: avail(next.map { $0.x0 - r.x0 }, dx), r: avail(next.map { r.x1 - $0.x1 }, dx),
                         b: avail(next.map { $0.y0 - r.y0 }, dy), t: avail(next.map { r.y1 - $0.y1 }, dy))
-            for pos in CornerPos.allCases {
-                let d = pos.dir
+            for k in 0..<CornerSpokes.count {
+                let d = CornerSpokes.normal(k), p = spokeNdc(t, k, pct)
                 let vertical = d.y == 0
                 let fit = vertical ? (d.x < 0 ? side.l : side.r) / 0.55 : (d.y > 0 ? side.t : side.b)
                 let size = textSize("\(pct)", h: max(min(fit, maxLabelPx), minLabelPx), vertical: vertical)
                 let (sw, sh) = (size.w * dx, size.h * dy)
-                let x0 = d.x < 0 ? r.x0 + inset * dx : d.x > 0 ? r.x1 - inset * dx - sw : (r.x0 + r.x1 - sw) / 2
-                let y0 = d.y < 0 ? r.y0 + inset * dy : d.y > 0 ? r.y1 - inset * dy - sh : (r.y0 + r.y1 - sh) / 2
-                out.append(Label(pct: pct, pos: pos, text: "\(pct)", rect: Rect(x0: x0, y0: y0, x1: x0 + sw, y1: y0 + sh), vertical: vertical))
+                func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(max(v, lo), hi) }
+                let x0 = d.x < 0 ? r.x0 + inset * dx : d.x > 0 ? r.x1 - inset * dx - sw : clamp(p.x - sw / 2, r.x0 + inset * dx, r.x1 - inset * dx - sw)
+                let y0 = d.y < 0 ? r.y0 + inset * dy : d.y > 0 ? r.y1 - inset * dy - sh : clamp(p.y - sh / 2, r.y0 + inset * dy, r.y1 - inset * dy - sh)
+                out.append(Label(pct: pct, spoke: k, text: "\(pct)", rect: Rect(x0: x0, y0: y0, x1: x0 + sw, y1: y0 + sh), vertical: vertical))
             }
         }
         return out
     }
 
-    // Segments a top, b upper right, c lower right, d bottom, e lower left, f upper left, g middle.
+    // Segments a top, b upper right, c lower right, d bottom, e lower left, f upper left, g middle, p decimal point.
     private static let segments: [Character: String] = [
         "0": "abcdef", "1": "bc", "2": "abdeg", "3": "abcdg", "4": "bcfg", "5": "acdfg", "6": "acdefg", "7": "abc",
-        "8": "abcdefg", "9": "abcdfg", "L": "def", "r": "eg", "t": "defg", "b": "cdefg", "d": "bcdeg", "o": "cdeg",
-        "n": "ceg", "E": "adefg", "-": "g"]
+        "8": "abcdefg", "9": "abcdfg", "L": "def", "r": "eg", "d": "bcdeg", "o": "cdeg", "n": "ceg", "E": "adefg",
+        "-": "g", ".": "p"]
 
     static func text(_ s: String, in rect: Rect, vertical: Bool, color: SIMD4<Float>) -> [Quad] {
         let n = Double(s.count)
@@ -138,6 +188,7 @@ enum CornerChart {
                 case "f": q = Rect(x0: gx, y0: mid, x1: gx + sv, y1: gy + h)
                 case "b": q = Rect(x0: gx + cw - sv, y0: mid, x1: gx + cw, y1: gy + h)
                 case "e": q = Rect(x0: gx, y0: gy, x1: gx + sv, y1: mid)
+                case "p": q = Rect(x0: gx + (cw - 1.5 * sv) / 2, y0: gy, x1: gx + (cw + 1.5 * sv) / 2, y1: gy + 1.5 * st)
                 default: q = Rect(x0: gx + cw - sv, y0: gy, x1: gx + cw, y1: mid)
                 }
                 out.append(Quad(rect: q, color: color))
@@ -146,8 +197,8 @@ enum CornerChart {
         return out
     }
 
-    // One eye's chart: rings (inner strokes), numbers, the selected ring's highlight + large number, centred status.
-    static func geometry(_ t: CornerTangents, widthPx w: Double, heightPx h: Double, selected: (pos: CornerPos, pct: Int)?, status: String) -> [Quad] {
+    // One eye's chart: rings (inner strokes), numbers, spoke dots, the selected ring's highlight + large number, status.
+    static func geometry(_ t: CornerTangents, widthPx w: Double, heightPx h: Double, selected: (spoke: Int, pct: Int)?, status: String) -> [Quad] {
         let dx = 2 / w, dy = 2 / h, lx = linePx * dx, ly = linePx * dy
         var out: [Quad] = []
         for (i, pct) in ringPercents.enumerated() {
@@ -158,6 +209,15 @@ enum CornerChart {
         for label in labels(t, widthPx: w, heightPx: h) {
             out += text(label.text, in: label.rect, vertical: label.vertical, color: palette[ringPercents.firstIndex(of: label.pct) ?? 0])
         }
+        // Spoke direction: dots from 10 to 70% (the selected spoke brighter and larger).
+        for k in 0..<CornerSpokes.count {
+            let on = selected?.spoke == k, s = on ? 4.0 : 2.0
+            for pct in stride(from: 10, through: 70, by: 10) {
+                let p = spokeNdc(t, k, pct)
+                out.append(Quad(rect: Rect(x0: p.x - s * dx, y0: p.y - s * dy, x1: p.x + s * dx, y1: p.y + s * dy),
+                                color: on ? [1, 1, 1, 1] : [0.5, 0.5, 0.5, 1]))
+            }
+        }
         let white: SIMD4<Float> = [1, 1, 1, 1], black: SIMD4<Float> = [0, 0, 0, 1]
         func boxed(_ s: String, centre: (x: Double, y: Double), px: Double) {
             let size = textSize(s, h: px, vertical: false)
@@ -165,21 +225,20 @@ enum CornerChart {
             out.append(Quad(rect: Rect(x0: r.x0 - 6 * dx, y0: r.y0 - 6 * dy, x1: r.x1 + 6 * dx, y1: r.y1 + 6 * dy), color: black))
             out += text(s, in: r, vertical: false, color: white)
         }
-        if let (pos, pct) = selected {
-            let r = ringRect(t, pct: pct), d = pos.dir, th = 3 * linePx
-            let ax = d.x < 0 ? r.x0 : d.x > 0 ? r.x1 : (r.x0 + r.x1) / 2, ay = d.y < 0 ? r.y0 : d.y > 0 ? r.y1 : (r.y0 + r.y1) / 2
+        if let (k, pct) = selected {
+            let r = ringRect(t, pct: pct), d = CornerSpokes.normal(k), a = spokeNdc(t, k, pct), th = 3 * linePx
             let armX = 0.1 * (r.x1 - r.x0), armY = 0.1 * (r.y1 - r.y0)
-            // Arms along the ring's edges from the corner (or centred on the edge midpoint), inside the ring.
+            // Along the ring's edges from the corner, or centred on the spoke's point of an edge, inside the ring.
             if d.y != 0 {
-                out.append(Quad(rect: Rect(x0: d.x < 0 ? ax : ax - armX, y0: d.y > 0 ? ay - th * dy : ay,
-                                           x1: d.x > 0 ? ax : ax + armX, y1: d.y > 0 ? ay : ay + th * dy), color: white))
+                out.append(Quad(rect: Rect(x0: max(d.x < 0 ? a.x : a.x - armX, r.x0), y0: d.y > 0 ? a.y - th * dy : a.y,
+                                           x1: min(d.x > 0 ? a.x : a.x + armX, r.x1), y1: d.y > 0 ? a.y : a.y + th * dy), color: white))
             }
             if d.x != 0 {
-                out.append(Quad(rect: Rect(x0: d.x > 0 ? ax - th * dx : ax, y0: d.y < 0 ? ay : ay - armY,
-                                           x1: d.x > 0 ? ax : ax + th * dx, y1: d.y > 0 ? ay : ay + armY), color: white))
+                out.append(Quad(rect: Rect(x0: d.x > 0 ? a.x - th * dx : a.x, y0: max(d.y < 0 ? a.y : a.y - armY, r.y0),
+                                           x1: d.x > 0 ? a.x : a.x + th * dx, y1: min(d.y > 0 ? a.y : a.y + armY, r.y1)), color: white))
             }
             let size = textSize("\(pct)", h: maxLabelPx, vertical: false), m = th + 40
-            boxed("\(pct)", centre: (ax - d.x * (m + size.w / 2) * dx, ay - d.y * (m + size.h / 2) * dy), px: maxLabelPx)
+            boxed("\(pct)", centre: (a.x - d.x * (m + size.w / 2) * dx, a.y - d.y * (m + size.h / 2) * dy), px: maxLabelPx)
         }
         if !status.isEmpty {
             boxed(status, centre: t.ndc(x: 0, y: 0), px: 0.04 * h)
@@ -187,12 +246,12 @@ enum CornerChart {
         return out
     }
 
-    // Visible tangent polygon, counterclockwise from BL; nil until all 8 positions are marked.
-    static func polygon(_ t: CornerTangents, marks: [CornerPos: Int]) -> [(x: Double, y: Double)]? {
+    // Visible tangent polygon, counterclockwise from 0 degrees; nil until all 16 spokes are marked.
+    static func polygon(_ t: CornerTangents, marks: [Int: Int]) -> [(x: Double, y: Double)]? {
         var out: [(x: Double, y: Double)] = []
-        for pos in polygonOrder {
-            guard let pct = marks[pos] else { return nil }
-            out.append(t.point(pos, pct: pct))
+        for k in 0..<CornerSpokes.count {
+            guard let pct = marks[k] else { return nil }
+            out.append(t.point(spoke: k, pct: pct))
         }
         return out
     }
@@ -204,11 +263,11 @@ enum CornerChart {
         }) / 2
     }
 
-    private static func f4(_ v: Double) -> String { String(format: "%.4f", v) }
+    private static func f4(_ v: Double) -> String { v.isInfinite ? "inf" : String(format: "%.4f", v) }
 
-    static func markFields(_ eye: CornerEye, _ pos: CornerPos, _ pct: Int, _ t: CornerTangents) -> KeyValuePairs<String, Any> {
-        let p = t.point(pos, pct: pct)
-        return ["eye": eye.rawValue, "pos": pos.rawValue, "ring_pct": pct, "tan_x": f4(p.x), "tan_y": f4(p.y)]
+    static func markFields(_ eye: CornerEye, _ spoke: Int, _ pct: Int, _ t: CornerTangents) -> KeyValuePairs<String, Any> {
+        let p = t.point(spoke: spoke, pct: pct)
+        return ["eye": eye.rawValue, "pos_deg": CornerSpokes.degText(spoke), "ring_pct": pct, "tan_x": f4(p.x), "tan_y": f4(p.y)]
     }
 
     static func viewFields(_ eye: CornerEye, view: Int, _ t: CornerTangents, drawableW: Int, drawableH: Int, viewport: String) -> KeyValuePairs<String, Any> {
@@ -216,12 +275,16 @@ enum CornerChart {
          "tan_top": f4(t.top), "drawable_w": drawableW, "drawable_h": drawableH, "viewport": viewport]
     }
 
-    static func summaryFields(_ eye: CornerEye, _ t: CornerTangents, marks: [CornerPos: Int]) -> KeyValuePairs<String, Any> {
-        guard let poly = polygon(t, marks: marks) else {
-            return ["eye": eye.rawValue, "marks": marks.count, "polygon": "incomplete", "area_frac": "unavailable"]
+    // Polygon, area and the shape with its raw numbers (r = per-spoke normalised radii from 0 degrees, CCW).
+    static func summaryFields(_ eye: CornerEye, _ t: CornerTangents, marks: [Int: Int]) -> KeyValuePairs<String, Any> {
+        guard let poly = polygon(t, marks: marks), let s = CornerShape.classify(marks.mapValues(Double.init)) else {
+            return ["eye": eye.rawValue, "marks": marks.count, "polygon": "incomplete", "area_frac": "unavailable", "shape": "unavailable"]
         }
         return ["eye": eye.rawValue, "marks": marks.count, "polygon": poly.map { "\(f4($0.x)),\(f4($0.y))" }.joined(separator: ";"),
-                "area_frac": f4(area(poly) / ((t.left + t.right) * (t.bottom + t.top)))]
+                "area_frac": f4(area(poly) / ((t.left + t.right) * (t.bottom + t.top))), "r": s.radii.map(f4).joined(separator: ","),
+                "axis_r": f4(s.axisR), "diag_r": f4(s.diagR), "rect_r": f4(s.rectR), "ellipse_r": f4(s.ellipseR), "ratio": f4(s.ratio),
+                "rect_ratio": f4(s.rectRatio), "ellipse_ratio": f4(s.ellipseRatio), "superellipse_n": f4(s.superellipseN),
+                "diag_pct_mean": String(format: "%.2f", s.diagPctMean), "diag_floor": s.diagFloor, "shape": s.label]
     }
 
     // visionOS 27.0 SDK headers searched for a visible-area / hidden-area / visibility-mask API: none. The only mask is
@@ -232,17 +295,17 @@ enum CornerChart {
     }
 }
 
-// The measurement walk: per eye (both: L then R), positions TL..L; the ring is stepped out/in and recorded per position.
+// The measurement walk: per eye (both: L then R), spokes 0 ... 337.5 degrees; the ring is stepped out/in and recorded.
 final class CornerChartSession {
     enum Action { case outward, inward, record, back }
-    enum Event: Equatable { case mark(CornerEye, CornerPos, Int), summary(CornerEye), done }
+    enum Event: Equatable { case mark(CornerEye, Int, Int), summary(CornerEye), done }
 
     let mode: CornerChartMode
     let eyes: [CornerEye]
     private(set) var eyeIndex = 0
-    private(set) var posIndex = 0
+    private(set) var spoke = 0
     private(set) var ringIndex = 0
-    private(set) var marks: [CornerEye: [CornerPos: Int]] = [:]
+    private(set) var marks: [CornerEye: [Int: Int]] = [:]
 
     init(mode: CornerChartMode) {
         self.mode = mode
@@ -250,22 +313,19 @@ final class CornerChartSession {
     }
 
     var eye: CornerEye? { eyeIndex < eyes.count ? eyes[eyeIndex] : nil }
-    var pos: CornerPos { CornerPos.allCases[posIndex] }
     var pct: Int { CornerChart.ringPercents[ringIndex] }
 
     // The other eye is black in the monocular modes.
     func lit(_ e: CornerEye) -> Bool { mode == .both || eyes.contains(e) }
 
-    private static let posText: [CornerPos: String] = [.TL: "tL", .T: "t", .TR: "tr", .R: "r", .BR: "br", .B: "b", .BL: "bL", .L: "L"]
-
-    // 7-segment status: eye, position, selected ring ("L tL 94"), or "donE".
+    // 7-segment status: eye, spoke degrees, selected ring ("L 22.5 94"), or "donE".
     var statusText: String {
         guard let eye else { return "donE" }
-        return "\(eye == .left ? "L" : "r") \(Self.posText[pos]!) \(pct)"
+        return "\(eye == .left ? "L" : "r") \(CornerSpokes.degText(spoke)) \(pct)"
     }
 
     func apply(_ action: Action) -> [Event] {
-        let last = CornerPos.allCases.count - 1
+        let last = CornerSpokes.count - 1
         switch action {
         case .outward:
             ringIndex = max(ringIndex - 1, 0)
@@ -273,21 +333,21 @@ final class CornerChartSession {
             ringIndex = min(ringIndex + 1, CornerChart.ringPercents.count - 1)
         case .back:
             if eye == nil, !eyes.isEmpty {
-                (eyeIndex, posIndex) = (eyes.count - 1, last)
-            } else if posIndex > 0 {
-                posIndex -= 1
+                (eyeIndex, spoke) = (eyes.count - 1, last)
+            } else if spoke > 0 {
+                spoke -= 1
             } else if eyeIndex > 0 {
-                (eyeIndex, posIndex) = (eyeIndex - 1, last)
+                (eyeIndex, spoke) = (eyeIndex - 1, last)
             }
         case .record:
             guard let eye else { return [] }
-            marks[eye, default: [:]][pos] = pct
-            var events: [Event] = [.mark(eye, pos, pct)]
-            if posIndex < last {
-                posIndex += 1
+            marks[eye, default: [:]][spoke] = pct
+            var events: [Event] = [.mark(eye, spoke, pct)]
+            if spoke < last {
+                spoke += 1
             } else {
                 events.append(.summary(eye))
-                (eyeIndex, posIndex) = (eyeIndex + 1, 0)
+                (eyeIndex, spoke) = (eyeIndex + 1, 0)
                 if self.eye == nil { events.append(.done) }
             }
             return events

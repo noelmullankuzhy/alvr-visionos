@@ -74,6 +74,39 @@ time, offered Mb/s and late frames; they do not establish receipt/loss at the si
 Socket timeouts/errors produce a nonzero exit. The puller targets the paired
 app's `uk.lumenio.alvr` data container, `Documents/diag`, and preserves logs on device.
 
+## Corner chart mirror comparison
+
+```sh
+sh tools/diag/capture-mirror.sh -i 2 -o /tmp/avp-mirror
+sh tools/diag/capture-mirror.sh -l
+```
+
+The client's corner chart (Diagnostics on, Corner chart setting, no stream) draws
+16 spokes per eye every 22.5° (0 = right, counter-clockwise), with numbered rings at
+100, 98, 96, 94, 92, 90, 88, 85, 80, 75% of that eye's tangent extent along each spoke.
+On the diagonals, 100 is the drawable corner. Mirror the headset to the Mac (Control
+Centre > Mirror My View > this Mac). The script then captures the largest on-screen
+window whose owner or title matches `-w` (default `airplay`; use `-l` and pass the
+owner from the list if your receiver is named differently). It captures every `-i`
+seconds into `mirror-<UTC>-<n>.png`, with `index.tsv` recording the time and window id.
+It exits with an error when no window matches, Screen Recording is not granted to
+the terminal, or a capture fails.
+
+To read a capture, hold the chart's head pose steady. For each spoke, the outermost
+ring number visible in the image is that spoke's mirror crop. Compare it with the
+`DIAG corner eye=… pos_deg=… ring_pct=…` mark you recorded on the headset (the
+outermost ring you could see) and with the eye's `corner_summary` line (`r=` radii,
+`axis_r`, `diag_r`, `ratio`, `shape`). The mirror is one eye's processed view, so it
+shows the mirror's own crop, not the panel's visible area. A mirror crop smaller than
+the marks is expected; a larger one means the marks are conservative. The summary
+logs its raw numbers so the shape can be recomputed. Per quadrant with axis radii a, b
+(normalised so the axis spokes are 1 at 100%), a rectangle's diagonal is sqrt(a²+b²),
+an ellipse's is 1/sqrt((1/a²+1/b²)/2), and the superellipse exponent is
+n = ln2 / ln(√2·axis_r/diag_r). The innermost ring is 75%, so an ellipse
+(diagonal ≈ 70.7%) shows as the 75 floor (`diag_floor=true`), not as an exact fit.
+No visionOS 27.0 API reports the visible area (`corner api=unavailable`), so these
+are subjective marks.
+
 ## Validation
 
 ```sh
@@ -81,6 +114,7 @@ app's `uk.lumenio.alvr` data container, `Documents/diag`, and preserves logs on 
 /opt/homebrew/bin/python3 tools/diag/test_netprobe.py
 sh tools/diag/smoke.sh
 sh -n tools/diag/pull-diag.sh
+sh -n tools/diag/capture-mirror.sh
 ```
 
 Python defaults test the wire header, fractional rate/pacing math, sender loop
