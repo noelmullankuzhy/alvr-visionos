@@ -27,8 +27,8 @@ class MetalClientSystem {
     var renderer: Renderer;
     let layerRenderer: LayerRenderer
 
-    init(_ layerRenderer: LayerRenderer) {
-        self.renderer = Renderer(layerRenderer)
+    init(_ layerRenderer: LayerRenderer, offlineDiagnostics: Bool = false) {
+        self.renderer = Renderer(layerRenderer, offlineDiagnostics: offlineDiagnostics)
         self.layerRenderer = layerRenderer
     }
 
@@ -51,14 +51,21 @@ class MetalClientSystem {
         layerRenderer.onSpatialEvent = { eventCollection in
             for event in eventCollection {
                 self.renderer.cornerChart?.spatialEvent(event)
-                RealityKitClientView.handleSpatialEvent(nil, event)
+                if !self.renderer.renderOwnership.offlineDiagnostics {
+                    RealityKitClientView.handleSpatialEvent(nil, event)
+                }
             }
         }
         
-        EventHandler.shared.handleHeadsetRemovedOrReentry()
+        if !renderer.renderOwnership.offlineDiagnostics {
+            EventHandler.shared.handleHeadsetRemovedOrReentry()
+        }
         let timeSinceLastLoop = CACurrentMediaTime()
-        while EventHandler.shared.renderStarted {
+        while renderer.renderOwnership.shouldRun(onlineRenderStarted: EventHandler.shared.renderStarted,
+                connected: EventHandler.shared.connectionState == .connected,
+                streaming: EventHandler.shared.streamingActive) {
             if layerRenderer.state == .invalidated {
+                if renderer.renderOwnership.offlineDiagnostics { break }
                 print("Layer is invalidated")
                 //EventHandler.shared.stop()
                 EventHandler.shared.handleHeadsetRemovedOrReentry()

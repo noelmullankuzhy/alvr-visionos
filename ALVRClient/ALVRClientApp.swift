@@ -263,6 +263,28 @@ struct ALVRClientApp: App {
         .immersionStyle(selection: $realityKitImmersionStyle, in: .mixed, .progressive)
         .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
 
+        // Independent entry for offline diagnostics; the online Enter path is unchanged.
+        ImmersiveSpace(id: "MetalDiagnosticsOffline") {
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
+                guard Diag.isOn else { return }
+                let system = MetalClientSystem(layerRenderer, offlineDiagnostics: true)
+                system.startRenderLoop()
+                // Manual leave releases ownership. Connection dismissal is awaited by the
+                // entry action, which retains ownership until dismissImmersiveSpace returns.
+                Task { @MainActor in
+                    while layerRenderer.state != .invalidated && !Task.isCancelled {
+                        guard model.offlineDiagnostics.phase == .offline else { return }
+                        do { try await Task.sleep(nanoseconds: 100_000_000) }
+                        catch { break }
+                    }
+                    if model.offlineDiagnostics.phase == .offline { model.offlineDiagnostics.dismissed() }
+                }
+            }
+        }
+        .disablePersistentSystemOverlaysForVisionOS2(shouldDisable: ALVRClientApp.gStore.settings.disablePersistentSystemOverlays ? .hidden : .automatic)
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
+
         ImmersiveSpace(id: "MetalClient") {
             // clientImmersionStyle starts .mixed and is never reassigned.
             CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
