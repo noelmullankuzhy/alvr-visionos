@@ -5,7 +5,9 @@
 import Foundation
 
 private func tempDir(_ name: String) -> URL {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent("diag-tests-\(name)-\(UUID().uuidString)")
+    // $TMPDIR first: a sandboxed run may only write there, not to the per-user temporary directory.
+    let base = ProcessInfo.processInfo.environment["TMPDIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory
+    let url = base.appendingPathComponent("diag-tests-\(name)-\(UUID().uuidString)")
     try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     return url
 }
@@ -80,7 +82,7 @@ private func testConsoleSink() {
     sink.flush()
     lock.lock(); let copy = seen; lock.unlock()
     expectEqual(copy, ["DIAG a t_ms=1", "DIAG b t_ms=2"], "every line also goes to the console sink, in order")
-    let text = (try? String(contentsOf: logFiles(dir)[0], encoding: .utf8)) ?? ""
+    let text = logFiles(dir).first.flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
     expectEqual(text, "DIAG a t_ms=1\nDIAG b t_ms=2\n", "file has the same lines")
 }
 

@@ -165,6 +165,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     
     // More readable helper var than layerRenderer == nil
     var isRealityKit = false
+    // Diagnostics M5/M6/M9 (GM decision 65): Metal renderer only, nil when Diagnostics is off.
+    let diagProbe: DiagRenderProbe?
     var hdrEnabled = false
     var currentRenderColorFormat = renderColorFormatSDR
     var currentDrawableRenderColorFormat = renderColorFormatDrawableSDR
@@ -184,6 +186,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     
     init(_ layerRenderer: LayerRenderer?) {
         self.layerRenderer = layerRenderer
+        self.diagProbe = layerRenderer != nil && Diag.isOn ? DiagRenderProbe() : nil
         let rendererName = layerRenderer == nil ? "realitykit" : "metal"
         StreamTelemetry.shared.updateFormat { $0.renderer = rendererName }
         if layerRenderer == nil {
@@ -971,6 +974,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         
         let vsyncTime = LayerRenderer.Clock.Instant.epoch.duration(to: mainDrawable.frameTiming.presentationTime).timeInterval
         let vsyncTimeNs = UInt64(vsyncTime * Double(NSEC_PER_SEC))
+        diagProbe?.frame(layerRenderer: layerRenderer!, drawables: drawables, predicted: timing, fresh: selectionSource == .new, device: device)
         let framePreviouslyPredictedPose = queuedFrame != nil ? WorldTracker.shared.convertSteamVRViewPose(queuedFrame!.viewParams) : nil
         if ALVRClientApp.gStore.settings.showPerformanceHud {
             PerformanceTracker.shared.recordFramePresentation(presentationTime: mainDrawable.frameTiming.presentationTime, timestampNs: queuedFrame?.timestamp)
@@ -1025,8 +1029,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         let deviceAnchor = WorldTracker.shared.worldTracking.queryDeviceAnchor(atTimestamp: vsyncTime)
         
         let gpuTimes = self.gpuTimes
+        let diagProbe = self.diagProbe
         commandBuffer.addCompletedHandler { (_ commandBuffer)-> Swift.Void in
             let completionNs = UInt64(CACurrentMediaTime() * Double(NSEC_PER_SEC))
+            diagProbe?.completed(commandBuffer, vsyncNs: vsyncTimeNs, completionNs: completionNs)
             if commandBuffer.gpuEndTime > commandBuffer.gpuStartTime {
                 gpuTimes.add(ns: UInt64((commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * Double(NSEC_PER_SEC)))
             }
