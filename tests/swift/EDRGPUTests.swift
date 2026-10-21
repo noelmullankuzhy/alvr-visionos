@@ -35,7 +35,9 @@ import simd
             drawing.encode(buffer: buffer, colour: colour, depth: depth, slice: slice, viewport: viewport,
                            patches: layout.patches(value: value,
                                                    centre: EDRView.centre(projectionX: Double(projection.columns.2.x),
-                                                                          projectionY: Double(projection.columns.2.y)),
+                                                                          projectionY: Double(projection.columns.2.y),
+                                                                          horizontalScale: Double(projection.columns.0.x),
+                                                                          horizontalDegrees: layout == .match ? -12 : 0),
                                                    aspect: viewport.width / viewport.height, grid: grid,
                                                    pixelHeight: viewport.height), projection: projection)
             buffer.commit(); buffer.waitUntilCompleted()
@@ -74,7 +76,8 @@ import simd
         }
         for (layout, grid) in cases {
             let context = "\(layout.rawValue) \(grid.range.rawValue) mirror=\(grid.mirror) borders=\(grid.borders)"
-            render(layout, 4, slice: 1, projection: projection, grid: grid)
+            let value: Float = 4
+            render(layout, value, slice: 1, projection: projection, grid: grid)
             var pixels = [UInt16](repeating: 0, count: width * height * 4)
             let depths = readDepth(slice: 1)
             pixels.withUnsafeMutableBytes {
@@ -89,6 +92,17 @@ import simd
                     var expected: Float = 0
                     if inside {
                         switch layout {
+                        case .match:
+                            // Independent frustum tangents from this test's projection, without EDRView/patch helpers.
+                            let left = (1 - Double(projection.columns.2.x)) / Double(projection.columns.0.x)
+                            let right = (1 + Double(projection.columns.2.x)) / Double(projection.columns.0.x)
+                            let top = (1 + Double(projection.columns.2.y)) / Double(projection.columns.1.y)
+                            let bottom = (1 - Double(projection.columns.2.y)) / Double(projection.columns.1.y)
+                            let centreX = (left - tan(12 * Double.pi / 180)) / (left + right)
+                            let centreY = top / (top + bottom)
+                            let sidePixels = sqrt(0.05 * viewport.width * viewport.height)
+                            let dx = (u - centreX) * viewport.width, dy = (v - centreY) * viewport.height
+                            expected = abs(dx) < sidePixels / 2 && abs(dy) < sidePixels / 2 ? value : 0
                         case .onePercent: expected = abs(u - 0.5) < 0.05 && abs(v - 0.5) < 0.05 ? 4 : 0
                         case .tenPercent: expected = abs(u - 0.5) < sqrt(0.1) / 2 && abs(v - 0.5) < sqrt(0.1) / 2 ? 4 : 0
                         case .full: expected = 4
