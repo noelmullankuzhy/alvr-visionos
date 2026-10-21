@@ -186,6 +186,8 @@ class EventHandler: ObservableObject {
     let viewParamsLock = NSObject()
     // Guarded by viewParamsLock (event and render threads).
     var poseKeepalive = PoseKeepalive()
+    // The stream's last real head pose, resent by the keepalive (guarded by viewParamsLock).
+    private var keepalivePose = KeepalivePose<AlvrDeviceMotion>()
     private var streamStartTiming = StreamStartTiming()
     private let streamStartTimingLock = NSLock()
 
@@ -257,6 +259,10 @@ class EventHandler: ObservableObject {
         lastIpd = -1
         lastQueuedFrame = nil
         withStreamBootstrap { $0.streamStopped() }
+        objc_sync_enter(viewParamsLock)
+        poseKeepalive.reset()
+        keepalivePose.reset()
+        objc_sync_exit(viewParamsLock)
         streamStartTimingLock.lock()
         streamStartTiming.disconnected()
         streamStartTimingLock.unlock()
@@ -296,14 +302,15 @@ class EventHandler: ObservableObject {
         guard streamingActive && lastIpd == -1 else { return }
         if withStreamBootstrap({ $0.shouldSendFakeTracking(now: CACurrentMediaTime()) }) {
             WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: CACurrentMediaTime() - 1.0)
-            noteRenderPoseSent(real: false)
+            noteRenderPoseSent(realHead: nil)
         }
     }
 
     // Event thread: head poses reach the server whatever the immersive space is doing (not open yet, opening,
-    // paused, switching). While no render loop has sent one for PoseKeepalive.staleAfter, send the fake pose every
-    // PoseKeepalive.interval: with fake view params until the real ones are sent (the old bootstrap), head only
-    // after. Under viewParamsLock, so a fake view-params send can never land after the real view params.
+    // paused, switching, tracking lost). While no render loop has sent one for PoseKeepalive.staleAfter, every
+    // PoseKeepalive.interval resend the stream's last real head pose (KeepalivePose), or, before there is one, the
+    // fake pose with fake view params until the real ones are sent (the old bootstrap). Under viewParamsLock, so a
+    // fake view-params send can never land after the real view params.
     func sendPoseKeepaliveIfStale() {
         objc_sync_enter(viewParamsLock)
         defer { objc_sync_exit(viewParamsLock) }
@@ -311,22 +318,32 @@ class EventHandler: ObservableObject {
         let now = CACurrentMediaTime()
         guard let send = poseKeepalive.shouldSend(now: now) else { return }
         let realViewParams = lastIpd != -1
-        WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: now - 1.0, includeViewParams: !realViewParams)
-        if send.startsEpisode {
-            logStreamStart(.poseKeepalive, [("state", "start"), ("view_params", realViewParams ? "real" : "fake")])
+        let kind: String
+        switch keepalivePose.choose(target: now) {
+        case .real(let head, let timestamp):
+            WorldTracker.shared.sendKeepaliveHead(head, targetTimestamp: timestamp)
+            kind = "real"
+        case .fake:
+            WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: now - 1.0, includeViewParams: !realViewParams)
+            kind = "fake"
         }
-        logStreamStart(.firstPoseSent, [("kind", "fake")], once: true)
+        if send.startsEpisode {
+            logStreamStart(.poseKeepalive, [("state", "start"), ("pose", kind), ("view_params", realViewParams ? "real" : "fake")])
+        }
+        logStreamStart(.firstPoseSent, [("kind", kind)], once: true)
     }
 
-    // A render loop sent a head pose: the keepalive stands down. Any thread.
-    func noteRenderPoseSent(real: Bool) {
+    // A render loop sent a head pose (realHead: the real one sent, at timestamp): the keepalive stands down and,
+    // for a real pose, caches it. Any thread.
+    func noteRenderPoseSent(realHead: AlvrDeviceMotion?, timestamp: Double = 0) {
         objc_sync_enter(viewParamsLock)
         let episodeSends = poseKeepalive.renderSent(now: CACurrentMediaTime())
+        if let realHead { keepalivePose.realSent(realHead, timestamp: timestamp) }
         objc_sync_exit(viewParamsLock)
         if let episodeSends {
             logStreamStart(.poseKeepalive, [("state", "end"), ("sent", "\(episodeSends)")])
         }
-        logStreamStart(.firstPoseSent, [("kind", real ? "real" : "fake")], once: true)
+        logStreamStart(.firstPoseSent, [("kind", realHead != nil ? "real" : "fake")], once: true)
     }
 
     // One DIAG stream_start line (StreamStartTiming) to the server log. Any thread.

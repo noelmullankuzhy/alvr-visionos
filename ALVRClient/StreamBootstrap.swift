@@ -106,7 +106,32 @@ struct PoseKeepalive {
         }
         return episodeSends
     }
+
+    /// Stream stop or disconnect: the next stream starts a new episode (and logs it).
+    mutating func reset() { self = PoseKeepalive() }
 }
+
+/// What a keepalive sends: the stream's last real head pose, at a timestamp never older than that pose's, so the
+/// server holds the head where it was (as before any keepalive existed). The fake pose only before the stream has
+/// sent a real one.
+struct KeepalivePose<Motion> {
+    enum Choice {
+        case fake
+        case real(Motion, timestamp: Double)
+    }
+
+    private var last: (motion: Motion, timestamp: Double)? = nil
+
+    mutating func realSent(_ motion: Motion, timestamp: Double) { last = (motion, timestamp) }
+    mutating func reset() { last = nil }
+
+    func choose(target: Double) -> Choice {
+        guard let last else { return .fake }
+        return .real(last.motion, timestamp: max(target, last.timestamp))
+    }
+}
+
+extension KeepalivePose.Choice: Equatable where Motion: Equatable {}
 
 /// Opens the streaming space without a silent failure. visionOS has one immersive space slot, so a full open that
 /// fails is retried once after dismissing whatever holds it, then falls back to the mixed space. A mixed open is
@@ -127,11 +152,18 @@ enum StreamSpaceOpen {
         fullImmersion ? fullID : mixedID
     }
 
-    /// The next step after attempt `attempt` (1 = first) to open `id`.
-    static func next(after id: String, opened: Bool, attempt: Int) -> Step {
-        if opened { return .done }
+    enum Result {
+        case opened
+        case userCancelled
+        case failed
+    }
+
+    /// The next step after attempt `attempt` (1 = first) to open `id`. A cancelled full open is not retried
+    /// (that would prompt again): the mixed space opens once instead.
+    static func next(after id: String, result: Result, attempt: Int) -> Step {
+        if result == .opened { return .done }
         guard id == fullID else { return .giveUp }
-        return attempt == 1 ? .dismissThenOpen(fullID) : .open(mixedID)
+        return attempt == 1 && result == .failed ? .dismissThenOpen(fullID) : .open(mixedID)
     }
 }
 

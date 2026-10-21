@@ -84,20 +84,21 @@ struct EntryControls: View {
             }
             let result = await openImmersiveSpace(id: id)
             pendingLog.cancel()
-            var opened = false
+            var outcome = StreamSpaceOpen.Result.failed
             var resultName = "unknown"
             switch result {
             case .opened:
-                opened = true
+                outcome = .opened
                 resultName = "opened"
             case .userCancelled:
+                outcome = .userCancelled
                 resultName = "user_cancelled"
             case .error:
                 resultName = "error"
             @unknown default:
                 break
             }
-            let step = StreamSpaceOpen.next(after: id, opened: opened, attempt: attempt)
+            let step = StreamSpaceOpen.next(after: id, result: outcome, attempt: attempt)
             let waited = Int((ProcessInfo.processInfo.systemUptime - requested) * 1000)
             EventHandler.shared.logStreamStart(.spaceOpenResult, [("id", id), ("result", resultName),
                                                                   ("waited_ms", "\(waited)"), ("next", "\(step)")])
