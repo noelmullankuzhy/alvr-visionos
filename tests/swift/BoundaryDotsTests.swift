@@ -48,22 +48,70 @@ enum BoundaryDotsTests {
         var session = BoundaryDotsSession()
         let outer = BoundaryDot(rayDeg: 0, eccDeg: 32.5)
         expectEqual(session.eye, .both)
-        expectEqual(session.toggle(right), "confirm")
-        expectEqual(session.toggle(outer), "confirm")
+        expectEqual(session.step(outward: true), nil, "no cursor means no step")
+        expectEqual(session.confirm(), nil, "no cursor means no confirmation")
+        expectEqual(session.select(right), "cursor")
+        expectEqual(session.cursor, right)
+        expect(!session.isConfirmed(right), "selection does not confirm")
+        expectEqual(session.step(outward: true), outer)
+        expectEqual(session.step(outward: false), right)
+        expectEqual(session.confirm(), right)
+        _ = session.step(outward: true)
+        expectEqual(session.confirm(), outer)
+        expect(!session.isConfirmed(right), "confirm replaces same ray")
         expectEqual(session.outermost(.both), [outer])
+        let other = BoundaryDot(rayDeg: 135, eccDeg: 47.5)
+        _ = session.select(other)
+        _ = session.confirm()
+        expectEqual(session.outermost(.both), [outer, other], "other rays remain")
+        expectEqual(session.select(outer), "clear")
+        expect(!session.isConfirmed(outer), "pinch confirmed dot clears")
+        expectEqual(session.cursor, other, "clearing does not move cursor")
         session.eye = .left
-        expect(!session.isConfirmed(right), "eye labels have independent marks")
-        _ = session.toggle(right)
+        expectEqual(session.cursor, nil, "cursor belongs to eye")
+        _ = session.select(right)
+        _ = session.confirm()
         session.eye = .both
-        expect(session.isConfirmed(right), "marks persist across selector changes")
-        expectEqual(session.toggle(outer), "clear")
-        expectEqual(session.outermost(.both), [right], "clear restores next outermost")
-        expectEqual(Diag.line(topic: "dots", tMs: 123, fields: session.markFields(right, action: "clear")),
-                    "DIAG dots t_ms=123 eye=Both action=clear ray_deg=0.000 ecc_deg=30.000 yaw_deg=30.000 pitch_deg=0.000")
+        expectEqual(session.cursor, other)
+        expect(session.isConfirmed(other), "eye confirms persist")
+        expect(!session.isConfirmed(right), "eye confirms are independent")
+        _ = session.select(BoundaryDot(rayDeg: 135, eccDeg: 70))
+        expectEqual(session.step(outward: true), nil, "70 degree ceiling")
+        expectEqual(session.cursor?.eccDeg, 70)
+        _ = session.select(BoundaryDot(rayDeg: 135, eccDeg: 10))
+        expectEqual(session.step(outward: false), nil, "10 degree floor")
+        expectEqual(session.cursor?.eccDeg, 10)
+        for action in ["cursor", "step_out", "step_in", "confirm", "clear"] {
+            let via = action.hasPrefix("step") || action == "confirm" ? "step" : "gaze"
+            expectEqual(Diag.line(topic: "dots", tMs: 123, fields: session.markFields(right, action: action, via: via)),
+                        "DIAG dots t_ms=123 eye=Both action=\(action) ray_deg=0.000 ecc_deg=30.000 yaw_deg=30.000 pitch_deg=0.000 via=\(via)")
+        }
         expectEqual(Diag.line(topic: "dots_summary", tMs: 124, fields: session.summaryFields(.both)),
-                    "DIAG dots_summary t_ms=124 eye=Both points=1 rays=0:30")
+                    "DIAG dots_summary t_ms=124 eye=Both points=1 rays=135:47.5")
         expectEqual(Diag.line(topic: "dots_summary", tMs: 125, fields: session.summaryFields(.right)),
                     "DIAG dots_summary t_ms=125 eye=R points=0 rays=none")
+        near(BoundaryDots.cursorDiameterDeg, 1.6, "cursor ring diameter")
+
+        var pinches = BoundaryDotsPinches<Int>()
+        for hand in [BoundaryDotsHand.left, .right] {
+            for duration in [0.499, 0.5, 0.8] {
+                expectEqual(pinches.update(id: 1, hand: hand, phase: .active, timestamp: 0, target: "dot_0"), nil)
+                // Updates and gaze drift must not reset the duration or starting target.
+                _ = pinches.update(id: 1, hand: hand, phase: .active, timestamp: 0.25, target: "backdrop")
+                let result = pinches.update(id: 1, hand: hand, phase: .ended, timestamp: duration, target: "backdrop")
+                expectEqual(result, BoundaryDotsPinch(hand: hand, held: duration >= 0.5, target: "dot_0"))
+                expectEqual(pinches.update(id: 1, hand: hand, phase: .ended, timestamp: duration, target: nil), nil, "no double dispatch")
+            }
+        }
+        _ = pinches.update(id: 2, hand: .left, phase: .active, timestamp: 1, target: nil)
+        _ = pinches.update(id: 3, hand: .right, phase: .active, timestamp: 1, target: "backdrop")
+        expectEqual(pinches.update(id: 2, hand: .left, phase: .ended, timestamp: 1.2, target: nil)?.hand, .left)
+        expectEqual(pinches.update(id: 3, hand: .right, phase: .ended, timestamp: 1.6, target: nil)?.held, true)
+        _ = pinches.update(id: 4, hand: .right, phase: .active, timestamp: 1, target: nil)
+        expectEqual(pinches.update(id: 4, hand: .right, phase: .cancelled, timestamp: 2, target: nil), nil)
+        expectEqual(pinches.update(id: 4, hand: .right, phase: .ended, timestamp: 2, target: nil), nil)
+        _ = pinches.update(id: 5, hand: nil, phase: .active, timestamp: 1, target: nil)
+        expectEqual(pinches.update(id: 5, hand: nil, phase: .ended, timestamp: 2, target: nil), nil, "unknown hand ignored")
 
         for diagnostics in [false, true] {
             for connected in [false, true] {
