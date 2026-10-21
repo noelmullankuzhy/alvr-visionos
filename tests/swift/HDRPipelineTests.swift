@@ -48,6 +48,7 @@ enum HDRPipelineTests {
         testPQShade()
         testProbeLevelsDecode()
         testProbeLineAndCadence()
+        testLiveProbeFlag()
         finishTests("HDRPipelineTests")
     }
 
@@ -382,6 +383,23 @@ enum HDRPipelineTests {
                 // One 10-bit PQ code is ~0.9% near 10 nits; the oracle allows 3% or 2 codes.
                 expect(nearRel(decoded[c], nits, level < 0.2 ? 0.02 : 0.01), "level \(level): \(nits) nits decoded \(decoded)")
             }
+        }
+    }
+
+    static func testLiveProbeFlag() {
+        let flag = HDRProbeFlag(environment: [:], defaultsValue: nil)
+        expect(!flag.enabled, "cached probe defaults off")
+        flag.update(defaultsValue: true)
+        expect(flag.enabled, "toggle enables the existing cache without relaunch")
+        flag.update(defaultsValue: false)
+        expect(!flag.enabled, "toggle disables the existing cache without relaunch")
+        for (value, expected) in [("1", true), ("0", false), ("", false)] {
+            let overridden = HDRProbeFlag(environment: [HDRPipeline.probeKey: value], defaultsValue: !expected)
+            expectEqual(overridden.enabled, expected, "environment overrides initial defaults")
+            overridden.update(defaultsValue: true)
+            expectEqual(overridden.enabled, expected, "environment overrides toggle on")
+            overridden.update(defaultsValue: false)
+            expectEqual(overridden.enabled, expected, "environment overrides toggle off")
         }
     }
 

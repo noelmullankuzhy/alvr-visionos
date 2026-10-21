@@ -149,7 +149,7 @@ enum HDRPipeline {
     }
 
     // Oracle log (decision 63): env ALVR_HDR_PROBE=1|true|yes|on, or the UserDefaults bool of the same name
-    // (also settable as the launch argument `-ALVR_HDR_PROBE YES`).
+    // (set by the HDR probe UI toggle, or the launch argument `-ALVR_HDR_PROBE YES`).
     static let probeKey = "ALVR_HDR_PROBE"
 
     static func probeEnabled(environment: [String: String], defaultsValue: Bool?) -> Bool {
@@ -162,6 +162,30 @@ enum HDRPipeline {
     static func probeLine(tMs: Int, eye: String, code: simd_double3, nits: simd_double3) -> String {
         "HDRPROBE t_ms=\(tMs) eye=\(eye) code=\(Int(code.x.rounded())),\(Int(code.y.rounded())),\(Int(code.z.rounded()))"
             + String(format: " nits=%.1f,%.1f,%.1f", nits.x, nits.y, nits.z)
+    }
+}
+
+// UI writes and render-thread reads share a small cache; no environment or defaults reads per frame.
+final class HDRProbeFlag {
+    private let lock = NSLock()
+    private let environment: [String: String]
+    private var cachedEnabled: Bool
+
+    init(environment: [String: String], defaultsValue: Bool?) {
+        self.environment = environment
+        cachedEnabled = HDRPipeline.probeEnabled(environment: environment, defaultsValue: defaultsValue)
+    }
+
+    var enabled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cachedEnabled
+    }
+
+    func update(defaultsValue: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        cachedEnabled = HDRPipeline.probeEnabled(environment: environment, defaultsValue: defaultsValue)
     }
 }
 
