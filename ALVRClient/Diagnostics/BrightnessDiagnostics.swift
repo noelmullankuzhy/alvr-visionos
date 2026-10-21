@@ -6,8 +6,23 @@ import RealityKit
     static let shared = PQDiagnostic()
     let player = AVPlayer()
     @Published var clips: [URL] = []
-    @Published var selected: URL?
+    @Published var selected: URL? {
+        didSet {
+            guard selected != oldValue else { return }
+            if let selected { UserDefaults.standard.set(selected.lastPathComponent, forKey: PQClipSelection.defaultsKey) }
+            switch PQControls.restartAfterSelectionChange(playing: playingPath, to: selected) {
+            case .play(let path, let clip): play(clip: clip, immersive: path == .immersive)
+            case .stop: stop()
+            default: break
+            }
+        }
+    }
     @Published var space: String?
+    @Published private(set) var playbackContext: PQPlaybackContext?
+    var playingPath: PQPlaybackPath? { playbackContext.flatMap { PQPlaybackPath(rawValue: $0.path) } }
+    func adjacentClip(forward: Bool) {
+        selected = PQClipSelection.adjacent(clips: clips, selected: selected, forward: forward)
+    }
     private var observer: Any?
     private var status: NSKeyValueObservation?
     func refresh() {
@@ -15,19 +30,22 @@ import RealityKit
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("diag-clips")
         clips = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [])
             .filter { ["mov", "mp4", "m4v"].contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-        selected = clips.first
+        selected = PQClipSelection.restore(clips: clips, current: selected,
+                                           rememberedName: UserDefaults.standard.string(forKey: PQClipSelection.defaultsKey))
     }
     func stop() {
+        playbackContext = nil
         player.pause()
         if let observer { player.removeTimeObserver(observer) }
         observer = nil; status = nil
         player.replaceCurrentItem(with: nil)
     }
-    func play(immersive: Bool) {
-        guard Diag.isOn, let selected else { return }
+    func play(clip: URL, immersive: Bool) {
+        guard Diag.isOn else { return }
         stop()
-        let context = PQPlaybackContext(clip: selected.lastPathComponent, path: immersive ? "realitykit" : "window")
-        let item = AVPlayerItem(url: selected)
+        let context = PQPlaybackContext(clip: clip.lastPathComponent, path: immersive ? "realitykit" : "window")
+        playbackContext = context
+        let item = AVPlayerItem(url: clip)
         player.replaceCurrentItem(with: item)
         Diag.log("pq", ["path": context.path, "clip": context.clip, "eligibleForHDRPlayback": AVPlayer.eligibleForHDRPlayback,
                         "availableHDRModes": AVPlayer.availableHDRModes.rawValue])
@@ -96,6 +114,7 @@ private struct BrightnessControls: View {
     @Environment(\.openImmersiveSpace) private var openSpace
     @Environment(\.dismissImmersiveSpace) private var dismissSpace
     @State private var layout = EDRLayout.onePercent
+    @State private var coarse = false
     @State private var fine = false
     @State private var gridRange = EDRGridRange.fine
     @State private var mirror = false
@@ -107,27 +126,59 @@ private struct BrightnessControls: View {
     private func configure() {
         EDRSession.shared.setImmersion(edr.immersion.rawValue)
         EDRSession.shared.configure(layout: layout, automatic: automatic, sustained: sustained,
-                                    fine: fine, gridRange: gridRange, mirror: mirror, borders: borders)
+                                    fine: fine, gridRange: gridRange, mirror: mirror, borders: borders, coarse: coarse)
     }
-    private func enter(_ id: String) {
+    private func enter(_ id: String, clip: URL? = nil) async {
+        busy = true
+        defer { busy = false }
+        EDRSession.shared.beginRun()
+        pq.stop()
+        if pq.space != nil { await dismissSpace(); pq.space = nil }
+        configure()
+        switch await openSpace(id: id) {
+        case .opened:
+            pq.space = id
+            if id == "PQDiagnostic", let clip { pq.play(clip: clip, immersive: true) }
+        case .error: error = "Could not open immersive space. Close any active stream first."
+        case .userCancelled: break
+        @unknown default: break
+        }
+    }
+    private var pqControls: PQControls {
+        PQControls(space: pq.space, layout: layout, selection: pq.selected, playing: pq.playingPath)
+    }
+    private func playbackBinding(_ path: PQPlaybackPath) -> Binding<Bool> {
+        Binding(get: { pqControls.isOn(path) }, set: { setPlayback(path, on: $0) })
+    }
+    private func setPlayback(_ path: PQPlaybackPath, on: Bool) {
+        guard !busy else { return }
+        let actions = pqControls.actions(path, on: on)
+        guard !actions.isEmpty else { return }
         busy = true
         Task {
-            EDRSession.shared.beginRun()
-            pq.stop()
-            if pq.space != nil { await dismissSpace(); pq.space = nil }
-            configure()
-            switch await openSpace(id: id) {
-            case .opened:
-                pq.space = id
-                if id == "PQDiagnostic" { pq.play(immersive: true) }
-            case .error: error = "Could not open immersive space. Close any active stream first."
-            case .userCancelled: break
-            @unknown default: break
+            defer { busy = false }
+            for action in actions {
+                switch action {
+                case .stop: pq.stop()
+                case .dismissSpace:
+                    await dismissSpace()
+                    pq.space = nil
+                case .play(let path, let clip): pq.play(clip: clip, immersive: path == .immersive)
+                case .openImmersive(let clip): await enter("PQDiagnostic", clip: clip)
+                }
             }
-            busy = false
         }
     }
     private var running: Bool { pq.space == "EDRDiagnostic" }
+    private var windowAllowed: Bool { pqWindowPlaybackAllowed(space: pq.space, layout: layout) }
+    private var matchClip: String? {
+        guard running, layout == .match, let context = pq.playbackContext,
+              context.path == "window", EDRMatch.clipNits(context.clip) != nil else { return nil }
+        return context.clip
+    }
+    private func recordMatch(_ result: EDRMatchResult) {
+        if let clip = matchClip { EDRSession.shared.recordMatch(result, clip: clip) }
+    }
     private var visible: Set<EDRControl> { edrVisibleControls(layout: layout, running: running) }
     private func stop() {
         pq.stop()
@@ -138,7 +189,7 @@ private struct BrightnessControls: View {
             Text("EDR ramp").font(.title2)
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 let value = layout.gridArea != nil ? gridRange.rawValue :
-                    EDRSession.shared.currentValue.map { "Value: \($0)" } ?? "Awaiting first frame"
+                    EDRSession.shared.currentValue.map { String(format: "Value: %.2f × SDR white", $0) } ?? "Awaiting first frame"
                 Text("\(running ? "Running" : "Idle") · \(edr.immersion.rawValue.capitalized) · \(layout.rawValue) · \(value)")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
@@ -163,7 +214,7 @@ private struct BrightnessControls: View {
                     ForEach([EDRLayout.onePercent, .tenPercent, .full, .checkerboard], id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 Section("Compare") {
-                    ForEach([EDRLayout.split, .pairOne, .pairFive, .pairTwenty], id: \.self) { Text($0.rawValue).tag($0) }
+                    ForEach([EDRLayout.split, .pairOne, .pairFive, .pairTwenty, .match], id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 Section("Grid") {
                     ForEach([EDRLayout.gridOne, .gridTen, .gridFifty], id: \.self) { Text($0.rawValue).tag($0) }
@@ -176,6 +227,7 @@ private struct BrightnessControls: View {
                 Toggle("Mirror", isOn: $mirror)
                 Toggle("Borders", isOn: $borders)
             }
+            if visible.contains(.matchOptions) { Toggle("Coarse (0.10 steps)", isOn: $coarse) }
             if visible.contains(.steps) {
                 Picker("Steps", selection: $fine) {
                     Text("Standard").tag(false)
@@ -187,20 +239,31 @@ private struct BrightnessControls: View {
         } header: {
             Text("Pattern")
         } footer: {
-            Text(layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70." :
+            Text(layout == .match ? "Match uses 0.02 steps, or 0.10 with Coarse." : layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70." :
                     "Automatic advances every 4 seconds, or 60 seconds with Sustained.")
         }
     }
     private var primarySection: some View {
         Section {
             HStack {
-                Button("Start") { enter("EDRDiagnostic") }.buttonStyle(.borderedProminent)
+                Button("Start") { Task { await enter("EDRDiagnostic") } }.buttonStyle(.borderedProminent)
                 Button("Stop") { stop() }
             }
         }
     }
     private var runningSection: some View {
         Section {
+            if visible.contains(.matchActions) {
+                HStack {
+                    Button("−") { EDRSession.shared.back() }.accessibilityLabel("Decrease Metal value")
+                    Button("+") { EDRSession.shared.next() }.accessibilityLabel("Increase Metal value")
+                }
+                Group {
+                    Button("Matched") { recordMatch(.equal) }
+                    Button("Video brighter than max") { recordMatch(.above) }
+                    Button("Video darker than min") { recordMatch(.below) }
+                }.disabled(matchClip == nil)
+            }
             if visible.contains(.navigation) {
                 HStack {
                     Button("Back") { EDRSession.shared.back() }
@@ -223,23 +286,29 @@ private struct BrightnessControls: View {
         } header: {
             Text("While running")
         } footer: {
-            Text(layout.gridArea != nil ? "Close one eye and compare neighbouring cells, A–E and 1–5." :
+            Text(layout == .match ? "Quick right pinch increases; quick left pinch decreases. Match the window to the patch." : layout.gridArea != nil ? "Close one eye and compare neighbouring cells, A–E and 1–5." :
                     layout.isComparison ? "Close one eye and compare right with the fixed 1.0 reference on the left." :
                     "Pinch the ramp or tap Next to advance; mark where brightness stops increasing.")
         }
     }
     private var pqSection: some View {
         Section {
-            Picker("Clip", selection: $pq.selected) {
-                ForEach(pq.clips, id: \.self) { Text($0.lastPathComponent).tag(Optional($0)) }
-            }.disabled(pq.space != nil)
+            HStack {
+                Button("Prev clip") { pq.adjacentClip(forward: false) }.disabled(pq.clips.isEmpty)
+                Picker("Clip", selection: $pq.selected) {
+                    ForEach(pq.clips, id: \.self) { Text($0.lastPathComponent).tag(Optional($0)) }
+                }
+                Button("Next clip") { pq.adjacentClip(forward: true) }.disabled(pq.clips.isEmpty)
+            }
             if pq.clips.isEmpty { Text("Copy PQ clips to Documents/diag-clips, then Reload.").font(.caption) }
             HStack {
-                Button("Reload") { pq.refresh() }.disabled(pq.space != nil)
-                Button("Play in window") { pq.play(immersive: false) }.disabled(pq.space != nil || pq.selected == nil)
-                Button("Play immersive") { enter("PQDiagnostic") }.disabled(pq.selected == nil)
-            }
-            if pq.space == nil { VideoPlayer(player: pq.player).frame(height: 240) }
+                Button("Reload") { pq.refresh() }
+                Toggle("Play in window", isOn: playbackBinding(.window))
+                    .disabled(busy || !pqControls.canToggle(.window))
+                Toggle("Play immersive", isOn: playbackBinding(.immersive))
+                    .disabled(busy || !pqControls.canToggle(.immersive))
+            }.toggleStyle(.button)
+            if windowAllowed { VideoPlayer(player: pq.player).frame(height: 240) }
         } header: {
             Text("HDR video (PQ)")
         } footer: {
@@ -249,19 +318,22 @@ private struct BrightnessControls: View {
     var body: some View {
         Form {
             header
-            displaySection
-            patternSection
-            primarySection
-            if running { runningSection }
+            displaySection.disabled(busy)
+            patternSection.disabled(busy)
+            primarySection.disabled(busy)
+            if running { runningSection.disabled(busy) }
             pqSection
             if !error.isEmpty { Text(error).font(.caption) }
         }
         .formStyle(.grouped)
         .frame(width: 520)
-        .disabled(busy)
         .onAppear { pq.refresh(); configure() }
         .onChange(of: edr.immersion) { configure() }
-        .onChange(of: layout) { configure() }
+        .onChange(of: layout) {
+            configure()
+            if !windowAllowed, pq.playingPath == .window { pq.stop() }
+        }
+        .onChange(of: coarse) { configure() }
         .onChange(of: fine) { configure() }
         .onChange(of: gridRange) { configure() }
         .onChange(of: mirror) { configure() }
