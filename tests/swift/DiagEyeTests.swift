@@ -1,9 +1,16 @@
-// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/DiagEye.swift ALVRClient/Diagnostics/EDRDiagnostic.swift
+// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/DiagEye.swift ALVRClient/Diagnostics/DiagEyeRenderer.swift ALVRClient/Diagnostics/EDRDiagnostic.swift
 import Foundation
+import Metal
 import simd
 
 @main enum DiagEyeTests {
     static func main() throws {
+        // Creating a descriptor needs no Metal device; exercise the factory used by every badge pipeline.
+        for format in [MTLPixelFormat.rgba16Float, .bgra8Unorm_srgb] {
+            let descriptor = DiagEyeDrawing.pipelineDescriptor(colourFormat: format, depthFormat: .depth32Float)
+            expectEqual(descriptor.inputPrimitiveTopology, .triangle, "layer-index vertex output requires triangle topology")
+            expectEqual(descriptor.colorAttachments[0].pixelFormat, format, "badge drawable format")
+        }
         expectEqual(DiagEye.assign(view: 0, x: -0.032).eye, .left, "left index and offset agree")
         expectEqual(DiagEye.assign(view: 1, x: 0.032).eye, .right, "right index and offset agree")
         expectEqual(DiagEye.assign(view: 0, x: 0.032).eye, .right, "offset wins over reversed view index")
