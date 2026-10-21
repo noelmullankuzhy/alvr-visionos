@@ -323,11 +323,11 @@ class WorldTracker {
         inputGate.send(pathId, value)
     }
 
-    // The profile to declare at STREAMING_STARTED for the connected controllers and the emulation mode.
-    func currentInputProfile() -> ControllerInputProfile {
+    // STREAMING_STARTED: the gate declares the emulation mode's profile; Sense detection is only logged (GM 61d).
+    func startInputStream() {
         let psvr2Connected = GCController.controllers().contains { $0.vendorName?.contains("PlayStation VR") ?? false }
         let emulationMode = Settings.getAlvrSettings()?.headset.controllers?.emulation_mode ?? ""
-        return ControllerInputProfile.active(emulationMode: emulationMode, psvr2Connected: psvr2Connected)
+        WorldTracker.inputGate.streamStarted(emulationMode: emulationMode, senseDetected: psvr2Connected)
     }
 
     // Face tracking
@@ -599,8 +599,8 @@ class WorldTracker {
                 }
                 if let alvrSettings = Settings.getAlvrSettings() {
                     let emulationMode = alvrSettings.headset.controllers?.emulation_mode ?? ""
-                    // The stream's profile is fixed at STREAMING_STARTED; a change here is only logged.
-                    WorldTracker.inputGate.controllersChanged(profile:ControllerInputProfile.active(emulationMode: emulationMode, psvr2Connected: detectedPsvr))
+                    // The stream's profile is fixed at STREAMING_STARTED by the emulation mode; detection is only logged.
+                    WorldTracker.inputGate.controllersDetected(emulationMode: emulationMode, senseDetected: detectedPsvr)
                 }
                 for stylus in GCStylus.styli {
                     do {

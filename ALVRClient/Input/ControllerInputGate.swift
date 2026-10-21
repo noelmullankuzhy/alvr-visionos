@@ -5,26 +5,30 @@
 //
 //  The server builds its button mapping per connection from the declared
 //  interaction profile and drops a declaration sent while disconnected. So each
-//  stream's profile is chosen once at STREAMING_STARTED (PSVR2 iff emulation
-//  mode PSVR2Sense and Sense controllers are detected, else Quest Touch),
-//  declared, and only then is the gate opened, all under one lock. The profile
-//  never changes during the stream: a controller change mid-stream is logged
-//  once and waits for the next stream. Each stream has a generation number;
-//  STOPPED/disconnect closes it and nothing goes out until the next STARTED.
+//  stream's profile is chosen once at STREAMING_STARTED from the emulation mode
+//  alone (PSVR2Sense -> PSVR2, any other mode -> Quest Touch; GM 61d), declared,
+//  and only then is the gate opened, all under one lock. Sense controller
+//  detection never selects the profile: PSVR2Sense without Sense controllers is
+//  logged once per stream. The profile never changes during the stream. Each
+//  stream has a generation number; STOPPED/disconnect closes it and nothing
+//  goes out until the next STARTED.
 //
 //  A frame's input path takes the lock once: it reads the stream's profile, maps
 //  the raw controller state with it (send(mapping:)), filters to that profile's
 //  button_set and delivers, all in one critical section. A frame mapped under
 //  one profile therefore can never be delivered under another.
 //
-//  Accepted residual (GM decision 61c, not fixed here): the Rust core installs
-//  the next connection's sender before this gate sees STOPPED/STARTED, so for
-//  the milliseconds until those events are processed the previous stream's
-//  profile can still map inputs onto the new connection. The new connection's
-//  default source set follows the emulation mode (PSVR2 set under PSVR2Sense),
-//  so this only matters when the mode changed across the reconnect, and a mode
-//  change restarts SteamVR: those inputs are inert. A Rust-core generation token
-//  is not worth the core change.
+//  Accepted residual (GM decisions 61c and 61d, not fixed here): the Rust core
+//  installs the next connection's sender before this gate sees STOPPED/STARTED,
+//  so for the milliseconds until those events are processed the previous
+//  stream's profile can still map inputs onto the new connection. Both the
+//  client profile and the server's default source set are the same pure
+//  function of the emulation mode (61a, 61d), so for an unchanged mode the two
+//  streams' profiles are identical and nothing crosses: attaching or detaching
+//  Sense controllers between reconnects cannot change the profile. Only a mode
+//  change across the reconnect can leak stale-profile inputs, and a mode change
+//  restarts SteamVR: those inputs are inert. A Rust-core generation token is
+//  not worth the core change.
 //
 //  Pure (Foundation only): the ALVR calls are injected, so tests/swift runs it.
 //
@@ -56,6 +60,8 @@ final class ControllerInputGate {
     private let log: (String) -> Void
     /// Test seam: called on the caller's thread with the entry point's name just before it takes the lock.
     private let beforeLock: ((String) -> Void)?
+    /// Test seam: called with the entry point's name just after it takes the lock.
+    private let inLock: ((String) -> Void)?
     private let idByPath: [String: UInt64]
     private let pathById: [UInt64: String]
     private let questIds: Set<UInt64>
@@ -63,18 +69,21 @@ final class ControllerInputGate {
     private var stream: ControllerInputStream?
     private var lastGeneration: UInt64 = 0
     private var changeLoggedGeneration: UInt64 = 0
+    private var noSenseLoggedGeneration: UInt64 = 0
     private var reported: Set<String> = []
 
     init(pathId: @escaping (String) -> UInt64,
          deliver: @escaping (UInt64, ButtonInputValue) -> Void,
          announce: @escaping (ControllerInputProfile) -> Void,
          log: @escaping (String) -> Void,
-         beforeLock: ((String) -> Void)? = nil) {
+         beforeLock: ((String) -> Void)? = nil,
+         inLock: ((String) -> Void)? = nil) {
         self.pathId = pathId
         self.deliver = deliver
         self.announce = announce
         self.log = log
         self.beforeLock = beforeLock
+        self.inLock = inLock
         var idByPath: [String: UInt64] = [:]
         var pathById: [UInt64: String] = [:]
         for path in ControllerInputGate.knownPaths {
@@ -91,6 +100,7 @@ final class ControllerInputGate {
     private func locked<T>(_ entry: String, _ body: () -> T) -> T {
         beforeLock?(entry)
         lock.lock(); defer { lock.unlock() }
+        inLock?(entry)
         return body()
     }
 
@@ -108,12 +118,16 @@ final class ControllerInputGate {
     /// A STARTED over a still-open stream (its STOPPED not seen) replaces it the same way.
     @discardableResult
     func streamStarted(profile: ControllerInputProfile) -> ControllerInputStream {
+        locked("streamStarted") { openLocked(profile) }
+    }
+
+    /// STREAMING_STARTED from the app: the profile comes from the emulation mode alone (GM 61d);
+    /// Sense detection is only logged.
+    @discardableResult
+    func streamStarted(emulationMode: String, senseDetected: Bool) -> ControllerInputStream {
         locked("streamStarted") {
-            stream = nil
-            announce(profile)
-            lastGeneration += 1
-            let opened = ControllerInputStream(profile: profile, generation: lastGeneration)
-            stream = opened
+            let opened = openLocked(ControllerInputProfile.active(emulationMode: emulationMode))
+            noteSenseLocked(emulationMode: emulationMode, senseDetected: senseDetected)
             return opened
         }
     }
@@ -121,12 +135,39 @@ final class ControllerInputGate {
     /// Controllers changed. The stream's profile is immutable: a mismatch is logged once per stream
     /// and takes effect at the next STREAMING_STARTED.
     func controllersChanged(profile: ControllerInputProfile) {
+        locked("controllersChanged") { changedLocked(profile) }
+    }
+
+    /// Controllers were (re)detected mid-stream. Detection never selects the profile; under PSVR2Sense
+    /// a missing Sense controller is logged once per stream.
+    func controllersDetected(emulationMode: String, senseDetected: Bool) {
         locked("controllersChanged") {
-            guard let current = stream, current.profile != profile,
-                  changeLoggedGeneration != current.generation else { return }
-            changeLoggedGeneration = current.generation
-            log("Controllers changed mid-stream (now \(profile)); stream \(current.generation) keeps \(current.profile) until the next stream")
+            changedLocked(ControllerInputProfile.active(emulationMode: emulationMode))
+            noteSenseLocked(emulationMode: emulationMode, senseDetected: senseDetected)
         }
+    }
+
+    private func openLocked(_ profile: ControllerInputProfile) -> ControllerInputStream {
+        stream = nil
+        announce(profile)
+        lastGeneration += 1
+        let opened = ControllerInputStream(profile: profile, generation: lastGeneration)
+        stream = opened
+        return opened
+    }
+
+    private func changedLocked(_ profile: ControllerInputProfile) {
+        guard let current = stream, current.profile != profile,
+              changeLoggedGeneration != current.generation else { return }
+        changeLoggedGeneration = current.generation
+        log("Controllers changed mid-stream (now \(profile)); stream \(current.generation) keeps \(current.profile) until the next stream")
+    }
+
+    private func noteSenseLocked(emulationMode: String, senseDetected: Bool) {
+        guard let current = stream, emulationMode == "PSVR2Sense", !senseDetected,
+              noSenseLoggedGeneration != current.generation else { return }
+        noSenseLoggedGeneration = current.generation
+        log("PSVR2Sense mode without Sense controllers detected; stream \(current.generation) keeps \(current.profile)")
     }
 
     /// STREAMING_STOPPED or disconnect: close the generation; nothing goes out until the next stream.

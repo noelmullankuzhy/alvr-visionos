@@ -30,8 +30,10 @@ enum ControllerInputProfile: Equatable {
         }
     }
 
-    static func active(emulationMode: String, psvr2Connected: Bool) -> ControllerInputProfile {
-        emulationMode == "PSVR2Sense" && psvr2Connected ? .psvr2Sense : .questTouch
+    /// A pure function of the emulation mode, the same as the server's default source set (GM 61a/61d), so client
+    /// and server never disagree for an unchanged mode. Controller detection does not select it.
+    static func active(emulationMode: String) -> ControllerInputProfile {
+        emulationMode == "PSVR2Sense" ? .psvr2Sense : .questTouch
     }
 
     var buttonSet: Set<String> {
