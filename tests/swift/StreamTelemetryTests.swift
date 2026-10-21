@@ -230,6 +230,35 @@ private func testPacingCounters() {
     expectEqual(double(sink.objects("ALVRSTATS").last ?? [:], "unique_presented_fps"), 1.0, "unique count restarts per session")
 }
 
+// Out-of-order presentation: every timestamp not presented before counts once.
+private func testUniquePresentedOutOfOrder() {
+    let (telemetry, sink, clock) = makeTelemetry()
+    startStream(telemetry)
+    for ts: UInt64 in [200, 100, 200, 100, 150] {
+        telemetry.recordRender(frameTimestampNs: ts, displayed: true, presentNs: clock.ns)
+    }
+    clock.advance(ms: 1000)
+    telemetry.recordRender(frameTimestampNs: 150, displayed: true, presentNs: clock.ns)
+    let s = sink.objects("ALVRSTATS").last ?? [:]
+    expectEqual(double(s, "unique_presented_fps"), 3.0, "200, 100 and 150 are distinct even though 100 and 150 are below the max")
+    expectEqual(int(s, "frames_presented"), 5, "timestamp changes")
+}
+
+// The same timestamp queued twice: queue age is measured from the latest enqueue.
+private func testQueueAgeUsesLatestEnqueue() {
+    let (telemetry, sink, clock) = makeTelemetry()
+    startStream(telemetry)
+    telemetry.recordFrameQueued(timestampNs: 100)
+    clock.advance(ms: 10)
+    telemetry.recordFrameQueued(timestampNs: 100)
+    clock.advance(ms: 2)
+    telemetry.recordSelection(timestampNs: 100, source: .new, pollWaitNs: 0)
+    clock.advance(ms: 988)
+    telemetry.recordRender(frameTimestampNs: nil, displayed: false, presentNs: clock.ns)
+    let s = sink.objects("ALVRSTATS").last ?? [:]
+    expectEqual(double(s, "queue_age_ms_mean"), 2.0, "age from the latest enqueue, not the first")
+}
+
 private func testFormatRecords() {
     let (telemetry, sink, _) = makeTelemetry()
     telemetry.updateFormat { $0.renderer = "metal" }
@@ -465,6 +494,8 @@ enum StreamTelemetryTests {
         testWindowingAndCounters()
         testStatsJsonShape()
         testPacingCounters()
+        testUniquePresentedOutOfOrder()
+        testQueueAgeUsesLatestEnqueue()
         testFormatRecords()
         testCodecHelpers()
         testFileSink()

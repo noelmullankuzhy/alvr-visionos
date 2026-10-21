@@ -17,6 +17,12 @@ private func testSubmitQueueDuration() {
     expectEqual(FramePacing.submitQueueNs(vsyncNs: 100 * ms, completionNs: 97 * ms), 3 * ms, "time left until vsync")
     expectEqual(FramePacing.submitQueueNs(vsyncNs: 100 * ms, completionNs: 102 * ms), 0, "late completion saturates at 0")
     expectEqual(FramePacing.submitQueueNs(vsyncNs: 0, completionNs: 1), 0, "no wrap at the bottom")
+    // The core adds this to an Instant; anything beyond the horizon is clamped so it cannot overflow there.
+    expectEqual(FramePacing.submitQueueNs(vsyncNs: UInt64.max, completionNs: 0), FramePacing.submitHorizonNs, "clamped high")
+    expectEqual(FramePacing.submitQueueNs(vsyncNs: UInt64.max, completionNs: UInt64.max), 0, "equal extremes")
+    expectEqual(FramePacing.submitQueueNs(vsyncNs: 0, completionNs: UInt64.max), 0, "late extreme")
+    expectEqual(FramePacing.submitQueueNs(vsyncNs: 2_000 * ms, completionNs: 1_000 * ms), 1_000 * ms, "exactly the horizon")
+    expectEqual(FramePacing.submitHorizonNs, 1_000 * ms, "1 s horizon")
 }
 
 private func testLateness() {
@@ -68,8 +74,9 @@ private func testChoose() {
     expectEqual(FramePacing.choose(queue: [], targetNs: 50, lastTimestamp: 5, lastSubmitted: true, canWait: false), C.reuse, "budget gone: reproject")
     // Only future frames queued: waiting cannot help this vsync, reproject now and keep them.
     expectEqual(FramePacing.choose(queue: [60], targetNs: 50, lastTimestamp: 5, lastSubmitted: true, canWait: true), C.reuse, "future frame kept for later")
-    // Nothing shown yet: an old-style oldest pick rather than a blank.
-    expectEqual(FramePacing.choose(queue: [60, 70], targetNs: 50, lastTimestamp: nil, lastSubmitted: true, canWait: false), C.queued(0), "first frame never blank")
+    // Nothing shown yet and only future frames: show nothing now, keep them queued for their vsync.
+    expectEqual(FramePacing.choose(queue: [60, 70], targetNs: 50, lastTimestamp: nil, lastSubmitted: true, canWait: false), C.none, "future frame never shown early")
+    expectEqual(FramePacing.choose(queue: [60, 70], targetNs: 50, lastTimestamp: nil, lastSubmitted: true, canWait: true), C.none, "waiting cannot make a future frame qualify")
     expectEqual(FramePacing.choose(queue: [], targetNs: 50, lastTimestamp: nil, lastSubmitted: true, canWait: true), C.wait, "first frame: wait")
     expectEqual(FramePacing.choose(queue: [], targetNs: 50, lastTimestamp: nil, lastSubmitted: true, canWait: false), C.none, "nothing at all")
 }

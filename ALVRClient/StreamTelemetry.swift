@@ -207,8 +207,11 @@ final class StreamTelemetry {
     private var pollWaitMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var lateMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var lastPresentedTimestampNs: UInt64? = nil
-    // Video timestamps increase, so a timestamp above the newest presented one is a distinct frame.
-    private var newestPresentedTimestampNs: UInt64? = nil
+    // Recently presented timestamps (bounded): a timestamp not in here is a distinct presentation.
+    private static let presentedRingSize = 64
+    private var presentedRing = [UInt64](repeating: 0, count: StreamTelemetry.presentedRingSize)
+    private var presentedRingCount = 0
+    private var presentedRingIndex = 0
 
     // Receive time per frame timestamp, a small ring so presentation can find it without allocating.
     private static let receiveRingSize = 32
@@ -240,7 +243,8 @@ final class StreamTelemetry {
             active = true
             resetWindow(clock())
             lastPresentedTimestampNs = nil
-            newestPresentedTimestampNs = nil
+            presentedRingCount = 0
+            presentedRingIndex = 0
         }
         format.viewWidth = viewWidth
         format.viewHeight = viewHeight
@@ -346,7 +350,10 @@ final class StreamTelemetry {
         switch source {
         case .new:
             if let ts = timestampNs {
-                for i in 0..<StreamTelemetry.receiveRingSize where queuedRingTimestamps[i] == ts {
+                // Newest enqueue first, so a re-queued timestamp is aged from its latest decode.
+                for back in 1...StreamTelemetry.receiveRingSize {
+                    let i = (queuedRingIndex - back + StreamTelemetry.receiveRingSize) % StreamTelemetry.receiveRingSize
+                    guard queuedRingTimestamps[i] == ts else { continue }
                     if now >= queuedRingNs[i] {
                         queueAgeMs.add(Double(now - queuedRingNs[i]) / 1_000_000.0)
                     }
@@ -389,9 +396,11 @@ final class StreamTelemetry {
             } else {
                 framesPresented += 1
                 lastPresentedTimestampNs = ts
-                if newestPresentedTimestampNs == nil || ts > newestPresentedTimestampNs! {
+                if !presentedRing[0..<presentedRingCount].contains(ts) {
                     uniquePresented += 1
-                    newestPresentedTimestampNs = ts
+                    presentedRing[presentedRingIndex] = ts
+                    presentedRingIndex = (presentedRingIndex + 1) % StreamTelemetry.presentedRingSize
+                    presentedRingCount = min(presentedRingCount + 1, StreamTelemetry.presentedRingSize)
                 }
                 for i in 0..<StreamTelemetry.receiveRingSize where receiveRingTimestamps[i] == ts {
                     if presentNs >= receiveRingNs[i] {

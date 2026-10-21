@@ -29,9 +29,13 @@ enum FramePacing {
         return d > UInt64(Int64.max) ? Int64.min : -Int64(d)
     }
 
-    // Time from GPU completion until predicted vsync, the duration alvr_report_submit expects; 0 when late.
+    // Upper bound for the submit duration: the core adds it to an Instant, so a bogus vsync must not overflow it.
+    static let submitHorizonNs: UInt64 = 1_000_000_000
+
+    // Time from GPU completion until predicted vsync, the duration alvr_report_submit expects; 0 when late,
+    // at most submitHorizonNs.
     static func submitQueueNs(vsyncNs: UInt64, completionNs: UInt64) -> UInt64 {
-        vsyncNs > completionNs ? vsyncNs - completionNs : 0
+        vsyncNs > completionNs ? min(vsyncNs - completionNs, submitHorizonNs) : 0
     }
 
     // Signed lateness of GPU completion against predicted vsync (positive = late).
@@ -94,10 +98,8 @@ enum FramePacing {
         if canWait && queue.isEmpty {
             return .wait
         }
-        if lastTimestamp != nil {
-            return .reuse
-        }
-        return queue.isEmpty ? .none : .queued(0)
+        // Nothing shown yet and only future frames queued: draw nothing now; they stay queued for their vsync.
+        return lastTimestamp != nil ? .reuse : .none
     }
 }
 
