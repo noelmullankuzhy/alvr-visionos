@@ -94,13 +94,32 @@ struct StreamStatsRecord: Encodable, Equatable {
     var droppedBeforeDecode: Int
     var droppedDecodeOverrun: Int
     var droppedQueueOverflow: Int
+    var droppedSelectionSkip: Int
     var presentedFps: Double
+    var uniquePresentedFps: Double
     var renderLoops: Int
     var renderLoopHz: Double
+    var repeatsNoNewFrame: Int
+    var repeatsRetry: Int
+    var lateFrames: Int
     var decodeMsMean: Double?
     var decodeMsP95: Double?
     var receiveToPresentMsMean: Double?
     var receiveToPresentMsP95: Double?
+    var queueAgeMsMean: Double?
+    var queueAgeMsP95: Double?
+    var pollWaitMsMean: Double?
+    var pollWaitMsP95: Double?
+    var lateMsMean: Double?
+    var lateMsP95: Double?
+}
+
+// How the render loop got the frame it draws (see FramePacing.Choice).
+enum FrameSelectionSource {
+    case new     // dequeued a decoded frame
+    case retry   // re-presented the previous frame because it was never submitted
+    case reuse   // reprojected the previous frame because no new frame arrived in time
+    case none    // nothing to draw
 }
 
 struct StreamFormatRecord: Encodable, Equatable {
@@ -177,15 +196,29 @@ final class StreamTelemetry {
     private var droppedBeforeDecode = 0
     private var droppedDecodeOverrun = 0
     private var droppedQueueOverflow = 0
+    private var droppedSelectionSkip = 0
+    private var uniquePresented = 0
+    private var repeatsNoNewFrame = 0
+    private var repeatsRetry = 0
+    private var lateFrames = 0
     private var decodeMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var receiveToPresentMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
+    private var queueAgeMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
+    private var pollWaitMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
+    private var lateMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var lastPresentedTimestampNs: UInt64? = nil
+    // Video timestamps increase, so a timestamp above the newest presented one is a distinct frame.
+    private var newestPresentedTimestampNs: UInt64? = nil
 
     // Receive time per frame timestamp, a small ring so presentation can find it without allocating.
     private static let receiveRingSize = 32
     private var receiveRingTimestamps = [UInt64](repeating: 0, count: StreamTelemetry.receiveRingSize)
     private var receiveRingNs = [UInt64](repeating: 0, count: StreamTelemetry.receiveRingSize)
     private var receiveRingIndex = 0
+    // Decode-complete (queued) time per frame timestamp, for decode->selection age.
+    private var queuedRingTimestamps = [UInt64](repeating: 0, count: StreamTelemetry.receiveRingSize)
+    private var queuedRingNs = [UInt64](repeating: 0, count: StreamTelemetry.receiveRingSize)
+    private var queuedRingIndex = 0
 
     private var format = StreamFormatRecord()
     private var lastEmittedFormat: StreamFormatRecord? = nil
@@ -207,6 +240,7 @@ final class StreamTelemetry {
             active = true
             resetWindow(clock())
             lastPresentedTimestampNs = nil
+            newestPresentedTimestampNs = nil
         }
         format.viewWidth = viewWidth
         format.viewHeight = viewHeight
@@ -288,6 +322,61 @@ final class StreamTelemetry {
         lock.unlock()
     }
 
+    // Called when a decoded frame enters the render queue.
+    func recordFrameQueued(timestampNs: UInt64) {
+        let now = clock()
+        lock.lock()
+        queuedRingTimestamps[queuedRingIndex] = timestampNs
+        queuedRingNs[queuedRingIndex] = now
+        queuedRingIndex = (queuedRingIndex + 1) % StreamTelemetry.receiveRingSize
+        lock.unlock()
+    }
+
+    // Called once per render loop after frame selection. `pollWaitNs` is the time spent waiting for a
+    // frame after optimalInputTime; `skipped` counts older queued frames dropped in favour of a newer one.
+    func recordSelection(timestampNs: UInt64?, source: FrameSelectionSource, pollWaitNs: UInt64, skipped: Int = 0) {
+        let now = clock()
+        lock.lock()
+        guard active else {
+            lock.unlock()
+            return
+        }
+        pollWaitMs.add(Double(pollWaitNs) / 1_000_000.0)
+        droppedSelectionSkip += skipped
+        switch source {
+        case .new:
+            if let ts = timestampNs {
+                for i in 0..<StreamTelemetry.receiveRingSize where queuedRingTimestamps[i] == ts {
+                    if now >= queuedRingNs[i] {
+                        queueAgeMs.add(Double(now - queuedRingNs[i]) / 1_000_000.0)
+                    }
+                    break
+                }
+            }
+        case .retry:
+            repeatsRetry += 1
+        case .reuse:
+            repeatsNoNewFrame += 1
+        case .none:
+            break
+        }
+        lock.unlock()
+    }
+
+    // Called on GPU completion of a submitted frame, with predicted vsync and completion on one clock.
+    func recordSubmitTiming(vsyncNs: UInt64, completionNs: UInt64) {
+        lock.lock()
+        guard active else {
+            lock.unlock()
+            return
+        }
+        lateMs.add(Double(FramePacing.latenessNs(vsyncNs: vsyncNs, completionNs: completionNs)) / 1_000_000.0)
+        if FramePacing.isLate(vsyncNs: vsyncNs, completionNs: completionNs) {
+            lateFrames += 1
+        }
+        lock.unlock()
+    }
+
     // Called once per render loop. `displayed` means a video frame was drawn; a frame whose timestamp
     // was already presented counts as a repeat (reprojected/reused), otherwise as newly presented.
     // `presentNs` is the predicted presentation time on the same clock as `nowNs()`.
@@ -300,6 +389,10 @@ final class StreamTelemetry {
             } else {
                 framesPresented += 1
                 lastPresentedTimestampNs = ts
+                if newestPresentedTimestampNs == nil || ts > newestPresentedTimestampNs! {
+                    uniquePresented += 1
+                    newestPresentedTimestampNs = ts
+                }
                 for i in 0..<StreamTelemetry.receiveRingSize where receiveRingTimestamps[i] == ts {
                     if presentNs >= receiveRingNs[i] {
                         receiveToPresentMs.add(Double(presentNs - receiveRingNs[i]) / 1_000_000.0)
@@ -375,8 +468,16 @@ final class StreamTelemetry {
         droppedBeforeDecode = 0
         droppedDecodeOverrun = 0
         droppedQueueOverflow = 0
+        droppedSelectionSkip = 0
+        uniquePresented = 0
+        repeatsNoNewFrame = 0
+        repeatsRetry = 0
+        lateFrames = 0
         decodeMs.reset()
         receiveToPresentMs.reset()
+        queueAgeMs.reset()
+        pollWaitMs.reset()
+        lateMs.reset()
     }
 
     private func takeWindowIfDue(_ now: UInt64) -> StreamStatsRecord? {
@@ -390,6 +491,7 @@ final class StreamTelemetry {
         let windowS = Double(now >= windowStartNs ? now - windowStartNs : 0) / 1_000_000_000.0
         let loops = framesPresented + framesRepeated + framesBlank
         let perSecond = { (count: Int) -> Double in windowS > 0 ? StreamTelemetry.round(Double(count) / windowS, 3) : 0 }
+        let ms3 = { (value: Double?) -> Double? in value.map { StreamTelemetry.round($0, 3) } }
         let record = StreamStatsRecord(
             t: StreamTelemetry.round(wallClock(), 3),
             windowS: StreamTelemetry.round(windowS, 3),
@@ -399,17 +501,28 @@ final class StreamTelemetry {
             framesPresented: framesPresented,
             framesRepeated: framesRepeated,
             framesBlank: framesBlank,
-            framesDropped: droppedBeforeDecode + droppedDecodeOverrun + droppedQueueOverflow,
+            framesDropped: droppedBeforeDecode + droppedDecodeOverrun + droppedQueueOverflow + droppedSelectionSkip,
             droppedBeforeDecode: droppedBeforeDecode,
             droppedDecodeOverrun: droppedDecodeOverrun,
             droppedQueueOverflow: droppedQueueOverflow,
+            droppedSelectionSkip: droppedSelectionSkip,
             presentedFps: perSecond(framesPresented),
+            uniquePresentedFps: perSecond(uniquePresented),
             renderLoops: loops,
             renderLoopHz: perSecond(loops),
-            decodeMsMean: decodeMs.mean.map { StreamTelemetry.round($0, 3) },
-            decodeMsP95: decodeMs.percentile(0.95).map { StreamTelemetry.round($0, 3) },
-            receiveToPresentMsMean: receiveToPresentMs.mean.map { StreamTelemetry.round($0, 3) },
-            receiveToPresentMsP95: receiveToPresentMs.percentile(0.95).map { StreamTelemetry.round($0, 3) }
+            repeatsNoNewFrame: repeatsNoNewFrame,
+            repeatsRetry: repeatsRetry,
+            lateFrames: lateFrames,
+            decodeMsMean: ms3(decodeMs.mean),
+            decodeMsP95: ms3(decodeMs.percentile(0.95)),
+            receiveToPresentMsMean: ms3(receiveToPresentMs.mean),
+            receiveToPresentMsP95: ms3(receiveToPresentMs.percentile(0.95)),
+            queueAgeMsMean: ms3(queueAgeMs.mean),
+            queueAgeMsP95: ms3(queueAgeMs.percentile(0.95)),
+            pollWaitMsMean: ms3(pollWaitMs.mean),
+            pollWaitMsP95: ms3(pollWaitMs.percentile(0.95)),
+            lateMsMean: ms3(lateMs.mean),
+            lateMsP95: ms3(lateMs.percentile(0.95))
         )
         resetWindow(now)
         return record

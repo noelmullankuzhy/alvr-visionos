@@ -1,5 +1,5 @@
-// SOURCES: ALVRClient/StreamTelemetry.swift
-// Window counters, percentiles, per-window reset, JSON shape and the jsonl file sink of StreamTelemetry.
+// SOURCES: ALVRClient/StreamTelemetry.swift ALVRClient/FramePacing.swift
+// Window counters, pacing counters, percentiles, per-window reset, JSON shape and the jsonl file sink of StreamTelemetry.
 import Foundation
 
 private final class CaptureSink: StreamTelemetrySink {
@@ -155,14 +155,79 @@ private func testStatsJsonShape() {
     }
     expect(!line.json.contains("\n"), "one line")
     let keys = ["decode_errors", "dropped_before_decode", "dropped_decode_overrun", "dropped_queue_overflow",
-                "frames_blank", "frames_decoded", "frames_dropped", "frames_presented", "frames_received",
-                "frames_repeated", "presented_fps", "render_loop_hz", "render_loops", "t", "type", "window_s"]
+                "dropped_selection_skip", "frames_blank", "frames_decoded", "frames_dropped", "frames_presented",
+                "frames_received", "frames_repeated", "late_frames", "presented_fps", "render_loop_hz", "render_loops",
+                "repeats_no_new_frame", "repeats_retry", "t", "type", "unique_presented_fps", "window_s"]
     let object = sink.objects("ALVRSTATS").last ?? [:]
     expectEqual(object.keys.sorted(), keys, "stable stats keys (no optional latency keys without samples)")
     let positions = keys.compactMap { line.json.range(of: "\"\($0)\"")?.lowerBound }
     expectEqual(positions.count, keys.count, "all keys present in text")
     expectEqual(positions, positions.sorted(), "keys are sorted in the JSON text")
     expect(!line.json.contains("\"frames_received\":\""), "numbers are not strings")
+}
+
+private func testPacingCounters() {
+    let (telemetry, sink, clock) = makeTelemetry()
+    telemetry.recordFrameQueued(timestampNs: 100)
+    telemetry.recordSelection(timestampNs: 100, source: .new, pollWaitNs: 1_000_000)
+    telemetry.recordSubmitTiming(vsyncNs: 100_000_000, completionNs: 105_000_000)
+    startStream(telemetry)
+    // Frame 100 decoded at t0 and selected 3 ms later; frame 200 decoded, selected 5 ms later, one older frame skipped.
+    telemetry.recordFrameQueued(timestampNs: 100)
+    clock.advance(ms: 3)
+    telemetry.recordSelection(timestampNs: 100, source: .new, pollWaitNs: 1_000_000)
+    telemetry.recordFrameQueued(timestampNs: 200)
+    clock.advance(ms: 5)
+    telemetry.recordSelection(timestampNs: 200, source: .new, pollWaitNs: 2_000_000, skipped: 1)
+    telemetry.recordSelection(timestampNs: 200, source: .retry, pollWaitNs: 0)
+    telemetry.recordSelection(timestampNs: 200, source: .reuse, pollWaitNs: 5_000_000)
+    telemetry.recordSelection(timestampNs: nil, source: .none, pollWaitNs: 5_000_000)
+    // GPU finished 2 ms early, then 3 ms late.
+    telemetry.recordSubmitTiming(vsyncNs: 100_000_000, completionNs: 98_000_000)
+    telemetry.recordSubmitTiming(vsyncNs: 200_000_000, completionNs: 203_000_000)
+    // Presented 100, 200, 200 (repeat), 100 again (a change but not a new timestamp), 300.
+    for ts: UInt64 in [100, 200, 200, 100] {
+        telemetry.recordRender(frameTimestampNs: ts, displayed: true, presentNs: clock.ns)
+    }
+    clock.advance(ms: 992)
+    telemetry.recordRender(frameTimestampNs: 300, displayed: true, presentNs: clock.ns)
+    guard let s = sink.objects("ALVRSTATS").first else {
+        expect(false, "stats emitted")
+        return
+    }
+    expectEqual(double(s, "queue_age_ms_mean"), 4.0, "decode->selected mean of 3 and 5 ms")
+    expectEqual(double(s, "queue_age_ms_p95"), 5.0, "decode->selected p95")
+    expectEqual(double(s, "poll_wait_ms_mean"), 2.6, "poll wait mean over every selection")
+    expectEqual(double(s, "poll_wait_ms_p95"), 5.0, "poll wait p95")
+    expectEqual(int(s, "repeats_retry"), 1, "retry repeats")
+    expectEqual(int(s, "repeats_no_new_frame"), 1, "no-new-frame repeats")
+    expectEqual(int(s, "dropped_selection_skip"), 1, "older frames skipped by selection")
+    expectEqual(int(s, "frames_dropped"), 1, "skips count as drops")
+    expectEqual(int(s, "late_frames"), 1, "one completion after vsync")
+    expectEqual(double(s, "late_ms_mean"), 0.5, "signed lateness mean of -2 and +3 ms")
+    expectEqual(double(s, "late_ms_p95"), 3.0, "lateness p95")
+    expectEqual(int(s, "frames_presented"), 4, "presented counts timestamp changes")
+    expectEqual(double(s, "unique_presented_fps"), 3.0, "distinct new timestamps per second")
+
+    // Next window: nothing selected or submitted -> pacing latency keys omitted, counters reset.
+    clock.advance(ms: 1000)
+    telemetry.recordRender(frameTimestampNs: 300, displayed: true, presentNs: clock.ns)
+    let stats = sink.objects("ALVRSTATS")
+    expectEqual(stats.count, 2, "second window")
+    guard stats.count == 2 else { return }
+    let r = stats[1]
+    expect(r["queue_age_ms_mean"] == nil && r["poll_wait_ms_mean"] == nil && r["late_ms_mean"] == nil, "pacing latencies omitted without samples")
+    expectEqual(int(r, "late_frames"), 0, "late frames reset")
+    expectEqual(int(r, "repeats_retry"), 0, "retry reset")
+    expectEqual(double(r, "unique_presented_fps"), 0, "no new timestamp")
+
+    // A new session forgets the presented timestamps of the last one.
+    telemetry.streamingStopped()
+    startStream(telemetry)
+    telemetry.recordRender(frameTimestampNs: 50, displayed: true, presentNs: clock.ns)
+    clock.advance(ms: 1000)
+    telemetry.recordRender(frameTimestampNs: 50, displayed: true, presentNs: clock.ns)
+    expectEqual(double(sink.objects("ALVRSTATS").last ?? [:], "unique_presented_fps"), 1.0, "unique count restarts per session")
 }
 
 private func testFormatRecords() {
@@ -399,6 +464,7 @@ enum StreamTelemetryTests {
         testLatencySamples()
         testWindowingAndCounters()
         testStatsJsonShape()
+        testPacingCounters()
         testFormatRecords()
         testCodecHelpers()
         testFileSink()
