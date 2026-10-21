@@ -6,74 +6,111 @@
 //
 import Foundation
 
-// One eye's view of the decoded stream. Fed once per decoded frame (cheap, no pixels).
+// Events per second over the last 1 s, bounded.
+struct EyeRateWindow {
+    private static let maxKept = 1_024 // no decoder or window delivers more than this in one second
+    private var times = [UInt64]()
+
+    var kept: Int { times.count }
+
+    mutating func record(nowNs: UInt64) {
+        times.append(nowNs)
+        var drop = 0
+        while drop < times.count && (!Self.inLastSecond(times[drop], nowNs) || times.count - drop > Self.maxKept) { drop += 1 }
+        if drop > 0 { times.removeFirst(drop) }
+    }
+
+    func rate(nowNs: UInt64) -> Double {
+        Double(times.filter { Self.inLastSecond($0, nowNs) }.count)
+    }
+
+    private static func inLastSecond(_ t: UInt64, _ nowNs: UInt64) -> Bool { t + 1_000_000_000 > nowNs }
+}
+
+// One eye's view of the decoded stream. record() runs once per decoder output (cheap, no pixels), never from the
+// window sampler, so no counter below depends on how often the window copies pixels.
+//
+// Definitions (also in the overlay label and the EYEWIN line):
+//   decoded  every decoder output;               decoded_fps its rate over 1 s
+//   unique   outputs whose timestamp differs from the previous output's;   unique_fps its rate
+//   repeat   output whose timestamp equals the previous output's
+//   gap      unique output whose timestamp is > 1.5x the frame interval after the previous (or goes backwards);
+//            missing = frames that jump skipped
+//   stall    output arriving > 1.5x the frame interval after the previous output (wall clock)
+//   shown_fps  window refreshes per second (the sampler), unrelated to the above
+// The timestamp is the one the server echoes back (the pose it rendered for), so several outputs can share one when the
+// stream runs faster than the client reports poses: repeats then describe the stream, and stalls show decode delivery.
 struct EyeDecodeCounters {
     static let gapFactor = 1.5
-    // Arrival window is bounded: a decoder cannot legitimately deliver more than this in one second.
-    private static let maxArrivals = 1_024
 
     var frameIntervalNs: UInt64
-    private(set) var frames = 0       // distinct timestamps seen
-    private(set) var gaps = 0         // jumps above 1.5x the interval, or timestamps going backwards
-    private(set) var missing = 0      // frames those jumps skipped
-    private(set) var repeats = 0      // a timestamp delivered again
-    private(set) var lastIndex = -1   // decoded ordinal of the last new frame
+    private(set) var decoded = 0
+    private(set) var unique = 0
+    private(set) var gaps = 0
+    private(set) var missing = 0
+    private(set) var repeats = 0
+    private(set) var stalls = 0
+    private(set) var lastIndex = -1   // decoded ordinal of the last output
     private(set) var lastTimestampNs: UInt64?
-    var maxNits: Double = 0           // of the last sampled frame; 0 when SDR or not yet sampled
-    private var arrivals = [UInt64]()
+    var maxNits: Double = 0           // of the last sampled frame; 0 when not yet sampled
+    private var decodedRate = EyeRateWindow()
+    private var uniqueRate = EyeRateWindow()
+    private var shownRate = EyeRateWindow()
+    private var lastArrivalNs: UInt64?
     private var lastLogNs: UInt64?
 
     init(frameIntervalNs: UInt64) {
         self.frameIntervalNs = max(frameIntervalNs, 1)
     }
 
-    var arrivalsKept: Int { arrivals.count }
+    var rateKept: Int { decodedRate.kept }
 
     mutating func record(timestampNs: UInt64, nowNs: UInt64) {
-        if let last = lastTimestampNs {
-            if timestampNs == last {
-                repeats += 1
-                return
-            }
-            if timestampNs < last {
-                gaps += 1
-            } else {
-                let delta = timestampNs - last
-                if Double(delta) > Self.gapFactor * Double(frameIntervalNs) {
-                    gaps += 1
-                    missing += max(1, Int((Double(delta) / Double(frameIntervalNs)).rounded()) - 1)
-                }
-            }
-        }
-        lastTimestampNs = timestampNs
-        frames += 1
+        decoded += 1
         lastIndex += 1
-        arrivals.append(nowNs)
-        trim(nowNs: nowNs)
+        decodedRate.record(nowNs: nowNs)
+        if let last = lastArrivalNs, nowNs >= last, Double(nowNs - last) > Self.gapFactor * Double(frameIntervalNs) { stalls += 1 }
+        lastArrivalNs = nowNs
+        defer { lastTimestampNs = timestampNs }
+        guard let last = lastTimestampNs else {
+            unique += 1
+            uniqueRate.record(nowNs: nowNs)
+            return
+        }
+        if timestampNs == last {
+            repeats += 1
+            return
+        }
+        unique += 1
+        uniqueRate.record(nowNs: nowNs)
+        if timestampNs < last {
+            gaps += 1
+        } else if Double(timestampNs - last) > Self.gapFactor * Double(frameIntervalNs) {
+            gaps += 1
+            missing += max(1, Int((Double(timestampNs - last) / Double(frameIntervalNs)).rounded()) - 1)
+        }
     }
 
-    private mutating func trim(nowNs: UInt64) {
-        var drop = 0
-        while drop < arrivals.count && (!Self.inLastSecond(arrivals[drop], nowNs) || arrivals.count - drop > Self.maxArrivals) { drop += 1 }
-        if drop > 0 { arrivals.removeFirst(drop) }
-    }
+    // The window drew a new image.
+    mutating func recordShown(nowNs: UInt64) { shownRate.record(nowNs: nowNs) }
 
-    private static func inLastSecond(_ arrival: UInt64, _ nowNs: UInt64) -> Bool {
-        arrival + 1_000_000_000 > nowNs
-    }
-
-    // New frames per second over the last 1 s.
-    func fps(nowNs: UInt64) -> Double {
-        Double(arrivals.filter { Self.inLastSecond($0, nowNs) }.count)
-    }
+    func decodedFps(nowNs: UInt64) -> Double { decodedRate.rate(nowNs: nowNs) }
+    func uniqueFps(nowNs: UInt64) -> Double { uniqueRate.rate(nowNs: nowNs) }
+    func shownFps(nowNs: UInt64) -> Double { shownRate.rate(nowNs: nowNs) }
 
     // The once-per-second line for the server log; nil when not due.
     mutating func logLine(eye: String, nowNs: UInt64) -> String? {
         if let last = lastLogNs, nowNs < last + 1_000_000_000 { return nil }
         lastLogNs = nowNs
-        return "EYEWIN eye=\(eye) frames=\(frames) fps=\(String(format: "%.1f", fps(nowNs: nowNs)))"
-            + " gaps=\(gaps) repeats=\(repeats) max_nits=\(Int(maxNits.rounded()))"
+        func f(_ v: Double) -> String { String(format: "%.1f", v) }
+        return "EYEWIN eye=\(eye) decoded=\(decoded) decoded_fps=\(f(decodedFps(nowNs: nowNs)))"
+            + " unique=\(unique) unique_fps=\(f(uniqueFps(nowNs: nowNs))) gaps=\(gaps) missing=\(missing) repeats=\(repeats)"
+            + " stalls=\(stalls) shown_fps=\(f(shownFps(nowNs: nowNs))) max_nits=\(Int(maxNits.rounded()))"
     }
+
+    // Overlay text for the window label.
+    static let definitions = "decoded=decoder outputs; unique=new timestamp; repeat=same timestamp as previous output; "
+        + "gap=new timestamp >1.5x interval after previous; stall=output >1.5x interval after previous output"
 }
 
 // Admits at most one copy per interval.

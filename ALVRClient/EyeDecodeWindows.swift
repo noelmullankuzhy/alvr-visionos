@@ -86,23 +86,23 @@ final class EyeDecodeWindows: ObservableObject {
             if let eyes = eyes {
                 for eye in 0..<2 {
                     counters[eye].maxNits = eyes[eye].maxNits
+                    counters[eye].recordShown(nowNs: now)
                     shown[eye] += 1
                 }
             }
-            let snapshot = (0..<2).map { eye in
-                (eye, counters[eye].lastIndex, counters[eye].frames, counters[eye].fps(nowNs: now), counters[eye].gaps,
-                 counters[eye].missing, counters[eye].repeats, counters[eye].maxNits, shown[eye])
-            }
+            let snapshot = (0..<2).map { eye in (counters[eye], shown[eye], counters[eye].lastIndex) }
             lock.unlock()
             let mapping = colour.selection.isPQ ? "PQ to SDR: nits/203 clipped, sRGB, no gamut map" : "SDR codes, as decoded"
             DispatchQueue.main.async { [self] in
                 defer { copyAvailable.signal() }
-                for (eye, index, frames, fps, gaps, missing, repeats, nits, shownCount) in snapshot {
+                for (eye, (c, shownCount, index)) in snapshot.enumerated() {
                     let image = eyes.flatMap { Self.cgImage($0[eye]) }
                     models[eye].update(image: image, text:
-                        "\(eye == 0 ? "L" : "R")  idx \(index)  ts \(timestampNs / 1_000_000) ms  decoded \(frames)  shown \(shownCount)\n"
-                        + String(format: "fps %.1f  gaps %d (%d missing)  repeats %d  max %.0f nits\n", fps, gaps, missing, repeats, nits)
-                        + (eyes == nil ? "unsupported pixel format \(format)" : "raw decoded half, foveation-warped | \(mapping)"))
+                        "\(eye == 0 ? "L" : "R")  idx \(index)  ts \(timestampNs / 1_000_000) ms  shown \(shownCount) (shown_fps \(String(format: "%.1f", c.shownFps(nowNs: now))))\n"
+                        + String(format: "decoded %ld (%.1f/s)  unique %ld (%.1f/s)  repeats %ld\n", c.decoded, c.decodedFps(nowNs: now), c.unique, c.uniqueFps(nowNs: now), c.repeats)
+                        + String(format: "gaps %ld (%ld missing)  stalls %ld  max %.0f nits\n", c.gaps, c.missing, c.stalls, c.maxNits)
+                        + (eyes == nil ? "unsupported pixel format \(format)" : "raw decoded half, foveation-warped | \(mapping)")
+                        + "\n" + EyeDecodeCounters.definitions)
                 }
             }
         }
@@ -219,11 +219,29 @@ struct EyeWindowView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding()
-        .frame(minWidth: 480, minHeight: 480)
+        .frame(minWidth: 480, minHeight: 560)
         // Restored after a relaunch with no stream, or the stream ended: close.
         .onAppear { if !hub.active { dismissWindow(id: EyeDecodeWindows.windowIDs[eye]) } }
         .onChange(of: hub.active) { _, active in
             if !active { dismissWindow(id: EyeDecodeWindows.windowIDs[eye]) }
+        }
+    }
+}
+
+extension Scene {
+    // Both windows fully visible: the Left window opens at the default spot, the Right one on its trailing side.
+    // defaultWindowPlacement needs visionOS 2; on 1.x the windows overlap as before.
+    @SceneBuilder func eyeWindowPlacement(trailingOf otherID: String?) -> some Scene {
+        if #available(visionOS 2.0, *) {
+            self.defaultSize(width: 520, height: 640)
+                .defaultWindowPlacement { _, context in
+                    if let otherID = otherID, let other = context.windows.first(where: { $0.id == otherID }) {
+                        return WindowPlacement(.trailing(other))
+                    }
+                    return WindowPlacement()
+                }
+        } else {
+            self
         }
     }
 }

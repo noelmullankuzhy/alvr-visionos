@@ -20,7 +20,9 @@ import Foundation
         // Steady stream: no gaps, no repeats.
         var c = EyeDecodeCounters(frameIntervalNs: interval)
         for i in 0..<10 { c.record(timestampNs: UInt64(i) * interval, nowNs: UInt64(i) * interval) }
-        expectEqual(c.frames, 10, "frames")
+        expectEqual(c.decoded, 10, "decoded")
+        expectEqual(c.unique, 10, "unique")
+        expectEqual(c.stalls, 0, "steady stalls")
         expectEqual(c.gaps, 0, "steady gaps")
         expectEqual(c.repeats, 0, "steady repeats")
         expectEqual(c.lastIndex, 9, "index is the decoded ordinal")
@@ -44,7 +46,8 @@ import Foundation
         c.record(timestampNs: 5 * ms, nowNs: 15 * ms)
         expectEqual(c.repeats, 2, "repeats")
         expectEqual(c.gaps, 0, "repeat is no gap")
-        expectEqual(c.frames, 1, "repeats are not frames")
+        expectEqual(c.unique, 1, "repeats are not unique")
+        expectEqual(c.decoded, 3, "repeats are still decoded outputs")
         c.record(timestampNs: 15 * ms, nowNs: 20 * ms)
         expectEqual(c.gaps, 0, "gap is measured from the repeated timestamp")
 
@@ -55,12 +58,48 @@ import Foundation
         expectEqual(c.gaps, 1, "backwards is a gap")
         expectEqual(c.missing, 0, "backwards misses nothing")
 
-        // fps over the last 1 s of arrivals.
+        // Rates over the last 1 s of decoder outputs.
         c = EyeDecodeCounters(frameIntervalNs: interval)
         for i in 0..<150 { c.record(timestampNs: UInt64(i) * interval, nowNs: UInt64(i) * interval) } // 100 fps for 1.5 s
-        expectEqual(Int(c.fps(nowNs: 149 * interval).rounded()), 100, "fps at 100")
-        expectEqual(c.fps(nowNs: 149 * interval + 2_000 * ms), 0, "fps decays to 0 when frames stop")
-        expect(c.arrivalsKept <= 1_024, "arrival window stays bounded")
+        expectEqual(Int(c.decodedFps(nowNs: 149 * interval).rounded()), 100, "decoded fps at 100")
+        expectEqual(Int(c.uniqueFps(nowNs: 149 * interval).rounded()), 100, "unique fps at 100")
+        expectEqual(c.decodedFps(nowNs: 149 * interval + 2_000 * ms), 0, "rate decays to 0 when frames stop")
+        expect(c.rateKept <= 1_024, "rate window stays bounded")
+
+        // The simulator case: 100 outputs/s, one new timestamp every 4th output (pose cadence 25/s, 40 ms apart).
+        // A 66 ms sampler (shown) and the log must not change what decode counted.
+        c = EyeDecodeCounters(frameIntervalNs: interval)
+        var sampled = c
+        var lines = [String]()
+        for i in 0..<200 {
+            let now = UInt64(i) * interval
+            let ts = UInt64(i / 4) * 40 * ms
+            c.record(timestampNs: ts, nowNs: now)
+            sampled.record(timestampNs: ts, nowNs: now)
+            if i % 7 == 0 { sampled.recordShown(nowNs: now) } // ~70 ms sampler
+            if let line = sampled.logLine(eye: "L", nowNs: now) { lines.append(line) }
+        }
+        expectEqual(sampled.decoded, c.decoded, "sampler leaves decoded alone")
+        expectEqual(sampled.unique, c.unique, "sampler leaves unique alone")
+        expectEqual(sampled.gaps, c.gaps, "sampler leaves gaps alone")
+        expectEqual(sampled.repeats, c.repeats, "sampler leaves repeats alone")
+        expectEqual(c.decoded, 200, "all outputs decoded")
+        expectEqual(c.unique, 50, "one new timestamp per 4 outputs")
+        expectEqual(c.repeats, 150, "three repeats per new timestamp")
+        expectEqual(c.gaps, 49, "40 ms steps are 4x the interval: every step is a gap")
+        expectEqual(c.missing, 49 * 3, "three frame intervals missing per step")
+        expectEqual(c.stalls, 0, "outputs arrive every interval: no stalls")
+        expectEqual(Int(c.decodedFps(nowNs: 199 * interval)), 100, "decoded fps counts outputs, not timestamps")
+        expectEqual(Int(c.uniqueFps(nowNs: 199 * interval)), 25, "unique fps counts timestamps")
+        expect(sampled.shownFps(nowNs: 199 * interval) < 20, "shown fps is the sampler's own rate")
+        expectEqual(lines.count, 2, "one log line per second")
+
+        // A stalled decoder: one output arrives 40 ms late.
+        c = EyeDecodeCounters(frameIntervalNs: interval)
+        c.record(timestampNs: 0, nowNs: 0)
+        c.record(timestampNs: interval, nowNs: 10 * ms)
+        c.record(timestampNs: 2 * interval, nowNs: 50 * ms)
+        expectEqual(c.stalls, 1, "late output is a stall")
 
         // Max nits of the last frame; log line once per second in the DIAG key=value style.
         c = EyeDecodeCounters(frameIntervalNs: interval)
@@ -69,8 +108,10 @@ import Foundation
         expect(c.logLine(eye: "L", nowNs: 0) != nil, "first line is due")
         expect(c.logLine(eye: "L", nowNs: 999 * ms) == nil, "not again within 1 s")
         c.record(timestampNs: interval, nowNs: 1_000 * ms)
+        c.recordShown(nowNs: 1_000 * ms)
         expectEqual(c.logLine(eye: "R", nowNs: 1_000 * ms) ?? "",
-                    "EYEWIN eye=R frames=2 fps=1.0 gaps=0 repeats=0 max_nits=1000", "line format")
+                    "EYEWIN eye=R decoded=2 decoded_fps=1.0 unique=2 unique_fps=1.0 gaps=0 missing=0 repeats=0 stalls=1 shown_fps=1.0 max_nits=1000",
+                    "line format")
 
         // Copy gate: one admit per 66 ms.
         var gate = EyeCopyGate(minIntervalNs: 66 * ms)
