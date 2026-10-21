@@ -175,7 +175,11 @@ class EventHandler: ObservableObject {
     var needsEncoderReset = true
     var encodingGamma: Float = 1.0
     var enableHdr = false
-    
+    // Guarded by frameQueueLock (event, render and decoder threads).
+    var streamBootstrap = StreamBootstrap()
+    // Serialises fake tracking sends with the real view-params handoff.
+    let viewParamsLock = NSObject()
+
     init() {}
     
     func initializeAlvr() {
@@ -238,7 +242,8 @@ class EventHandler: ObservableObject {
         framesSinceLastDecode = 0
         lastIpd = -1
         lastQueuedFrame = nil
-        
+        withStreamBootstrap { $0.streamStopped() }
+
         //outgoingWorker.stopWorkers()
         
         updateConnectionState(.disconnected)
@@ -254,6 +259,34 @@ class EventHandler: ObservableObject {
         lastRequestedTimestamp = 0
         lastSubmittedTimestamp = 0
         lastQueuedFrame = nil
+        withStreamBootstrap { $0.reentered() }
+    }
+
+    func withStreamBootstrap<T>(_ body: (inout StreamBootstrap) -> T) -> T {
+        objc_sync_enter(frameQueueLock)
+        defer { objc_sync_exit(frameQueueLock) }
+        return body(&streamBootstrap)
+    }
+
+    // Until the stream's first frame is queued, keep the server fed with fake view params and a head pose,
+    // otherwise it never encodes a frame. Called from the event thread and the render loops. Fake sends and the
+    // real view-params handoff (sendRealViewParams) both hold viewParamsLock, and fake sends require
+    // lastIpd == -1 under it, so a fake send can never land after the real view params.
+    func sendBootstrapTrackingIfNeeded() {
+        objc_sync_enter(viewParamsLock)
+        defer { objc_sync_exit(viewParamsLock) }
+        guard streamingActive && lastIpd == -1 else { return }
+        if withStreamBootstrap({ $0.shouldSendFakeTracking(now: CACurrentMediaTime()) }) {
+            WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: CACurrentMediaTime() - 1.0)
+        }
+    }
+
+    // The renderers' handoff to real view params; ends fake sends (see sendBootstrapTrackingIfNeeded).
+    func sendRealViewParams(ipd: Float) {
+        objc_sync_enter(viewParamsLock)
+        defer { objc_sync_exit(viewParamsLock) }
+        lastIpd = ipd
+        WorldTracker.shared.sendViewParams(viewTransforms: viewTransforms, viewFovs: viewFovs)
     }
     
     // Various hacks to be performed when the headset is removed or the app is exiting.
@@ -572,6 +605,9 @@ class EventHandler: ObservableObject {
                     frameQueueLastTimestamp = timestamp
                     frameQueueLastImageBuffer = imageBuffer
                     timeLastFrameSent = CACurrentMediaTime()
+                    if let bootLine = streamBootstrap.frameQueued(now: CACurrentMediaTime()) {
+                        print(bootLine)
+                    }
                 }
 
                 // Pull the very last imageBuffer for a given timestamp
@@ -736,8 +772,8 @@ class EventHandler: ObservableObject {
                     }
                 }
                 
-                if !renderStarted && streamingActive {
-                    WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: CACurrentMediaTime() - 1.0)
+                if !renderStarted {
+                    sendBootstrapTrackingIfNeeded()
                 }
             }
             
@@ -827,8 +863,14 @@ class EventHandler: ObservableObject {
                     currentCodec = -1
                     EventHandler.shared.updateConnectionState(.connected)
                 }
+                // Outside the block above: a DecoderConfig may already have set streamingActive.
+                withStreamBootstrap {
+                    if $0.phase == .idle {
+                        $0.streamStarted(now: CACurrentMediaTime())
+                    }
+                }
                 if !renderStarted {
-                    WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: CACurrentMediaTime() - 1.0)
+                    sendBootstrapTrackingIfNeeded()
                 }
                 Settings.clearSettingsCache()
             case ALVR_EVENT_STREAMING_STOPPED.rawValue:

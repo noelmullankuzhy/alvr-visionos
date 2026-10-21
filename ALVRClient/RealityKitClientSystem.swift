@@ -1547,11 +1547,11 @@ class RealityKitClientSystemCorrectlyAssociated : System {
                 let rightFov = AlvrFov(left: -rightAngles.x, right: rightAngles.y, up: rightAngles.z, down: -rightAngles.w)
                 EventHandler.shared.viewFovs = [leftFov, rightFov]
                 EventHandler.shared.viewTransforms = [DummyMetalRenderer.renderViewTransforms[0], DummyMetalRenderer.renderViewTransforms.count > 1 ? DummyMetalRenderer.renderViewTransforms[1] : DummyMetalRenderer.renderViewTransforms[0]]
-                EventHandler.shared.lastIpd = ipd
-                
+
                 EventHandler.shared.sentViewTangents = DummyMetalRenderer.renderTangents
-                
-                WorldTracker.shared.sendViewParams(viewTransforms:  EventHandler.shared.viewTransforms, viewFovs: EventHandler.shared.viewFovs)
+
+                // Sets lastIpd under the lock that serialises fake tracking sends.
+                EventHandler.shared.sendRealViewParams(ipd: ipd)
             }
             
             let settings = ALVRClientApp.gStore.settings
@@ -1606,7 +1606,12 @@ class RealityKitClientSystemCorrectlyAssociated : System {
         var deviceAnchor = framePreviouslyPredictedPose ?? matrix_identity_float4x4
         
         // Do NOT move this, just in case, because DeviceAnchor is wonkey and every DeviceAnchor mutates each other.
-        if EventHandler.shared.alvrInitialized  {
+        // Same gate as the Metal renderer: real tracking only once real view params are out (lastIpd != -1),
+        // bootstrap tracking until then, never both.
+        if EventHandler.shared.alvrInitialized && EventHandler.shared.lastIpd == -1 {
+            EventHandler.shared.sendBootstrapTrackingIfNeeded()
+        }
+        else if EventHandler.shared.alvrInitialized  {
             // TODO: I suspect Apple changes view transforms every frame to account for pupil swim, figure out how to fit the latest view transforms in?
             // Since pupil swim is purely an axial thing, maybe we can just timewarp the view transforms as well idk
             let viewFovs = EventHandler.shared.viewFovs
