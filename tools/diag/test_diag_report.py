@@ -296,6 +296,35 @@ DIAG diag t_ms=31 file_recovered=true dropped_lines=7
         self.assertIn('| L | 337.5 | 90 | 1 | ellipse | 2 | 0.78 |', out)
         self.assertIn('| R | 337.5 | 90 | 1 | ellipse | 2 | 0.78 |', out)
 
+    def test_octagon_walk_and_raw_summary(self):
+        lines = 'DIAG corner t_ms=1 chart=on\n'
+        for eye in ('L', 'R'):
+            for spoke in range(8):
+                lines += ('DIAG corner t_ms=2 eye={} pos_deg={} ring_pct={} kind={} '
+                          'tan_x=0.7 tan_y=0.7\n').format(eye, spoke * 45,
+                            100 if spoke % 2 == 0 else 75, 'side' if spoke % 2 == 0 else 'cut')
+            lines += ('DIAG corner_summary t_ms=3 eye={} shape=octagon marks=8 '
+                      'sides=100,100,100,100 cuts=75,75,75,75 visible_area_frac=0.8750\n').format(eye)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'diag-a.log').write_text(lines)
+            records, bad, errors = report.read_logs(Path(directory))
+            rows = report.corner_rows(records)
+        self.assertEqual(len(rows), 16)
+        for eye in ('L', 'R'):
+            walk = [r for r in rows if r['eye'] == eye]
+            self.assertEqual([r['pos_deg'] for r in walk], [str(k * 45) for k in range(8)])
+            self.assertEqual([r['kind'] for r in walk], ['side', 'cut'] * 4)
+            self.assertTrue(all(r['sides'] == '100,100,100,100' and r['cuts'] == '75,75,75,75'
+                                and r['visible_area_frac'] == '0.8750' for r in walk))
+        out = self.render(lines)
+        self.assertIn('| L | 315 | 75 |', out)
+        self.assertIn('| R | 315 | 75 |', out)
+        self.assertIn('kind', out)
+        self.assertIn('cut', out)
+        self.assertIn('100,100,100,100', out)
+        self.assertIn('75,75,75,75', out)
+        self.assertIn('0.8750', out)
+
     def test_no_inference_across_sessions_or_bad_sender_alignment(self):
         lines = ('DIAG edr t_ms=1 step=1 value=2 layout=10% hold_s=60\n'
                  'DIAG m1 t_ms=2 app=2\n'

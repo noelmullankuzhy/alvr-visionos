@@ -1,17 +1,8 @@
 //
 //  CornerChart.swift
 //
-// Corner chart (GM decision 65): measures where each eye's visible area ends and its shape (rectangle, rounded or
-// ellipse), for the render corner trim (decision 60). Per eye, in that eye's own tangent space, 16 spokes every 22.5
-// degrees (0 = right, counter-clockwise) with rings at 100 ... 55% of the eye's tangent extent along each spoke. Spoke
-// angles are in drawable-normalised space (each quadrant scaled by its own tangent extents), so the diagonals end at
-// the drawable corners and every ring is the nested rectangle at that percentage. The wearer keeps the head still,
-// looks along each spoke and steps the highlighted ring until it is the outermost one still seen; the marks give the
-// visible tangent polygon and the shape. Geometry is NDC quads (x right, y up), drawn without a projection by
-// CornerChartRenderer. Foundation-only so it is unit tested on macOS (tests/swift/CornerChartTests.swift).
-// Decision 65a: each eye's chart is in its own colour (left cyan, right magenta) with a large L / R at its tangent
-// centre, so a mono mirror capture names the eye it shows.
-//
+// Head-locked octagon chart (decision 65g): four rectangle sides and four straight corner cuts per eye.
+// Geometry stays Foundation-only; the renderer injects physical/logical pixel scales from the frame's rate map.
 
 import Foundation
 
@@ -22,8 +13,6 @@ enum CornerEye: String {
     init(viewOffsetX x: Double) { self = x <= 0 ? .left : .right }
 
     var color: SIMD4<Float> { self == .left ? [0, 1, 1, 1] : [1, 0, 1, 1] }
-    var dimColor: SIMD4<Float> { self == .left ? [0, 0.5, 0.5, 1] : [0.5, 0, 0.5, 1] }
-    var glyph: String { rawValue }
 }
 
 enum CornerChartMode: String, CaseIterable {
@@ -33,10 +22,10 @@ enum CornerChartMode: String, CaseIterable {
 }
 
 enum CornerSpokes {
-    static let count = 16
-    static let axes = [0, 4, 8, 12]
+    static let count = 8
+    static let axes = [0, 2, 4, 6]
     // Diagonal spoke -> its quadrant's (horizontal, vertical) axis spokes.
-    static let diagonals: [(spoke: Int, x: Int, y: Int)] = [(2, 0, 4), (6, 8, 4), (10, 8, 12), (14, 0, 12)]
+    static let diagonals: [(spoke: Int, x: Int, y: Int)] = [(1, 0, 2), (3, 4, 2), (5, 4, 6), (7, 0, 6)]
 
     static func degrees(_ k: Int) -> Double { Double(k) * 360 / Double(count) }
 
@@ -53,11 +42,9 @@ enum CornerSpokes {
         return (snap(cos(a) / m), snap(sin(a) / m))
     }
 
-    // Outward normal of the drawable edge the spoke ends on (both components at a corner).
-    static func normal(_ k: Int) -> (x: Double, y: Double) {
-        let p = unit(k)
-        return (abs(p.u) == 1 ? p.u : 0, abs(p.v) == 1 ? p.v : 0)
-    }
+    static func kind(_ k: Int) -> String { k % 2 == 0 ? "side" : "cut" }
+
+
 }
 
 // Tangent magnitudes of one view, in gimmeTangents order (left, right, bottom, top).
@@ -84,67 +71,38 @@ struct CornerTangents: Equatable {
     }
 }
 
-// Boundary shape from the marks, in normalised drawable units (axis spokes reach 1 at 100%, diagonals sqrt 2).
-// Per quadrant with axis radii a, b, along the fixed diagonal x = y: a rectangle a x b is left at sqrt 2 min(a, b) (the
-// diagonal reaches the corner only when both axes do), an ellipse through the axis points at
-// 1 / sqrt((1/a^2 + 1/b^2) / 2). rectangle: diagonals >= 0.95 of the rectangle prediction; ellipse: <= 1.05 of the
-// ellipse radius; rounded between. The superellipse (x/a)^n + (y/b)^n = 1 is solved per quadrant from its diagonal
-// (superellipse_q, 2 = ellipse, infinite = rectangle) and combined as 1 / mean(1/n), so a square quadrant counts as 0.
-struct CornerShape {
-    let radii: [Double]
-    let axisR, diagR, rectR, ellipseR, ratio, rectRatio, ellipseRatio, superellipseN, diagPctMean: Double
-    let quadrantN: [Double]
-    let diagFloor: Bool
-    let label: String
-
-    static func radius(_ k: Int, pct: Double) -> Double {
-        let n = CornerSpokes.unit(k)
-        return pct / 100 * (n.u * n.u + n.v * n.v).squareRoot()
-    }
-
-    // n with (s/a)^n + (s/b)^n = 1, s the diagonal point's coordinate (radius / sqrt 2); infinite at or beyond the
-    // rectangle (s >= min(a, b)). The left side falls from 2 (n = 0) to 0, so bisect on log n.
-    static func superellipseN(a: Double, b: Double, diagR: Double) -> Double {
-        let s = diagR / 2.0.squareRoot()
-        guard s < min(a, b) else { return .infinity }
-        func f(_ n: Double) -> Double { pow(s / a, n) + pow(s / b, n) - 1 }
-        var lo = log(1e-3), hi = log(1e4)
-        guard f(exp(hi)) < 0 else { return .infinity }
-        for _ in 0..<200 {
-            let mid = (lo + hi) / 2
-            if f(exp(mid)) > 0 { lo = mid } else { hi = mid }
-        }
-        return exp((lo + hi) / 2)
-    }
-
-    static func classify(_ pcts: [Int: Double]) -> CornerShape? {
-        guard (CornerSpokes.axes + CornerSpokes.diagonals.map(\.spoke)).allSatisfy({ pcts[$0] != nil }) else { return nil }
-        func r(_ k: Int) -> Double { radius(k, pct: pcts[k]!) }
-        func mean(_ xs: [Double]) -> Double { xs.reduce(0, +) / Double(xs.count) }
-        let axisR = mean(CornerSpokes.axes.map(r))
-        let diagR = mean(CornerSpokes.diagonals.map { r($0.spoke) })
-        let rectR = mean(CornerSpokes.diagonals.map { 2.0.squareRoot() * min(r($0.x), r($0.y)) })
-        let ellipseR = mean(CornerSpokes.diagonals.map { 1 / ((1 / (r($0.x) * r($0.x)) + 1 / (r($0.y) * r($0.y))) / 2).squareRoot() })
-        let quadrantN = CornerSpokes.diagonals.map { superellipseN(a: r($0.x), b: r($0.y), diagR: r($0.spoke)) }
-        let squareness = mean(quadrantN.map { 1 / $0 })
-        let n = squareness > 0 ? 1 / squareness : Double.infinity
-        let label = diagR >= 0.95 * rectR ? "rectangle" : diagR <= 1.05 * ellipseR ? "ellipse" : "rounded"
-        let diagPcts = CornerSpokes.diagonals.map { pcts[$0.spoke]! }
-        return CornerShape(radii: (0..<CornerSpokes.count).compactMap { k in pcts[k].map { radius(k, pct: $0) } },
-                           axisR: axisR, diagR: diagR, rectR: rectR, ellipseR: ellipseR, ratio: diagR / axisR,
-                           rectRatio: rectR / axisR, ellipseRatio: ellipseR / axisR, superellipseN: n, diagPctMean: mean(diagPcts), quadrantN: quadrantN,
-                           diagFloor: diagPcts.contains { $0 <= Double(CornerChart.ringPercents.last!) }, label: label)
-    }
-}
-
 enum CornerChart {
-    // Down to 55 so an elliptical boundary (diagonal at ~71% of the corner) is inside the chart (decision 65c).
-    static let ringPercents = [100, 95, 90, 85, 80, 75, 70, 65, 60, 55]
-    static let linePx = 3.0, padPx = 2.0, maxLabelPx = 48.0, minLabelPx = 6.0
+    static let ringPercents = Array(stride(from: 100, through: 50, by: -5))
+    static let cutPercents = Array(stride(from: 100, through: 30, by: -5))
+    static let linePx = 3.0, padPx = 2.0, maxLabelPx = 48.0, minLabelPx = 24.0
+    // NDC location -> physical pixels per logical pixel on each screen axis.
+    typealias LocalScale = (Double, Double) -> (x: Double, y: Double)
+    static func strokePx(_ scale: (x: Double, y: Double)) -> Double { linePx / min(scale.x, scale.y) }
 
     struct Rect: Equatable { var x0, y0, x1, y1: Double }
-    struct Quad { let rect: Rect; let color: SIMD4<Float> }
+    struct Point { var x, y: Double }
+    struct Quad {
+        let rect: Rect
+        let color: SIMD4<Float>
+        var corners: [Point]? = nil
+        var vertices: [Point] {
+            corners ?? [Point(x: rect.x0, y: rect.y0), Point(x: rect.x1, y: rect.y0),
+                        Point(x: rect.x0, y: rect.y1), Point(x: rect.x1, y: rect.y1)]
+        }
+    }
     struct Label { let pct: Int; let spoke: Int; let text: String; let rect: Rect; let vertical: Bool }
+
+    // In each quadrant |x| + |y| = 2p, clipped to the unit rectangle. At 100% it is a single point.
+    static func cut(spoke: Int, pct: Int) -> (a: Point, b: Point) {
+        let p = Double(pct) / 100, n = CornerSpokes.unit(spoke)
+        let lo = max(0, 2 * p - 1), hi = min(1, 2 * p)
+        return (Point(x: lo * n.u, y: hi * n.v), Point(x: hi * n.u, y: lo * n.v))
+    }
+
+    static func normalisedNdc(_ t: CornerTangents, _ p: Point) -> Point {
+        let n = t.ndc(x: p.x * (p.x < 0 ? t.left : t.right), y: p.y * (p.y < 0 ? t.bottom : t.top))
+        return Point(x: n.x, y: n.y)
+    }
 
     static func ringRect(_ t: CornerTangents, pct: Int) -> Rect {
         let p = Double(pct) / 100
@@ -163,27 +121,41 @@ enum CornerChart {
         return vertical ? (0.55 * h, n * h + (n - 1) * 0.25 * h) : (n * 0.55 * h + (n - 1) * 0.2 * h, h)
     }
 
-    // Every ring's number on every spoke, just inside its own line and clear of the next ring in (band-limited
-    // size, capped); numbers on the left/right edges stack vertically so they fit the narrow side bands.
-    static func labels(_ t: CornerTangents, widthPx w: Double, heightPx h: Double) -> [Label] {
-        let dx = 2 / w, dy = 2 / h, inset = linePx + padPx
+    // Stack digits at side and cut marks: narrow columns remain separate even where foveation enlarges glyphs.
+    // Ring labels alternate across their axis (100/90/... and 95/85/...), giving each lane 10% spacing.
+    // Cut columns already fit on the diagonals. Clamp at the border, then size at the whole footprint.
+    static func labels(_ t: CornerTangents, widthPx w: Double, heightPx h: Double,
+                       localScale: LocalScale = { _, _ in (1, 1) }) -> [Label] {
         var out: [Label] = []
-        for (i, pct) in ringPercents.enumerated() {
-            let r = ringRect(t, pct: pct)
-            let next = i + 1 < ringPercents.count ? ringRect(t, pct: ringPercents[i + 1]) : nil
-            func avail(_ bandNdc: Double?, _ scale: Double) -> Double { bandNdc.map { $0 / scale - linePx - 2 * padPx } ?? .infinity }
-            let side = (l: avail(next.map { $0.x0 - r.x0 }, dx), r: avail(next.map { r.x1 - $0.x1 }, dx),
-                        b: avail(next.map { $0.y0 - r.y0 }, dy), t: avail(next.map { r.y1 - $0.y1 }, dy))
-            for k in 0..<CornerSpokes.count {
-                let d = CornerSpokes.normal(k), p = spokeNdc(t, k, pct)
-                let vertical = d.y == 0
-                let fit = vertical ? (d.x < 0 ? side.l : side.r) / 0.55 : (d.y > 0 ? side.t : side.b)
-                let size = textSize("\(pct)", h: max(min(fit, maxLabelPx), minLabelPx), vertical: vertical)
-                let (sw, sh) = (size.w * dx, size.h * dy)
-                func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(max(v, lo), hi) }
-                let x0 = d.x < 0 ? r.x0 + inset * dx : d.x > 0 ? r.x1 - inset * dx - sw : clamp(p.x - sw / 2, r.x0 + inset * dx, r.x1 - inset * dx - sw)
-                let y0 = d.y < 0 ? r.y0 + inset * dy : d.y > 0 ? r.y1 - inset * dy - sh : clamp(p.y - sh / 2, r.y0 + inset * dy, r.y1 - inset * dy - sh)
-                out.append(Label(pct: pct, spoke: k, text: "\(pct)", rect: Rect(x0: x0, y0: y0, x1: x0 + sw, y1: y0 + sh), vertical: vertical))
+        for k in 0..<CornerSpokes.count {
+            for pct in (k % 2 == 0 ? ringPercents : cutPercents) {
+                let p = spokeNdc(t, k, pct), n = CornerSpokes.unit(k)
+                let vertical = n.u != 0
+                var sizePx = minLabelPx / localScale(p.x, p.y).y
+                var rect = Rect(x0: 0, y0: 0, x1: 0, y1: 0)
+                for _ in 0..<4 {
+                    let size = textSize("\(pct)", h: sizePx, vertical: vertical)
+                    let sw = size.w * 2 / w, sh = size.h * 2 / h
+                    let inset = strokePx(localScale(p.x, p.y)) + padPx
+                    var x = p.x - sw / 2, y = p.y - sh / 2
+                    let gapX = inset * 2 / w, gapY = inset * 2 / h
+                    let positiveLane = (100 - pct) % 10 == 0
+                    if n.v == 0 {
+                        x = n.u > 0 ? p.x - sw - gapX : p.x + gapX
+                        y = positiveLane ? p.y + gapY : p.y - sh - gapY
+                    }
+                    if n.u == 0 {
+                        y = n.v > 0 ? p.y - sh - gapY : p.y + gapY
+                        x = positiveLane ? p.x + gapX : p.x - sw - gapX
+                    }
+                    x = max(-1, min(1 - sw, x)); y = max(-1, min(1 - sh, y))
+                    rect = Rect(x0: x, y0: y, x1: x + sw, y1: y + sh)
+                    let sy = [localScale(x, y).y, localScale(x + sw, y).y,
+                              localScale(x, y + sh).y, localScale(x + sw, y + sh).y].min()!
+                    if sizePx * sy >= minLabelPx - 1e-8 { break }
+                    sizePx = minLabelPx / sy
+                }
+                out.append(Label(pct: pct, spoke: k, text: "\(pct)", rect: rect, vertical: vertical))
             }
         }
         return out
@@ -264,82 +236,110 @@ enum CornerChart {
         return [box(0, 0, sw, 1), box(0, 1 - st, 1, 1), box(0, 0.5 - st / 2, 1, 0.5 + st / 2), box(1 - sw, 0.5, 1, 1)] + leg
     }
 
-    // One eye's chart in its colour: rings (inner strokes), numbers, spoke dots, the L / R glyph; then the selected
-    // ring's highlight + large number and the status (below the glyph) in white on black.
-    static func geometry(_ t: CornerTangents, eye: CornerEye, widthPx w: Double, heightPx h: Double, selected: (spoke: Int, pct: Int)?,
-                         status: String) -> [Quad] {
-        let dx = 2 / w, dy = 2 / h, lx = linePx * dx, ly = linePx * dy
+    // Sample long lines in logical pixels so a peripheral section cannot inherit a central stroke width.
+    static func geometry(_ t: CornerTangents, eye: CornerEye, widthPx w: Double, heightPx h: Double,
+                         selected: (spoke: Int, pct: Int)?, status: String,
+                         localScale: LocalScale = { _, _ in (1, 1) }) -> [Quad] {
         var out: [Quad] = []
+        func clipped(_ p: Point) -> Point { Point(x: max(-1, min(1, p.x)), y: max(-1, min(1, p.y))) }
+        func stroke(_ a: Point, _ b: Point, color: SIMD4<Float>, weight: Double = 1) {
+            let vx = (b.x - a.x) * w / 2, vy = (b.y - a.y) * h / 2
+            let length = hypot(vx, vy), steps = max(1, Int(ceil(length / 32)))
+            for i in 0..<steps {
+                let f0 = Double(i) / Double(steps), f1 = Double(i + 1) / Double(steps)
+                let start = Point(x: a.x + (b.x - a.x) * f0, y: a.y + (b.y - a.y) * f0)
+                let end = Point(x: a.x + (b.x - a.x) * f1, y: a.y + (b.y - a.y) * f1)
+                let mid = Point(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+                let px = weight * [localScale(start.x, start.y), localScale(mid.x, mid.y), localScale(end.x, end.y)].map(strokePx).max()!
+                // Draw border strokes inward so clipping cannot halve their physical thickness.
+                let nx = length > 0 ? -vy / length * px / w : px / w
+                let ny = length > 0 ? vx / length * px / h : px / h
+                var points = [Point(x: start.x + nx, y: start.y + ny), Point(x: end.x + nx, y: end.y + ny),
+                              Point(x: start.x - nx, y: start.y - ny), Point(x: end.x - nx, y: end.y - ny)]
+                let shiftX = max(0, -1 - points.map(\.x).min()!) - max(0, points.map(\.x).max()! - 1)
+                let shiftY = max(0, -1 - points.map(\.y).min()!) - max(0, points.map(\.y).max()! - 1)
+                points = points.map { clipped(Point(x: $0.x + shiftX, y: $0.y + shiftY)) }
+                out.append(Quad(rect: Rect(x0: points.map(\.x).min()!, y0: points.map(\.y).min()!,
+                                           x1: points.map(\.x).max()!, y1: points.map(\.y).max()!), color: color, corners: points))
+            }
+        }
+        func cutStroke(_ k: Int, _ pct: Int, color: SIMD4<Float>, weight: Double = 1) {
+            let c = cut(spoke: k, pct: pct)
+            stroke(normalisedNdc(t, c.a), normalisedNdc(t, c.b), color: color, weight: weight)
+        }
+        // Enforce the physical minimum on glyph bars as well as chart lines.
+        func glyphs(_ quads: [Quad]) {
+            for q in quads {
+                let r = q.rect, x = (r.x0 + r.x1) / 2, y = (r.y0 + r.y1) / 2
+                let px = [localScale(r.x0, r.y0), localScale(r.x1, r.y1), localScale(x, y)].map(strokePx).max()!
+                let rx = max((r.x1 - r.x0) / 2, px / w), ry = max((r.y1 - r.y0) / 2, px / h)
+                out.append(Quad(rect: Rect(x0: max(-1, x - rx), y0: max(-1, y - ry), x1: min(1, x + rx), y1: min(1, y + ry)), color: q.color))
+            }
+        }
         for pct in ringPercents {
             let r = ringRect(t, pct: pct)
-            out += [Rect(x0: r.x0, y0: r.y0, x1: r.x0 + lx, y1: r.y1), Rect(x0: r.x1 - lx, y0: r.y0, x1: r.x1, y1: r.y1),
-                    Rect(x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y0 + ly), Rect(x0: r.x0, y0: r.y1 - ly, x1: r.x1, y1: r.y1)].map { Quad(rect: $0, color: eye.color) }
+            let a = Point(x: r.x0, y: r.y0), b = Point(x: r.x1, y: r.y0)
+            let c = Point(x: r.x1, y: r.y1), d = Point(x: r.x0, y: r.y1)
+            for (p, q) in [(a,b), (b,c), (c,d), (d,a)] { stroke(p, q, color: eye.color) }
         }
-        for label in labels(t, widthPx: w, heightPx: h) {
-            out += text(label.text, in: label.rect, vertical: label.vertical, color: eye.color)
+        for k in [1, 3, 5, 7] { for pct in cutPercents { cutStroke(k, pct, color: eye.color) } }
+        for label in labels(t, widthPx: w, heightPx: h, localScale: localScale) {
+            glyphs(text(label.text, in: label.rect, vertical: label.vertical, color: eye.color))
         }
-        // Spoke direction: dots from 10 to 50%, inside the innermost ring (the selected spoke brighter and larger).
-        for k in 0..<CornerSpokes.count {
-            let on = selected?.spoke == k, s = on ? 4.0 : 2.0
-            for pct in stride(from: 10, through: 50, by: 10) {
-                let p = spokeNdc(t, k, pct)
-                out.append(Quad(rect: Rect(x0: p.x - s * dx, y0: p.y - s * dy, x1: p.x + s * dx, y1: p.y + s * dy),
-                                color: on ? eye.color : eye.dimColor))
-            }
-        }
-        out += eyeGlyph(eye, t, widthPx: w, heightPx: h)
+        glyphs(eyeGlyph(eye, t, widthPx: w, heightPx: h))
         let white: SIMD4<Float> = [1, 1, 1, 1], black: SIMD4<Float> = [0, 0, 0, 1]
-        func boxed(_ s: String, centre: (x: Double, y: Double), px: Double) {
-            let size = textSize(s, h: px, vertical: false)
-            let r = Rect(x0: centre.x - size.w * dx / 2, y0: centre.y - size.h * dy / 2, x1: centre.x + size.w * dx / 2, y1: centre.y + size.h * dy / 2)
-            out.append(Quad(rect: Rect(x0: r.x0 - 6 * dx, y0: r.y0 - 6 * dy, x1: r.x1 + 6 * dx, y1: r.y1 + 6 * dy), color: black))
-            out += text(s, in: r, vertical: false, color: white)
-        }
         if let (k, pct) = selected {
-            let r = ringRect(t, pct: pct), d = CornerSpokes.normal(k), a = spokeNdc(t, k, pct), th = 3 * linePx
-            let armX = 0.1 * (r.x1 - r.x0), armY = 0.1 * (r.y1 - r.y0)
-            // Along the ring's edges from the corner, or centred on the spoke's point of an edge, inside the ring.
-            if d.y != 0 {
-                out.append(Quad(rect: Rect(x0: max(d.x < 0 ? a.x : a.x - armX, r.x0), y0: d.y > 0 ? a.y - th * dy : a.y,
-                                           x1: min(d.x > 0 ? a.x : a.x + armX, r.x1), y1: d.y > 0 ? a.y : a.y + th * dy), color: white))
+            if k % 2 == 1 { cutStroke(k, pct, color: white, weight: 3) }
+            else {
+                let r = ringRect(t, pct: pct), p = spokeNdc(t, k, pct)
+                let ax = k % 4 == 0 ? 0 : 0.1 * (r.x1 - r.x0)
+                let ay = k % 4 == 0 ? 0.1 * (r.y1 - r.y0) : 0
+                stroke(Point(x: p.x - ax, y: p.y - ay), Point(x: p.x + ax, y: p.y + ay), color: white, weight: 3)
             }
-            if d.x != 0 {
-                out.append(Quad(rect: Rect(x0: d.x > 0 ? a.x - th * dx : a.x, y0: max(d.y < 0 ? a.y : a.y - armY, r.y0),
-                                           x1: d.x > 0 ? a.x : a.x + th * dx, y1: min(d.y > 0 ? a.y : a.y + armY, r.y1)), color: white))
-            }
-            let size = textSize("\(pct)", h: maxLabelPx, vertical: false), m = th + 40
-            boxed("\(pct)", centre: (a.x - d.x * (m + size.w / 2) * dx, a.y - d.y * (m + size.h / 2) * dy), px: maxLabelPx)
         }
         if !status.isEmpty {
             let r = statusRect(t, status, widthPx: w, heightPx: h), b = statusBorderPx
             out.append(Quad(rect: r, color: black))
-            out += text(status, in: Rect(x0: r.x0 + b * dx, y0: r.y0 + b * dy, x1: r.x1 - b * dx, y1: r.y1 - b * dy), vertical: false, color: white)
+            glyphs(text(status, in: Rect(x0: r.x0 + b * 2 / w, y0: r.y0 + b * 2 / h,
+                                        x1: r.x1 - b * 2 / w, y1: r.y1 - b * 2 / h), vertical: false, color: white))
         }
         return out
     }
 
-    // Visible tangent polygon, counterclockwise from 0 degrees; nil until all 16 spokes are marked.
-    static func polygon(_ t: CornerTangents, marks: [Int: Int]) -> [(x: Double, y: Double)]? {
-        var out: [(x: Double, y: Double)] = []
-        for k in 0..<CornerSpokes.count {
-            guard let pct = marks[k] else { return nil }
-            out.append(t.point(spoke: k, pct: pct))
+    // Clip the measured side rectangle by all four cut half-planes in normalised drawable units.
+    // Unlike subtracting four independent triangles, polygon clipping also handles cuts that meet across an axis.
+    static func visibleAreaFraction(marks: [Int: Int]) -> Double? {
+        guard (0..<8).allSatisfy({ marks[$0] != nil }) else { return nil }
+        let right = Double(marks[0]!) / 100, top = Double(marks[2]!) / 100
+        let left = Double(marks[4]!) / 100, bottom = Double(marks[6]!) / 100
+        var polygon = [Point(x: -left, y: -bottom), Point(x: right, y: -bottom),
+                       Point(x: right, y: top), Point(x: -left, y: top)]
+        for k in [1, 3, 5, 7] {
+            let n = CornerSpokes.unit(k), limit = 2 * Double(marks[k]!) / 100
+            func distance(_ p: Point) -> Double { p.x * n.u + p.y * n.v - limit }
+            var next: [Point] = []
+            for i in polygon.indices {
+                let a = polygon[i], b = polygon[(i + 1) % polygon.count], da = distance(a), db = distance(b)
+                if da <= 0 { next.append(a) }
+                if (da <= 0) != (db <= 0) {
+                    let f = da / (da - db)
+                    next.append(Point(x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f))
+                }
+            }
+            polygon = next
         }
-        return out
-    }
-
-    static func area(_ poly: [(x: Double, y: Double)]) -> Double {
-        abs(poly.indices.reduce(0.0) { acc, i in
-            let a = poly[i], b = poly[(i + 1) % poly.count]
-            return acc + a.x * b.y - b.x * a.y
-        }) / 2
+        guard !polygon.isEmpty else { return 0 }
+        return abs(polygon.indices.reduce(0.0) { sum, i in
+            let a = polygon[i], b = polygon[(i + 1) % polygon.count]
+            return sum + a.x * b.y - b.x * a.y
+        }) / 8 // shoelace / 2, divided by drawable area 4
     }
 
     private static func f4(_ v: Double) -> String { v.isInfinite ? "inf" : String(format: "%.4f", v) }
 
     static func markFields(_ eye: CornerEye, _ spoke: Int, _ pct: Int, _ t: CornerTangents) -> KeyValuePairs<String, Any> {
         let p = t.point(spoke: spoke, pct: pct)
-        return ["eye": eye.rawValue, "pos_deg": CornerSpokes.degText(spoke), "ring_pct": pct, "tan_x": f4(p.x), "tan_y": f4(p.y)]
+        return ["eye": eye.rawValue, "pos_deg": CornerSpokes.degText(spoke), "ring_pct": pct, "kind": CornerSpokes.kind(spoke), "tan_x": f4(p.x), "tan_y": f4(p.y)]
     }
 
     static func viewFields(_ eye: CornerEye, view: Int, _ t: CornerTangents, drawableW: Int, drawableH: Int, viewport: String) -> KeyValuePairs<String, Any> {
@@ -347,17 +347,14 @@ enum CornerChart {
          "tan_top": f4(t.top), "drawable_w": drawableW, "drawable_h": drawableH, "viewport": viewport]
     }
 
-    // Polygon, area and the shape with its raw numbers (r = per-spoke normalised radii from 0 degrees, CCW).
     static func summaryFields(_ eye: CornerEye, _ t: CornerTangents, marks: [Int: Int]) -> KeyValuePairs<String, Any> {
-        guard let poly = polygon(t, marks: marks), let s = CornerShape.classify(marks.mapValues(Double.init)) else {
-            return ["eye": eye.rawValue, "marks": marks.count, "polygon": "incomplete", "area_frac": "unavailable", "shape": "unavailable"]
+        guard let area = visibleAreaFraction(marks: marks) else {
+            return ["eye": eye.rawValue, "marks": marks.count, "shape": "incomplete", "visible_area_frac": "unavailable"]
         }
-        return ["eye": eye.rawValue, "marks": marks.count, "polygon": poly.map { "\(f4($0.x)),\(f4($0.y))" }.joined(separator: ";"),
-                "area_frac": f4(area(poly) / ((t.left + t.right) * (t.bottom + t.top))), "r": s.radii.map(f4).joined(separator: ","),
-                "axis_r": f4(s.axisR), "diag_r": f4(s.diagR), "rect_r": f4(s.rectR), "ellipse_r": f4(s.ellipseR), "ratio": f4(s.ratio),
-                "rect_ratio": f4(s.rectRatio), "ellipse_ratio": f4(s.ellipseRatio), "superellipse_n": f4(s.superellipseN),
-                "superellipse_q": s.quadrantN.map(f4).joined(separator: ","),
-                "diag_pct_mean": String(format: "%.2f", s.diagPctMean), "diag_floor": s.diagFloor, "shape": s.label]
+        return ["eye": eye.rawValue, "shape": "octagon", "marks": marks.count,
+                "sides": CornerSpokes.axes.map { String(marks[$0]!) }.joined(separator: ","),
+                "cuts": CornerSpokes.diagonals.map { String(marks[$0.spoke]!) }.joined(separator: ","),
+                "visible_area_frac": f4(area), "diag_floor": CornerSpokes.diagonals.contains { marks[$0.spoke]! <= ringPercents.last! }]
     }
 
     // visionOS 27.0 SDK headers searched for a visible-area / hidden-area / visibility-mask API: none. The only mask is
@@ -368,7 +365,7 @@ enum CornerChart {
     }
 }
 
-// The measurement walk: per eye (both: L then R), spokes 0 ... 337.5 degrees; the ring is stepped out/in and recorded.
+// The measurement walk: per eye (both: L then R), spokes 0 ... 315 degrees; the ring is stepped out/in and recorded.
 final class CornerChartSession {
     enum Action { case outward, inward, record, back }
     enum Event: Equatable { case mark(CornerEye, Int, Int), summary(CornerEye), done }
@@ -386,12 +383,13 @@ final class CornerChartSession {
     }
 
     var eye: CornerEye? { eyeIndex < eyes.count ? eyes[eyeIndex] : nil }
-    var pct: Int { CornerChart.ringPercents[ringIndex] }
+    private var percents: [Int] { spoke % 2 == 0 ? CornerChart.ringPercents : CornerChart.cutPercents }
+    var pct: Int { percents[min(ringIndex, percents.count - 1)] }
 
     // The other eye is black in the monocular modes.
     func lit(_ e: CornerEye) -> Bool { mode == .both || eyes.contains(e) }
 
-    // 7-segment status: eye, spoke degrees, selected ring ("L 22.5 94"), or "donE".
+    // 7-segment status: eye, spoke degrees, selected ring ("L 45 70"), or "donE".
     var statusText: String {
         guard let eye else { return "donE" }
         return "\(eye == .left ? "L" : "r") \(CornerSpokes.degText(spoke)) \(pct)"
@@ -403,7 +401,7 @@ final class CornerChartSession {
         case .outward:
             ringIndex = max(ringIndex - 1, 0)
         case .inward:
-            ringIndex = min(ringIndex + 1, CornerChart.ringPercents.count - 1)
+            ringIndex = min(ringIndex + 1, percents.count - 1)
         case .back:
             if eye == nil, !eyes.isEmpty {
                 (eyeIndex, spoke) = (eyes.count - 1, last)
@@ -418,13 +416,16 @@ final class CornerChartSession {
             var events: [Event] = [.mark(eye, spoke, pct)]
             if spoke < last {
                 spoke += 1
+                ringIndex = min(ringIndex, percents.count - 1)
             } else {
                 events.append(.summary(eye))
                 (eyeIndex, spoke) = (eyeIndex + 1, 0)
+                ringIndex = min(ringIndex, percents.count - 1)
                 if self.eye == nil { events.append(.done) }
             }
             return events
         }
+        ringIndex = min(ringIndex, percents.count - 1)
         return []
     }
 }

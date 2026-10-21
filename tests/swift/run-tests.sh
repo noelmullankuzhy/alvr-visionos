@@ -10,9 +10,9 @@
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 FILTER="$1"
-OUT="$ROOT/local-scratch/swift-tests"
+OUT="$ROOT/build/chart-octagon/swift-tests"
 mkdir -p "$OUT"
-export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$OUT/module-cache}"
+export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$ROOT/build/clang-module-cache}"
 fail=0
 ran=0
 for t in "$ROOT"/tests/swift/*Tests.swift; do
@@ -34,7 +34,7 @@ for t in "$ROOT"/tests/swift/*Tests.swift; do
   # Optional `// METAL: tests/swift/Foo.metal`: compiled for the Mac GPU, the metallib path passed as argument 1.
   metal=$(sed -n 's#^// METAL: ##p' "$t" | head -1)
   if [ -n "$metal" ]; then
-    xcrun -sdk macosx metal -fmodules-cache-path="$OUT/metal-modcache" -o "$OUT/$name.metallib" "$ROOT/$metal"
+    xcrun -sdk macosx metal -fmodules-cache-path="$ROOT/build/clang-module-cache" -o "$OUT/$name.metallib" "$ROOT/$metal"
     if "$OUT/$name" "$OUT/$name.metallib"; then :; else fail=1; fi
   elif "$OUT/$name"; then :; else fail=1; fi
   ran=$((ran + 1))

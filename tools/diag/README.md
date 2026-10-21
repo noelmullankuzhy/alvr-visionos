@@ -83,36 +83,51 @@ sh tools/diag/capture-mirror.sh -i 2 -o /tmp/avp-mirror
 sh tools/diag/capture-mirror.sh -l
 ```
 
-The client's corner chart (Diagnostics on, Corner chart setting, no stream) draws
-16 spokes per eye every 22.5° (0 = right, counter-clockwise), with numbered rings at
-100, 95, 90, 85, 80, 75, 70, 65, 60, 55% of that eye's tangent extent along each spoke.
-On the diagonals, 100 is the drawable corner. The left eye's chart is cyan and the
-right's magenta (rings, numbers, spokes), with a large L / R at the eye's centre, so
-each capture names the eye the mirror shows (decision 65a). Mirror the headset to the Mac (Control
-Centre > Mirror My View > this Mac). The script then captures the largest on-screen
-window whose owner or title matches `-w` (default `airplay`; use `-l` and pass the
-owner from the list if your receiver is named differently). It captures every `-i`
-seconds into `mirror-<UTC>-<n>.png`, with `index.tsv` recording the time and window id.
-It exits with an error when no window matches, Screen Recording is not granted to
-the terminal, or a capture fails.
+The client's corner chart (Diagnostics on, Corner chart setting, no stream) is
+head-locked and works in mixed immersion. Left is cyan, right is magenta, with a
+large L / R at the centre. Rings are rectangles at 100, 95, …, 55, 50% of that eye's
+tangent extents. In each corner the straight cuts run 100, 95, …, 35, 30%.
+In quadrant-normalised units the drawable corner is (1,1); cut p is x+y=2p/100,
+clipped to the drawable, and touches ring p's corner. Axis numbers label rings;
+stacked diagonal numbers label cuts. Ring labels alternate on either side of each
+axis spoke: 100/90/80/70/60/50 on one side, 95/85/75/65/55 on the other. This keeps
+all rings, including 50/55/60, readable without overlap under peripheral foveation. Every stroke is at least 3 physical pixels
+and every character at least 24 physical pixels tall, sized from the frame's
+per-eye rasterization rate map (identity without a map). The once-per-eye
+`corner eye=… view=… stroke_min_logical_px=… stroke_max_logical_px=…` line records
+the logical stroke range; 0.25 physical/logical needs a 12-logical-pixel stroke.
 
-To read a capture, hold the chart's head pose steady. For each spoke, the outermost
-ring number visible in the image is that spoke's mirror crop. Compare it with the
-`DIAG corner eye=… pos_deg=… ring_pct=…` mark you recorded on the headset (the
-outermost ring you could see) and with the eye's `corner_summary` line (`r=` radii,
-`axis_r`, `diag_r`, `ratio`, `shape`). The mirror is one eye's processed view, so it
-shows the mirror's own crop, not the panel's visible area. A mirror crop smaller than
-the marks is expected; a larger one means the marks are conservative. The summary
-logs its raw numbers so the shape can be recomputed. Per quadrant with axis radii a, b
-(normalised so the axis spokes are 1 at 100%), along the fixed diagonal a rectangle
-is left at √2·min(a, b) and an ellipse at 1/sqrt((1/a²+1/b²)/2). Each quadrant's
-superellipse exponent n solves (s/a)ⁿ + (s/b)ⁿ = 1 with s = diag_r/√2
-(`superellipse_q`, inf at or beyond the rectangle); `superellipse_n` = 1/mean(1/n). An ellipse through the axis points crosses the
-diagonal at ≈ 70.7%, so it marks on the 70 ring and classifies as `ellipse`
-(decision 65c). A diagonal at the innermost ring (55%) sets `diag_floor=true`
-(the true edge may be further in).
-No visionOS 27.0 API reports the visible area (`corner api=unavailable`), so these
-are subjective marks.
+Keep the headset's fit and head pose steady. Record **8 marks per eye**, L then R
+in Both eyes mode: **0 (right side), 45 (upper-right cut), 90 (top), 135
+(upper-left cut), 180 (left), 225 (lower-left cut), 270 (bottom), 315
+(lower-right cut)**. Find the outermost visible side or cut. Quick right pinch
+steps out, quick left pinch steps in; hold right for at least 0.5 s to record and
+advance, hold left to go back. Gamepad: up/right = out, down/left = in, A = record,
+B = back. The white highlight follows the selected side or straight cut; the
+status reads e.g. `L 45 70`. Side selection stops at 50; cuts continue to 30.
+
+Marks log `DIAG corner eye=… pos_deg=… ring_pct=… kind=side|cut tan_x=… tan_y=…`.
+For a cut, the tangent point is its intersection with the diagonal, not a polygon
+vertex. After eight marks, `corner_summary eye=… shape=octagon sides=… cuts=…
+visible_area_frac=…` logs the raw percentages: sides in right,top,left,bottom order;
+cuts in q1,q2,q3,q4 order (upper-right, upper-left, lower-left, lower-right).
+Recompute the area by clipping the side rectangle with all four cut half-planes,
+then dividing by drawable area 4 in normalised units. A cut at or beyond its
+quadrant's side-rectangle corner removes nothing. Sides 100 with cuts 100 / 75 / 50
+give fractions 1 / 0.875 / 0.5; sides 55 with cuts 55 give 0.3025.
+`diag_floor=true` flags any diagonal mark at or below 50 (the ring floor), even
+though cuts extend further inward. No visible-area API is available in visionOS
+27.0; these are subjective marks. The report supports both this eight-mark
+procedure and older sixteen-spoke logs, retaining their original shape fields.
+
+Mirror My View currently shows the left eye (cyan L). Mirror captures compare
+with left-eye marks only and have their own crop, so they do not measure the
+panel's visible area. Mirror to this Mac from Control Centre, then use the capture
+script above. It captures the largest window matching `-w` (default `airplay`;
+use `-l` to list windows), every `-i` seconds as `mirror-<UTC>-<n>.png`, with times
+and window IDs in `index.tsv`. Missing windows, Screen Recording permission, or
+capture failures cause an error. A smaller mirror crop than the headset marks is
+expected; a larger one suggests conservative marks.
 
 ## Validation
 
