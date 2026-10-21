@@ -101,7 +101,6 @@ final class EDRRenderer {
         frame.startUpdate(); frame.endUpdate()
         LayerRenderer.Clock().wait(until: timing.optimalInputTime)
         frame.startSubmission()
-        defer { frame.endSubmission() }
         let drawables: [LayerRenderer.Drawable]
 #if XCODE_BETA_26
         if #available(visionOS 26.0, *) { drawables = frame.queryDrawables() }
@@ -109,6 +108,7 @@ final class EDRRenderer {
 #else
         drawables = frame.queryDrawable().map { [$0] } ?? []
 #endif
+        // Stop can invalidate the layer before a drawable is available; do not end an unsubmitted frame.
         guard !drawables.isEmpty, let buffer = queue.makeCommandBuffer() else { return }
         // The compositor needs the device pose each frame was rendered for; without it nothing in this space was
         // shown on device (21 Oct). The patches are drawn in view space, so the current pose keeps them head-locked.
@@ -139,6 +139,7 @@ final class EDRRenderer {
             drawable.encodePresent(commandBuffer: buffer)
         }
         buffer.commit()
+        frame.endSubmission()
     }
 }
 
