@@ -19,10 +19,16 @@ import CoreVideo
 import simd
 
 final class HDRProbe {
-    static let enabled = HDRPipeline.probeEnabled(
+    private static let flag = HDRProbeFlag(
         environment: ProcessInfo.processInfo.environment,
         defaultsValue: UserDefaults.standard.object(forKey: HDRPipeline.probeKey) == nil ? nil : UserDefaults.standard.bool(forKey: HDRPipeline.probeKey))
     static let shared = HDRProbe()
+
+    static var enabled: Bool { flag.enabled }
+
+    static func updateEnabled(defaultsValue: Bool) {
+        flag.update(defaultsValue: defaultsValue)
+    }
 
     private var clock = HDRProbeClock()
     private var loggedUnavailable = false

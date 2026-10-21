@@ -7,6 +7,7 @@ import SwiftUI
 import UIKit
 
 struct Entry: View {
+    @AppStorage(HDRPipeline.probeKey) private var hdrProbeEnabled = false
     @ObservedObject var eventHandler = EventHandler.shared
     @EnvironmentObject var gStore: GlobalSettingsStore
     @Environment(\.scenePhase) private var scenePhase
@@ -350,6 +351,16 @@ struct Entry: View {
                         .toggleStyle(.switch)
                         .onChange(of: gStore.settings.hdrPQ) {
                             saveAction()
+                        }
+
+                        Toggle(isOn: $hdrProbeEnabled) {
+                            Text("HDR probe (log)")
+                            Text("Logs decoded HDR samples while streaming. ALVR_HDR_PROBE in the launch environment overrides this setting.")
+                                .font(.system(size: 10))
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: hdrProbeEnabled) {
+                            HDRProbe.updateEnabled(defaultsValue: hdrProbeEnabled)
                         }
 
                         Toggle(isOn: $gStore.settings.showPerformanceHud) {
