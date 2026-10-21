@@ -10,7 +10,6 @@ import RealityKit
     @Published var space: String?
     private var observer: Any?
     private var status: NSKeyValueObservation?
-    private var path = "window"
     func refresh() {
         guard Diag.isOn else { return }
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("diag-clips")
@@ -26,18 +25,19 @@ import RealityKit
     }
     func play(immersive: Bool) {
         guard Diag.isOn, let selected else { return }
-        stop(); path = immersive ? "realitykit" : "window"
+        stop()
+        let context = PQPlaybackContext(clip: selected.lastPathComponent, path: immersive ? "realitykit" : "window")
         let item = AVPlayerItem(url: selected)
         player.replaceCurrentItem(with: item)
-        Diag.log("pq", ["path": path, "clip": selected.lastPathComponent, "eligibleForHDRPlayback": AVPlayer.eligibleForHDRPlayback,
+        Diag.log("pq", ["path": context.path, "clip": context.clip, "eligibleForHDRPlayback": AVPlayer.eligibleForHDRPlayback,
                         "availableHDRModes": AVPlayer.availableHDRModes.rawValue])
         status = item.observe(\.status, options: [.initial, .new]) { item, _ in
-            Diag.log("pq", ["status": item.status.rawValue, "error": item.error?.localizedDescription ?? "none"])
+            Diag.log("pq", context.statusFields(status: item.status.rawValue, error: item.error?.localizedDescription ?? "none"))
         }
         observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main) { [weak self] time in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                Diag.log("pq", ["path": self.path, "clip": selected.lastPathComponent, "current_s": time.seconds,
+                Diag.log("pq", ["path": context.path, "clip": context.clip, "current_s": time.seconds,
                                 "step": PQSchedule.step(time: time.seconds, isSteps: selected.lastPathComponent.contains("steps")),
                                 "rate": self.player.rate, "waiting": self.player.reasonForWaitingToPlay?.rawValue ?? "none"])
             }
@@ -49,12 +49,12 @@ import RealityKit
                     let formats = try await track.load(.formatDescriptions)
                     guard player.currentItem === item else { return }
                     for format in formats {
-                        Diag.log("pq", ["path": path, "clip": selected.lastPathComponent,
+                        Diag.log("pq", ["path": context.path, "clip": context.clip,
                                         "transfer": CMFormatDescriptionGetExtension(format, extensionKey: kCMFormatDescriptionExtension_TransferFunction) ?? "unavailable" as CFString,
                                         "primaries": CMFormatDescriptionGetExtension(format, extensionKey: kCMFormatDescriptionExtension_ColorPrimaries) ?? "unavailable" as CFString])
                     }
                 }
-            } catch { Diag.log("pq", ["metadata_error": error.localizedDescription]) }
+            } catch { Diag.log("pq", context.metadataErrorFields(error.localizedDescription)) }
         }
         player.play()
     }

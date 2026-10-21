@@ -124,7 +124,12 @@ Exit a diagnostic before entering a stream. Stop/exit also releases the player.
 
 **EDR ramp:** unfoveated, per-eye `rgba16Float`, extended-linear Display P3.
 The separate fragment writes neutral values directly, with opaque alpha and
-no app shoulder or gamut/transfer conversion. Layout areas are fractions of
+no app shoulder or gamut/transfer conversion. Patches and their opaque black
+surround both write finite reverse-Z depth for a two-metre view plane, derived
+from each drawable view's current scene-aware projection (see
+[WWDC24 10092](https://developer.apple.com/videos/play/wwdc2024/10092/)).
+Pixels outside the view's viewport remain transparent with zero depth.
+Layout areas are fractions of
 each eye's drawable viewport, not calibrated fractions of the visible optical
 field. Centre patches have a black surround; split has unity on the left;
 checkerboard is 8×8 with equal black/bright areas. Pinch the ramp or tap Next
@@ -147,7 +152,9 @@ VideoPlayer) or Play immersive (RealityKit VideoPlayerComponent). Each launch
 starts the same selected file from time zero; only one presentation is active.
 Logs include clip/path, `eligibleForHDRPlayback`, `availableHDRModes` (deprecated
 but recorded as requested), actual item format transfer/primaries, status/error,
-and media time/rate/waiting reason every 250 ms. `step` is zero based at 2-second
+and media time/rate/waiting reason every 250 ms. Status and metadata errors carry
+the originating item's immutable clip/path, including late callbacks after a
+new playback begins. `step` is zero based at 2-second
 boundaries for filenames containing `steps`, with step 6 held past 14 seconds,
 matching the generator. Other clips log step -1; use media time and their own
 manifest. These are media-clock samples, not measured photon presentation times.

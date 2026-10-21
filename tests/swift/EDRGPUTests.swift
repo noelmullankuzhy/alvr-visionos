@@ -20,7 +20,7 @@ import simd
             descriptor.textureType = .type2DArray
             descriptor.arrayLength = 2
             descriptor.usage = .renderTarget
-            descriptor.storageMode = .shared
+            descriptor.storageMode = format == .depth32Float ? .private : .shared
             return device.makeTexture(descriptor: descriptor)!
         }
         let colour = texture(.rgba16Float), depth = texture(.depth32Float)
@@ -36,19 +36,29 @@ import simd
             buffer.commit(); buffer.waitUntilCompleted()
             expect(buffer.error == nil, "GPU completed: \(String(describing: buffer.error))")
         }
+        // Depth textures stay private; blit into a shared buffer with aligned rows for CPU inspection.
+        func readDepth(slice: Int) -> [Float] {
+            let rowBytes = 1024
+            let readback = device.makeBuffer(length: rowBytes * height, options: .storageModeShared)!
+            let buffer = queue.makeCommandBuffer()!
+            let blit = buffer.makeBlitCommandEncoder()!
+            blit.copy(from: depth, sourceSlice: slice, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                      sourceSize: MTLSize(width: width, height: height, depth: 1), to: readback, destinationOffset: 0,
+                      destinationBytesPerRow: rowBytes, destinationBytesPerImage: rowBytes * height)
+            blit.endEncoding(); buffer.commit(); buffer.waitUntilCompleted()
+            expect(buffer.error == nil, "depth readback completed")
+            let values = readback.contents().assumingMemoryBound(to: Float.self)
+            return (0..<height).flatMap { row in Array(UnsafeBufferPointer(start: values + row * rowBytes / 4, count: width)) }
+        }
         // Other array slice must survive every pass; offset viewport catches viewport-origin mistakes.
         render(.full, 0.25, slice: 0, projection: projection)
         for layout in EDRLayout.allCases {
             render(layout, 4, slice: 1, projection: projection)
             var pixels = [UInt16](repeating: 0, count: width * height * 4)
-            var depths = [Float](repeating: -1, count: width * height)
+            let depths = readDepth(slice: 1)
             pixels.withUnsafeMutableBytes {
                 colour.getBytes($0.baseAddress!, bytesPerRow: width * 8, bytesPerImage: width * height * 8,
                                 from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, slice: 1)
-            }
-            depths.withUnsafeMutableBytes {
-                depth.getBytes($0.baseAddress!, bytesPerRow: width * 4, bytesPerImage: width * height * 4,
-                               from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, slice: 1)
             }
             var bright = 0
             for y in 0..<height {
@@ -77,11 +87,10 @@ import simd
             }
             if layout == .onePercent { expectEqual(bright, 320, "1% of the 200×160 viewport") }
             var otherColour = [UInt16](repeating: 0, count: 4)
-            var otherDepth: Float = 0
+            let otherDepth = readDepth(slice: 0)[80 * width + 100]
             otherColour.withUnsafeMutableBytes {
                 colour.getBytes($0.baseAddress!, bytesPerRow: 8, bytesPerImage: 8, from: MTLRegionMake2D(100, 80, 1, 1), mipmapLevel: 0, slice: 0)
             }
-            depth.getBytes(&otherDepth, bytesPerRow: 4, bytesPerImage: 4, from: MTLRegionMake2D(100, 80, 1, 1), mipmapLevel: 0, slice: 0)
             expectEqual(Float(Float16(bitPattern: otherColour[0])), 0.25, "other eye colour survives")
             expect(abs(otherDepth - expectedDepth) < 1e-6, "other eye depth survives")
         }
@@ -91,11 +100,10 @@ import simd
         for level: Float in [0, 0.25, 0.5, 1, 1.25, 1.5, 1.75, 2, 2.5, 4] {
             render(.full, level, slice: 1, projection: infiniteProjection)
             var pixel = [UInt16](repeating: 0, count: 4)
-            var z: Float = 0
+            let z = readDepth(slice: 1)[80 * width + 100]
             pixel.withUnsafeMutableBytes {
                 colour.getBytes($0.baseAddress!, bytesPerRow: 8, bytesPerImage: 8, from: MTLRegionMake2D(100, 80, 1, 1), mipmapLevel: 0, slice: 1)
             }
-            depth.getBytes(&z, bytesPerRow: 4, bytesPerImage: 4, from: MTLRegionMake2D(100, 80, 1, 1), mipmapLevel: 0, slice: 1)
             for channel in 0..<4 { expectEqual(Float(Float16(bitPattern: pixel[channel])), channel == 3 ? 1 : level, "raw ramp \(level)") }
             expect(abs(z - 0.025) < 1e-6, "updated projection, near/distance = 0.05/2")
         }

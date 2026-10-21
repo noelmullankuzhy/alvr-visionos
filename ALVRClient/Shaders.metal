@@ -417,9 +417,9 @@ fragment half4 copyFragmentShader(CopyVertexOut in [[stage_in]], texture2d_array
 }
 
 // M2: dedicated diagnostic entry points, extended-linear Display P3 straight to rgba16Float.
-vertex float4 diagEDRVertex(uint id [[vertex_id]]) {
+vertex float4 diagEDRVertex(uint id [[vertex_id]], constant float &depth [[buffer(0)]]) {
     const float2 positions[] = {float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1)};
-    return float4(positions[id], 0, 1);
+    return float4(positions[id], depth, 1);
 }
 fragment float4 diagEDRFragment(constant float &value [[buffer(0)]]) {
     return float4(value, value, value, 1.0);

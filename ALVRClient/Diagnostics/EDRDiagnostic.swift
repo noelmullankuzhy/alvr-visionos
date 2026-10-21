@@ -1,5 +1,16 @@
 import Foundation
 
+// Immutable attribution captured by asynchronous callbacks for one player item.
+struct PQPlaybackContext {
+    let clip, path: String
+    func statusFields(status: Int, error: String) -> KeyValuePairs<String, Any> {
+        ["path": path, "clip": clip, "status": status, "error": error]
+    }
+    func metadataErrorFields(_ error: String) -> KeyValuePairs<String, Any> {
+        ["path": path, "clip": clip, "metadata_error": error]
+    }
+}
+
 // tools/diag/clip-engine.swift: seven two-second levels, last level held on extension.
 enum PQSchedule {
     static func step(time: Double, isSteps: Bool) -> Int {
