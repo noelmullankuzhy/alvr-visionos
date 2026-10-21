@@ -468,7 +468,8 @@ class RealityKitClientSystemCorrectlyAssociated : System {
         self.device = MTLCreateSystemDefaultDevice()!
         self.commandQueue = self.device.makeCommandQueue()!
         
-        self.renderer = Renderer(nil)
+        self.renderer = Renderer(nil, displayFullImmersion: false)
+        self.renderer.logStreamingSpace(id: "RealityKitClient")
         self.renderer.fadeInOverlayAlpha = 1.0
         renderer.rebuildRenderPipelines()
         let settings = ALVRClientApp.gStore.settings
@@ -1581,7 +1582,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             
             // Any change of the frame's colour state, gamut alone included, rebuilds synchronously below. SDR keeps
             // the previous constants (StreamColourState: identity gamut on RealityKit); PQ on RealityKit is UNPROVEN.
-            if let queuedFrame, let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: renderer.isRealityKit), renderer.videoPipelinesNeedBuild(for: colour) {
+            if let queuedFrame, let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: renderer.isRealityKit, displayHeadroom: renderer.displayHeadroom), renderer.videoPipelinesNeedBuild(for: colour) {
                 needsPipelineRebuild = true
             }
 

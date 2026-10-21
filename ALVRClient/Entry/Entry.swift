@@ -354,6 +354,16 @@ struct Entry: View {
                             saveAction()
                         }
 
+                        Toggle(isOn: $gStore.settings.streamFullImmersion) {
+                            Text("Full immersion (HDR headroom)")
+                            Text("Hides passthrough. visionOS shows HDR highlights above SDR white only in full immersion (measured ~1.5x).")
+                                .font(.system(size: 10))
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: gStore.settings.streamFullImmersion) {
+                            saveAction()
+                        }
+
                         Toggle(isOn: $hdrProbeEnabled) {
                             Text("HDR probe (log)")
                             Text("Logs decoded HDR samples while streaming. ALVR_HDR_PROBE in the launch environment overrides this setting.")

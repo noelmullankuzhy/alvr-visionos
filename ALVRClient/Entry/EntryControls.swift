@@ -161,7 +161,8 @@ struct EntryControls: View {
                         }
                     }
                     else {
-                        await openImmersiveSpace(id: "MetalClient")
+                        let spaceID = gStore.settings.streamFullImmersion ? "MetalClientFull" : "MetalClient"
+                        await openImmersiveSpace(id: spaceID)
                     }
                     VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
                     if gStore.settings.dismissWindowOnEnter {

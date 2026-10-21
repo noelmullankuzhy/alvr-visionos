@@ -27,8 +27,8 @@ class MetalClientSystem {
     var renderer: Renderer;
     let layerRenderer: LayerRenderer
 
-    init(_ layerRenderer: LayerRenderer, offlineDiagnostics: Bool = false) {
-        self.renderer = Renderer(layerRenderer, offlineDiagnostics: offlineDiagnostics)
+    init(_ layerRenderer: LayerRenderer, offlineDiagnostics: Bool = false, displayFullImmersion: Bool = false) {
+        self.renderer = Renderer(layerRenderer, offlineDiagnostics: offlineDiagnostics, displayFullImmersion: displayFullImmersion)
         self.layerRenderer = layerRenderer
     }
 
