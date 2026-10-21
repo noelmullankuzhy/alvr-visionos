@@ -9,11 +9,22 @@
 // looks along each spoke and steps the highlighted ring until it is the outermost one still seen; the marks give the
 // visible tangent polygon and the shape. Geometry is NDC quads (x right, y up), drawn without a projection by
 // CornerChartRenderer. Foundation-only so it is unit tested on macOS (tests/swift/CornerChartTests.swift).
+// Decision 65a: each eye's chart is in its own colour (left cyan, right magenta) with a large L / R at its tangent
+// centre, so a mono mirror capture names the eye it shows.
 //
 
 import Foundation
 
-enum CornerEye: String { case left = "L", right = "R" }
+enum CornerEye: String {
+    case left = "L", right = "R"
+
+    // The view's x offset in the device frame: left eye at -x (0 counts as left).
+    init(viewOffsetX x: Double) { self = x <= 0 ? .left : .right }
+
+    var color: SIMD4<Float> { self == .left ? [0, 1, 1, 1] : [1, 0, 1, 1] }
+    var dimColor: SIMD4<Float> { self == .left ? [0, 0.5, 0.5, 1] : [0.5, 0, 0.5, 1] }
+    var glyph: String { rawValue }
+}
 
 enum CornerChartMode: String, CaseIterable {
     case off = "Off", both = "Both eyes", left = "Left only", right = "Right only"
@@ -116,9 +127,6 @@ enum CornerChart {
     struct Quad { let rect: Rect; let color: SIMD4<Float> }
     struct Label { let pct: Int; let spoke: Int; let text: String; let rect: Rect; let vertical: Bool }
 
-    static let palette: [SIMD4<Float>] = [[1, 1, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1, 1], [0, 1, 0, 1],
-                                          [1, 0.5, 0, 1], [0.4, 0.6, 1, 1], [1, 0.3, 0.3, 1], [1, 1, 1, 1], [1, 1, 0, 1]]
-
     static func ringRect(_ t: CornerTangents, pct: Int) -> Rect {
         let p = Double(pct) / 100
         let lo = t.ndc(x: -p * t.left, y: -p * t.bottom), hi = t.ndc(x: p * t.right, y: p * t.top)
@@ -197,17 +205,43 @@ enum CornerChart {
         return out
     }
 
-    // One eye's chart: rings (inner strokes), numbers, spoke dots, the selected ring's highlight + large number, status.
-    static func geometry(_ t: CornerTangents, widthPx w: Double, heightPx h: Double, selected: (spoke: Int, pct: Int)?, status: String) -> [Quad] {
+    // The eye glyph's box: centred on the tangent origin, 0.2 of the drawable height (0.6 as wide), shrunk to stay
+    // within 80% of the space inside the innermost ring.
+    static func glyphRect(_ t: CornerTangents, widthPx w: Double, heightPx h: Double) -> Rect {
+        let c = t.ndc(x: 0, y: 0), r = ringRect(t, pct: ringPercents.last!)
+        let halfW = min(r.x1 - c.x, c.x - r.x0) * w / 2, halfH = min(r.y1 - c.y, c.y - r.y0) * h / 2
+        let gh = min(0.2 * h, 1.6 * halfH, 1.6 * halfW / 0.6), gw = 0.6 * gh
+        return Rect(x0: c.x - gw / w, y0: c.y - gh / h, x1: c.x + gw / w, y1: c.y + gh / h)
+    }
+
+    // Block L / R (stroke 0.16 of the height): L = stem and foot; R = stem, top, middle, bowl side and a stepped leg.
+    static func eyeGlyph(_ eye: CornerEye, _ t: CornerTangents, widthPx w: Double, heightPx h: Double) -> [Quad] {
+        let g = glyphRect(t, widthPx: w, heightPx: h), st = 0.16, sw = 0.16 / 0.6
+        func box(_ x0: Double, _ y0: Double, _ x1: Double, _ y1: Double) -> Quad {
+            Quad(rect: Rect(x0: g.x0 + x0 * (g.x1 - g.x0), y0: g.y0 + y0 * (g.y1 - g.y0), x1: g.x0 + x1 * (g.x1 - g.x0), y1: g.y0 + y1 * (g.y1 - g.y0)),
+                 color: eye.color)
+        }
+        if eye == .left { return [box(0, 0, sw, 1), box(0, 0, 1, st)] }
+        let leg = (0..<5).map { i -> Quad in
+            let x0 = 0.3 + (1 - sw - 0.3) * Double(i) / 4
+            return box(x0, 0.5 - Double(i + 1) * 0.1, x0 + sw, 0.5 - Double(i) * 0.1)
+        }
+        return [box(0, 0, sw, 1), box(0, 1 - st, 1, 1), box(0, 0.5 - st / 2, 1, 0.5 + st / 2), box(1 - sw, 0.5, 1, 1)] + leg
+    }
+
+    // One eye's chart in its colour: rings (inner strokes), numbers, spoke dots, the L / R glyph; then the selected
+    // ring's highlight + large number and the status (below the glyph) in white on black.
+    static func geometry(_ t: CornerTangents, eye: CornerEye, widthPx w: Double, heightPx h: Double, selected: (spoke: Int, pct: Int)?,
+                         status: String) -> [Quad] {
         let dx = 2 / w, dy = 2 / h, lx = linePx * dx, ly = linePx * dy
         var out: [Quad] = []
-        for (i, pct) in ringPercents.enumerated() {
-            let r = ringRect(t, pct: pct), c = palette[i]
+        for pct in ringPercents {
+            let r = ringRect(t, pct: pct)
             out += [Rect(x0: r.x0, y0: r.y0, x1: r.x0 + lx, y1: r.y1), Rect(x0: r.x1 - lx, y0: r.y0, x1: r.x1, y1: r.y1),
-                    Rect(x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y0 + ly), Rect(x0: r.x0, y0: r.y1 - ly, x1: r.x1, y1: r.y1)].map { Quad(rect: $0, color: c) }
+                    Rect(x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y0 + ly), Rect(x0: r.x0, y0: r.y1 - ly, x1: r.x1, y1: r.y1)].map { Quad(rect: $0, color: eye.color) }
         }
         for label in labels(t, widthPx: w, heightPx: h) {
-            out += text(label.text, in: label.rect, vertical: label.vertical, color: palette[ringPercents.firstIndex(of: label.pct) ?? 0])
+            out += text(label.text, in: label.rect, vertical: label.vertical, color: eye.color)
         }
         // Spoke direction: dots from 10 to 70% (the selected spoke brighter and larger).
         for k in 0..<CornerSpokes.count {
@@ -215,9 +249,10 @@ enum CornerChart {
             for pct in stride(from: 10, through: 70, by: 10) {
                 let p = spokeNdc(t, k, pct)
                 out.append(Quad(rect: Rect(x0: p.x - s * dx, y0: p.y - s * dy, x1: p.x + s * dx, y1: p.y + s * dy),
-                                color: on ? [1, 1, 1, 1] : [0.5, 0.5, 0.5, 1]))
+                                color: on ? eye.color : eye.dimColor))
             }
         }
+        out += eyeGlyph(eye, t, widthPx: w, heightPx: h)
         let white: SIMD4<Float> = [1, 1, 1, 1], black: SIMD4<Float> = [0, 0, 0, 1]
         func boxed(_ s: String, centre: (x: Double, y: Double), px: Double) {
             let size = textSize(s, h: px, vertical: false)
@@ -241,7 +276,8 @@ enum CornerChart {
             boxed("\(pct)", centre: (a.x - d.x * (m + size.w / 2) * dx, a.y - d.y * (m + size.h / 2) * dy), px: maxLabelPx)
         }
         if !status.isEmpty {
-            boxed(status, centre: t.ndc(x: 0, y: 0), px: 0.04 * h)
+            let g = glyphRect(t, widthPx: w, heightPx: h), px = 0.04 * h
+            boxed(status, centre: ((g.x0 + g.x1) / 2, g.y0 - (12 + px / 2) * dy), px: px)
         }
         return out
     }

@@ -84,7 +84,9 @@ sh tools/diag/capture-mirror.sh -l
 The client's corner chart (Diagnostics on, Corner chart setting, no stream) draws
 16 spokes per eye every 22.5° (0 = right, counter-clockwise), with numbered rings at
 100, 98, 96, 94, 92, 90, 88, 85, 80, 75% of that eye's tangent extent along each spoke.
-On the diagonals, 100 is the drawable corner. Mirror the headset to the Mac (Control
+On the diagonals, 100 is the drawable corner. The left eye's chart is cyan and the
+right's magenta (rings, numbers, spokes), with a large L / R at the eye's centre, so
+each capture names the eye the mirror shows (decision 65a). Mirror the headset to the Mac (Control
 Centre > Mirror My View > this Mac). The script then captures the largest on-screen
 window whose owner or title matches `-w` (default `airplay`; use `-l` and pass the
 owner from the list if your receiver is named differently). It captures every `-i`

@@ -2,8 +2,9 @@
 //  CornerChartRenderer.swift
 //
 // Device side of the corner chart (CornerChart.swift, GM decision 65): Diagnostics on + the Corner chart setting, the
-// immersive Metal path with no stream. Draws each lit view's chart in its own NDC (head-locked, other eye black in the
-// monocular modes) and takes marks from pinches or a gamepad:
+// immersive Metal path with no stream. Draws each lit view's chart in its own NDC and colour (left cyan, right magenta,
+// with an L / R at the centre; head-locked, other eye black in the monocular modes) and takes marks from pinches or a
+// gamepad:
 //   pinch right / left: ring out / in; hold (>= 0.5 s) right: record and next; hold left: back.
 //   d-pad up or right / down or left: ring out / in; A: record; B: back.
 // Logs once: per view eye, tangents, drawable size (corner), the visible-area API result (corner api=unavailable);
@@ -120,8 +121,7 @@ final class CornerChartRenderer {
         lock.lock()
         var views: [(eye: CornerEye, view: Int, t: CornerTangents, vp: MTLViewport)] = []
         for (v, view) in drawable.views.enumerated() {
-            // Left eye = view offset to -x in the device frame.
-            let eye: CornerEye = view.transform.columns.3.x <= 0 ? .left : .right
+            let eye = CornerEye(viewOffsetX: Double(view.transform.columns.3.x))
             views.append((eye, v, CornerTangents(simd: drawable.gimmeTangents(viewIndex: v)), view.textureMap.viewport))
             tangents[eye] = views[v].t
         }
@@ -141,7 +141,7 @@ final class CornerChartRenderer {
             var vertices: [SIMD4<Float>] = []
             for (eye, v, t, vp) in views where session.lit(eye) {
                 let selected = session.eye == eye ? (session.spoke, session.pct) : nil
-                for q in CornerChart.geometry(t, widthPx: vp.width, heightPx: vp.height, selected: selected, status: session.statusText) {
+                for q in CornerChart.geometry(t, eye: eye, widthPx: vp.width, heightPx: vp.height, selected: selected, status: session.statusText) {
                     let r = q.rect
                     for (x, y) in [(r.x0, r.y0), (r.x1, r.y0), (r.x0, r.y1), (r.x1, r.y0), (r.x1, r.y1), (r.x0, r.y1)] {
                         vertices += [SIMD4<Float>(Float(x), Float(y), Float(v), 0), q.color]
