@@ -70,6 +70,9 @@
 		E7D606052C1B646D009E3343 /* EyeTrackingMats.usda in Resources */ = {isa = PBXBuildFile; fileRef = E7D606042C1B646D009E3343 /* EyeTrackingMats.usda */; };
 		E7F222422BE2F03800D10191 /* RealityKitClientView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7F222412BE2F03800D10191 /* RealityKitClientView.swift */; };
 		E7F222442BE2F21600D10191 /* SBSMaterial.usda in Resources */ = {isa = PBXBuildFile; fileRef = E7F222432BE2F21600D10191 /* SBSMaterial.usda */; };
+		D65D2E012C00000100650001 /* EDRDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D2E022C00000100650001 /* EDRDiagnostic.swift */; };
+		D65D2E012C00000100650002 /* EDRRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D2E022C00000100650002 /* EDRRenderer.swift */; };
+		D65D2E012C00000100650003 /* BrightnessDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -182,6 +185,9 @@
 		E7D606042C1B646D009E3343 /* EyeTrackingMats.usda */ = {isa = PBXFileReference; lastKnownFileType = text; path = EyeTrackingMats.usda; sourceTree = "<group>"; };
 		E7F222412BE2F03800D10191 /* RealityKitClientView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealityKitClientView.swift; sourceTree = "<group>"; };
 		E7F222432BE2F21600D10191 /* SBSMaterial.usda */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = SBSMaterial.usda; sourceTree = "<group>"; };
+		D65D2E022C00000100650001 /* EDRDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/EDRDiagnostic.swift; sourceTree = "<group>"; };
+		D65D2E022C00000100650002 /* EDRRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/EDRRenderer.swift; sourceTree = "<group>"; };
+		D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/BrightnessDiagnostics.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -268,6 +274,9 @@
 				D63A0E022C00000100630004 /* HDRProbe.swift */,
 				D65D0E022C00000100650002 /* Diag.swift */,
 				D65D0E022C00000100650004 /* DiagProbes.swift */,
+				D65D2E022C00000100650003 /* BrightnessDiagnostics.swift */,
+				D65D2E022C00000100650002 /* EDRRenderer.swift */,
+				D65D2E022C00000100650001 /* EDRDiagnostic.swift */,
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
 				A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */,
@@ -495,6 +504,9 @@
 				D63A0E012C00000100630003 /* HDRProbe.swift in Sources */,
 				D65D0E012C00000100650001 /* Diag.swift in Sources */,
 				D65D0E012C00000100650003 /* DiagProbes.swift in Sources */,
+				D65D2E012C00000100650003 /* BrightnessDiagnostics.swift in Sources */,
+				D65D2E012C00000100650002 /* EDRRenderer.swift in Sources */,
+				D65D2E012C00000100650001 /* EDRDiagnostic.swift in Sources */,
 				D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */,
 				9ED257172B8062A2008DC22F /* Settings.swift in Sources */,
 				C5E590362B6379ED00328ED6 /* Renderer.swift in Sources */,

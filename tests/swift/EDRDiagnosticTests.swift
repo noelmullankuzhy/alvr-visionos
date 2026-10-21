@@ -46,7 +46,7 @@ import Foundation
         expectEqual(PQSchedule.step(time: .nan, isSteps: true), -1, "indefinite time")
         expectEqual(PQSchedule.step(time: 2, isSteps: false), -1, "gradient has no steps")
         // Exercise the actual shader entry and make bypass regressions fail without needing a Metal device.
-        let shader = try! String(contentsOfFile: "ALVRClient/Shaders.metal")
+        let shader = try! String(contentsOfFile: "ALVRClient/Shaders.metal", encoding: .utf8)
         let ramp = shader.components(separatedBy: "fragment float4 diagEDRFragment").last!
         expect(ramp.contains("return float4(value, value, value, 1.0)"), "ramp writes raw value")
         expect(!ramp.contains("EDRRollOff") && !ramp.contains("VideoLinearToOutput"), "no shoulder in ramp")

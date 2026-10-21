@@ -378,6 +378,12 @@ struct Entry: View {
                             Label("Controller Input Debug", systemImage: "gamecontroller")
                         }
                         .padding(.top)
+
+                        if Diag.isOn {
+                            Button("Brightness diagnostics (EDR ramp / PQ player)") {
+                                openWindow(id: "BrightnessDiagnostics")
+                            }
+                        }
                     }
                     .frame(minWidth: 450)
                     .padding()
