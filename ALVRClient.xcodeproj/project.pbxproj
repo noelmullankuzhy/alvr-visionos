@@ -24,6 +24,7 @@
 		D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68FA8082B742F6F0052B7FF /* FFR.swift */; };
 		E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */; };
 		A17A0E012C0000010011AA01 /* AutoEnterPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */; };
+		A17B0E012C0000010011AA01 /* StreamBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17B0E022C0000010011AA02 /* StreamBootstrap.swift */; };
 		E70C9AEA2C9377F50035B4F9 /* Codable.swift in Sources */ = {isa = PBXBuildFile; fileRef = E70C9AE92C9377F20035B4F9 /* Codable.swift */; };
 		E71352CE2DF784C60079F12B /* GCController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71352CD2DF784BF0079F12B /* GCController.swift */; };
 		E71DEF972C18D478008A2074 /* RealityKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71DEF932C18D325008A2074 /* RealityKit.swift */; };
@@ -120,6 +121,7 @@
 		D68FA8082B742F6F0052B7FF /* FFR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFR.swift; sourceTree = "<group>"; };
 		E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalSettings.swift; sourceTree = "<group>"; };
 		A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoEnterPolicy.swift; sourceTree = "<group>"; };
+		A17B0E022C0000010011AA02 /* StreamBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamBootstrap.swift; sourceTree = "<group>"; };
 		E70C9AE92C9377F20035B4F9 /* Codable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Codable.swift; sourceTree = "<group>"; };
 		E71352CD2DF784BF0079F12B /* GCController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GCController.swift; sourceTree = "<group>"; };
 		E71DEF932C18D325008A2074 /* RealityKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealityKit.swift; sourceTree = "<group>"; };
@@ -239,6 +241,7 @@
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
 				A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */,
+				A17B0E022C0000010011AA02 /* StreamBootstrap.swift */,
 				0FDF7F3AB0664D5089D91DE3 /* PerformanceTracker.swift */,
 				5BD00478C3614F7DB55D935E /* PerformanceOverlayView.swift */,
 				E72683DA2BE73DD10065B78B /* MetalClientSystem.swift */,
@@ -439,6 +442,7 @@
 				E71DEF9A2C18D4B4008A2074 /* ALVRTypes.swift in Sources */,
 				E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */,
 				A17A0E012C0000010011AA01 /* AutoEnterPolicy.swift in Sources */,
+				A17B0E012C0000010011AA01 /* StreamBootstrap.swift in Sources */,
 				93F10375671142039BA634E8 /* PerformanceTracker.swift in Sources */,
 				E7AC9193873D48A2B7122E11 /* PerformanceOverlayView.swift in Sources */,
 				E72683DB2BE73DD10065B78B /* MetalClientSystem.swift in Sources */,
