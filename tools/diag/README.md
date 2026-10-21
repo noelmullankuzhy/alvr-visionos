@@ -81,8 +81,10 @@ Use separate fresh directories for each run, including different fine bounds.
 Both `grid` and `level` accept `--mastering-peak NITS` (BT.2020 primaries,
 D65 white, 0.0050 cd/m² minimum luminance) and the paired `--max-cll NITS`
 `--max-fall NITS`. They write ST 2086 and CEA-861.3 byte payloads through
-VideoToolbox and record requested values plus format-description readback bytes
-in the manifest. Metadata adds suffixes such as `-md1000-cll1000-fall400`.
+VideoToolbox. ST 2086 chromaticity pairs use the ISO payload order G, B, R,
+then D65 white; requested values and format-description readback bytes are
+recorded in the manifest. Metadata adds suffixes such as
+`-md1000-cll1000-fall400`.
 Each supplied value must be greater than zero and at most 10000 nits; maxFALL
 must not exceed maxCLL. With no metadata options, clips retain today's tagging.
 The checker verifies requested extensions and byte values against the format

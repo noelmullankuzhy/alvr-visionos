@@ -209,7 +209,7 @@ func check(_ path: String) throws {
         if let metadata = clip["hdrStaticMetadata"] as? [String: Double] {
             if let peak = metadata["masteringPeakNits"] {
                 var expected: [Int] = []
-                for value in [35400,14600,8500,39850,6550,2300,15635,16450] {
+                for value in [8500,39850,6550,2300,35400,14600,15635,16450] {
                     expected.append((value >> 8) & 255); expected.append(value & 255)
                 }
                 for value in [UInt32((peak * 10000).rounded()), UInt32(50)] {

@@ -39,7 +39,8 @@ struct HDRStaticMetadata: Equatable {
         guard let masteringPeak else { return Data() }
         var bytes: [UInt8] = []
         // ST 2086 chromaticities are unsigned 16-bit values in units of 0.00002.
-        for value: UInt16 in [35400, 14600, 8500, 39850, 6550, 2300, 15635, 16450] {
+        // ISO/IEC 23008-2 D.2.28 indexes display primaries as G, B, R.
+        for value: UInt16 in [8500, 39850, 6550, 2300, 35400, 14600, 15635, 16450] {
             bytes.append(UInt8(value >> 8)); bytes.append(UInt8(value & 0xff))
         }
         append(UInt32((masteringPeak * 10000).rounded()), to: &bytes)
