@@ -14,7 +14,7 @@ SECTIONS = (
     'M5 drawable / rasterization maps and render-quality sweep',
     'M6 cadence', 'M9 thermal / memory / GPU', 'M2 EDR ramp / thresholds',
     'M3 PQ player', 'M7 decode', 'M8 network', 'Corner chart',
-    'Eye badges and Diag file health',
+    'Eye badges and Diag file health', 'Boundary dots',
 )
 TOKEN = re.compile(r'([A-Za-z0-9_.]+)=("(?:[^"\\\x00-\x1f]|\\["\\nrt])*"|[^\s"=]+)(?=\s|$)')
 HEADER = re.compile(r'DIAG ([A-Za-z0-9_.]+) t_ms=([0-9]+)(?=\s|$)')
@@ -399,6 +399,155 @@ def corner_rows(records):
     return rows
 
 
+def dots_coordinates(yaw, pitch, tangents):
+    """Signed side percentages and affine drawable [0,1] coordinates.
+
+    Head-frame projected angles approximate eye-origin rays, without eye cant
+    correction. Separate side percentages must not be used as affine area units.
+    """
+    if tangents is None or len(tangents) != 4:
+        return None
+    values = [number(v) for v in (yaw, pitch) + tuple(tangents)]
+    if any(v is None for v in values) or any(v <= 0 for v in values[2:]):
+        return None
+    yaw, pitch, left, right, bottom, top = values
+    if abs(yaw) >= 90 or abs(pitch) >= 90:
+        return None
+    x, y = math.tan(math.radians(yaw)), math.tan(math.radians(pitch))
+    x = 0.0 if abs(x) < 1e-12 else x
+    y = 0.0 if abs(y) < 1e-12 else y
+    return dict(x_pct=100 * x / (right if x >= 0 else left),
+                y_pct=100 * y / (top if y >= 0 else bottom),
+                u=(x + left) / (left + right), v=(y + bottom) / (bottom + top))
+
+
+def dots_direction(ray, ecc):
+    """Return projected yaw/pitch for a point on the specified dot lattice."""
+    ray, ecc = number(ray), number(ecc)
+    if (ray is None or ecc is None or not 0 <= ray < 360 or not 10 <= ecc <= 70
+            or abs(ray / 15 - round(ray / 15)) > 1e-7
+            or abs((ecc - 10) / 2.5 - round((ecc - 10) / 2.5)) > 1e-7):
+        return None
+    r, e = math.radians(ray), math.radians(ecc)
+    return dict(ray_deg=ray, ecc_deg=ecc,
+                yaw_deg=math.degrees(math.atan2(math.sin(e) * math.cos(r), math.cos(e))),
+                pitch_deg=math.degrees(math.atan2(math.sin(e) * math.sin(r), math.cos(e))))
+
+
+def dots_boundaries(records):
+    """Replay marks, preserving separate L/R/Both labels and each measurement walk.
+
+    A summary is authoritative (even if earlier marks were rotated out of logs).
+    Use the latest preceding M5 per eye in this app session, never future views.
+    """
+    tangents, active, rows = {}, {}, []
+
+    def snapshot(label, points, source, count, valid=True):
+        for eye in (('L', 'R') if label == 'Both' else (label,)):
+            view = tangents.get(eye)
+            values = None
+            if view:
+                values = tuple(number(v) for v in view['fields'].get('tangents', '').split(','))
+            converted = []
+            for point in points:
+                coords = dots_coordinates(point['yaw_deg'], point['pitch_deg'], values)
+                converted.append(dict(point, **(coords or dict(x_pct=None, y_pct=None, u=None, v=None))))
+            complete = valid and len(points) == 24 and all(p['u'] is not None for p in converted)
+            area = None
+            if complete:
+                area = abs(sum(a['u'] * b['v'] - b['u'] * a['v']
+                               for a, b in zip(converted, converted[1:] + converted[:1]))) / 2
+            rows.append(dict(label=label, eye=eye, points=converted, confirmed_points=count,
+                             visible_area_frac=area, source=source,
+                             tangent_source=view['source'] if view else None,
+                             status='complete' if complete else ('incomplete or missing tangents' if valid else 'invalid summary')))
+
+    def flush():
+        for label, state in active.items():
+            outer = {}
+            for point in state['marks'].values():
+                ray = point['ray_deg']
+                if ray not in outer or point['ecc_deg'] > outer[ray]['ecc_deg']:
+                    outer[ray] = point
+            snapshot(label, [outer[r] for r in sorted(outer)], state['source'], len(state['marks']))
+        active.clear()
+
+    for record in records:
+        f, topic = record['fields'], record['topic']
+        if topic == 'm1':
+            flush()
+            tangents.clear()
+        elif topic == 'dots_session' and f.get('event') == 'begin':
+            flush()
+        elif topic == 'm5_view':
+            eye = f.get('eye', {'0': 'L', '1': 'R'}.get(f.get('view')))
+            if eye in ('L', 'R'):
+                tangents[eye] = record
+        elif topic == 'dots' and f.get('eye') in ('L', 'R', 'Both'):
+            point = dots_direction(f.get('ray_deg'), f.get('ecc_deg'))
+            yaw, pitch = number(f.get('yaw_deg')), number(f.get('pitch_deg'))
+            if point is None or yaw is None or pitch is None or abs(yaw) >= 90 or abs(pitch) >= 90:
+                continue
+            label, action = f['eye'], f.get('action')
+            if action not in ('confirm', 'clear'):
+                continue
+            state = active.setdefault(label, dict(marks={}, source=record['source']))
+            key = (point['ray_deg'], point['ecc_deg'])
+            state['source'] = record['source']
+            if action == 'confirm':
+                state['marks'][key] = dict(point, yaw_deg=yaw, pitch_deg=pitch)
+            else:
+                state['marks'].pop(key, None)
+        elif topic == 'dots_summary' and f.get('eye') in ('L', 'R', 'Both'):
+            label, points, valid = f['eye'], [], True
+            count = number(f.get('points'))
+            raw = f.get('rays', '')
+            if raw != 'none':
+                for pair in raw.split(','):
+                    parts = pair.split(':')
+                    point = dots_direction(*parts) if len(parts) == 2 else None
+                    if point is None or any(p['ray_deg'] == point['ray_deg'] for p in points):
+                        valid = False
+                        break
+                    points.append(point)
+            valid = valid and count is not None and count.is_integer() and len(points) <= count <= 600
+            snapshot(label, sorted(points, key=lambda p: p['ray_deg']) if valid else [],
+                     record['source'], count, valid)
+            active.pop(label, None)
+    flush()
+    return rows
+
+
+def dots_report(records):
+    selected = [r for r in records if r['topic'] in ('dots', 'dots_summary', 'dots_session')]
+    lines = section(SECTIONS[11], selected)
+    lines += ['Angles use a head-vs-eye-origin approximation: head-frame projected yaw/pitch '
+              '(tan(yaw)=x/-z, tan(pitch)=y/-z), without correcting eye position or cant. '
+              'At 10 m and 64 mm IPD the per-eye offset is about 0.183 degrees. '
+              'M5 view 0 is L, view 1 is R unless explicitly labelled; missing eyes are no data. '
+              'Use the latest preceding m5_view tangents in the same app session. Both marks are '
+              'converted separately for each eye; they are not two monocular measurements.', '',
+              'x_pct/y_pct are signed percentages of the corresponding side tangent. '
+              'u=(tan(yaw)+left)/(left+right), v=(tan(pitch)+bottom)/(bottom+top) '
+              'are affine normalised drawable units. visible_area_frac is the shoelace area in '
+              'these units, only with all 24 rays. Values are not clamped to the drawable. '
+              'Missing rays are not interpolated. Summaries contain the outermost confirmed point '
+              'on each ray and are authoritative; unsummarised marks are labelled by their last source.', '',
+              'Resolution: 2.5 degrees radially, 15 degrees between rays; targets are 1 degree wide. '
+              'A visible dot that cannot be highlighted is a tracker limit, not a boundary. '
+              'The app cannot detect or log continuous gaze or this failure; record it separately.', '']
+    for boundary in dots_boundaries(records):
+        lines += ['Marks={} → eye={}; source={}; tangent_source={}; confirmed_points={}; '
+                  'rays={}; status={}; visible_area_frac={}'.format(
+                      boundary['label'], boundary['eye'], cell(boundary['source']),
+                      cell(boundary['tangent_source']), fmt(boundary['confirmed_points']),
+                      len(boundary['points']), boundary['status'], fmt(boundary['visible_area_frac'])), '']
+        lines += table([{k: fmt(v) for k, v in point.items()} for point in boundary['points']],
+                       ('ray_deg', 'ecc_deg', 'yaw_deg', 'pitch_deg', 'x_pct', 'y_pct', 'u', 'v')) + ['']
+    lines += measurements(selected, ('eye', 'action', 'ray_deg', 'ecc_deg', 'yaw_deg', 'pitch_deg', 'points', 'rays')) + ['']
+    return lines
+
+
 def generate(directory, sender_path=None):
     directory = Path(directory)
     records, malformed, errors = read_logs(directory)
@@ -527,8 +676,9 @@ def generate(directory, sender_path=None):
     lines += ['Per-spoke radii are the logged normalised r entries, ordered 0–337.5 degrees in 22.5-degree steps. No missing rings are inferred.', '']
     lines += table(corner_rows(records), ('eye', 'pos_deg', 'ring_pct', 'radius', 'shape', 'superellipse_n', 'area_frac', 'kind', 'sides', 'cuts', 'visible_area_frac', 'mark_source', 'summary_source')) + ['']
     lines += measurements(selected, ('eye', 'pos_deg', 'ring_pct', 'r', 'shape', 'superellipse_n', 'area_frac')) + ['']
+    lines += dots_report(records)
     selected = topics('eye_badge', 'diag')
-    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag'}
+    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session'}
     unknown = [r for r in records if r['topic'] not in known]
     lines += section(SECTIONS[10], selected + unknown, malformed + bad_sender + errors)
     lines += ['malformed lines skipped={}; malformed sender lines skipped={}; input file errors={}'.format(len(malformed), len(bad_sender), len(errors)), '',

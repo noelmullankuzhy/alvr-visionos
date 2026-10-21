@@ -421,6 +421,122 @@ for the remaining tests (the runner prints the explicit skip), and run the norma
 suite, noise test, and both loopback suites outside that sandbox. Hardware decode
 acceptance/throughput/format and real PC→AVP network tails remain device-only.
 
+## Boundary dots
+
+This separate **Boundary dots** button (decision 65h) appears beside **Enter
+diagnostics** with Diagnostics on and no connection or active stream. Unlike the
+Metal diagnostics button, it does not depend on the saved streaming renderer.
+It opens `BoundaryDotsOffline`, a mixed RealityKit immersive space; a black,
+unlit sphere at 11 m provides constant contrast behind the dots. Both offline
+spaces reserve the same ownership state before opening; buttons and auto-enter
+cannot take the immersive slot while either is opening, open, or dismissing.
+A connection or stream arriving closes the space and retains ownership until
+dismissal returns. It does not automatically open an online space. Failed opening,
+**Done**, and a system/manual leave release ownership. Online Enter and streaming
+rendering keep their existing paths. The lobby becomes transparent and ignores
+input during dots measurement; its state remains alive so auto-enter stays consumed.
+
+1. Turn on **Diagnostics**, restart the app, and leave the streamer disconnected.
+   First enter and leave **Enter diagnostics** to capture `m5_view` projection
+   tangents in this app session (the saved renderer must be Metal for that button).
+   RealityKit dots do not manufacture CompositorServices projection measurements;
+   without prior M5 values the report retains angular points and says **no data**
+   for tangent percentages and area.
+2. Choose **Boundary dots**. Keep a comfortable, steady head pose; look at a dot
+   until the system highlights it, then pinch to confirm it. It turns white and
+   remains confirmed. Pinch it again to clear it. Choose **L**, **R**, or **Both**
+   near the fixation cross; each selection has independent marks, restored when
+   switching back. These are labels only: close the other eye yourself for L/R.
+   Both labels a binocular observation and is not two monocular measurements.
+3. Work around all 24 rays (0° right, increasing counter-clockwise in 15° steps).
+   On each ray, confirm the outermost dot you can see **and highlight**. Multiple
+   confirmations on a ray are allowed; its outermost remaining mark is the boundary
+   vertex. Use the small centre cross between observations; look away from it to
+   select dots. The field moves with your head, so turning your head cannot bring
+   an edge dot towards the centre of your view.
+4. If you see a dot but cannot make it highlight, record that ray and eccentricity
+   separately as a **tracker limit**, not a visibility boundary. The system does
+   not report unsuccessful gaze targeting, so the app cannot infer or log this
+   failure. Do not replace a visibility measurement with the last highlightable
+   dot without labelling this limit in your notes. Leave affected rays unmarked
+   if a boundary cannot be measured. Pinch **Done** or leave with system controls
+   to write all three eye summaries; the lobby returns.
+5. Pull `diag-*.log` and run `diag-report.py` below. The **Boundary dots** section
+   contains per-eye boundary tables, source references, and `visible_area_frac`.
+   An area requires all 24 rays and valid tangents; no missing boundary is inferred.
+
+Geometry: 600 dots lie at radius **10 m**, 25 per ray at eccentricities
+10°, 12.5°, …, 70° from forward. Visible sphere diameter is 1.0° and collision
+diameter is 2.2°. Nearest centres are 2.5° apart; the inner ring's adjacent rays
+are about 2.60° apart. `BoundaryDotsTests` exhaustively checks all collision pairs
+and checks the direction angles. At a representative 64 mm IPD, each eye is
+32 mm from the head centre: its angular offset at 10 m is **0.183°**; the total
+between-eye disparity is about 0.367°. Per the GM's clarification, 0.2° is the
+**per-eye** target. It is well below the 2.5° radial dot spacing. Actual IPD,
+device-vs-head origin, headset fit, eye cant and pose latency also limit accuracy.
+The finite dot diameter, 2.5° radial quantisation, and 15° ray spacing limit
+boundary accuracy; 70° is the field's ceiling, not a measured visibility cutoff.
+Do not move the headset or change its fit between M5 capture and measurement.
+
+Head locking and input: `BoundaryDotsScene.install` adds an ordinary `Entity`
+directly to `RealityViewContent`. On **every `SceneEvents.Update`**, `followDevice`
+queries the existing `WorldTracker.shared.worldTracking` (`WorldTrackingProvider`)
+at `CACurrentMediaTime()` and copies `originFromAnchorTransform` onto that root,
+without smoothing. All dot positions are local to it. Missing/untracked poses hide
+the field on hardware; input is also rejected after connection/stream arrival.
+There is no `AnchorEntity(.head)` in this implementation and therefore no reliance
+on input support for privacy-protected head anchors. Each dot and control explicitly
+has `InputTargetComponent(.indirect)`, `CollisionComponent`, and
+`HoverEffectComponent`; `SpatialTapGesture.targetedToAnyEntity()` receives the
+system-selected entity. This follows Apple's documented
+[device-transform placement](https://developer.apple.com/documentation/visionos/placing-entities-using-head-and-device-transform)
+and [entity gesture requirements](https://developer.apple.com/documentation/realitykit/responding-to-gestures-on-an-entity).
+The [update event](https://developer.apple.com/documentation/realitykit/sceneevents/update)
+runs once per frame interval. The app does not estimate gaze or read hover identity.
+In Simulator, when ARKit supplies no pose, a stationary root at `(0, 1.6, 0)`
+permits pointer hover/click checks. This fallback is compiled out on hardware and
+does not validate head-follow latency. GM device checks must verify head locking,
+hover and pinch at the centre and edge; pointer tests cannot establish tracker limits.
+
+Each toggle writes, for example:
+
+```text
+DIAG dots_session t_ms=100 event=begin radius_m=10.000 pose=device angles=projected_tangent
+DIAG dots t_ms=101 eye=L action=confirm ray_deg=45.000 ecc_deg=60.000 yaw_deg=50.768 pitch_deg=50.768
+DIAG dots t_ms=102 eye=L action=clear ray_deg=45.000 ecc_deg=60.000 yaw_deg=50.768 pitch_deg=50.768
+DIAG dots_summary t_ms=103 eye=L points=2 rays=0:30,90:32.5
+DIAG dots_summary t_ms=103 eye=R points=0 rays=none
+DIAG dots_summary t_ms=103 eye=Both points=0 rays=none
+```
+
+`points` counts all confirmed dots; `rays` is the sorted ray:outermost-eccentricity
+list, sufficient to reproduce the polygon. Summaries are authoritative even if
+earlier toggle lines are absent. Session markers prevent re-entry from merging
+walks. Unsummarised confirmations are replayed with clears and reported as a
+partial walk. Original lines are retained in the report.
+
+For eccentricity `e` and ray `r`, the unit head/device direction is
+`(sin(e)cos(r), sin(e)sin(r), -cos(e))`. Right/up are positive; logged yaw is
+`atan2(x,-z)` and pitch is the **projected vertical angle** `atan2(y,-z)`, not
+spherical elevation `asin(y)`. Thus tangent-plane coordinates are exactly
+`tan(yaw)` and `tan(pitch)`. The report uses the latest preceding `m5_view` per
+eye in the same app session, with tangents ordered left,right,bottom,top (view
+0 = L, view 1 = R unless explicitly labelled). It reports signed percentages
+`100*tan(yaw)/tan_right` on the right, `100*tan(yaw)/tan_left` on the left, and
+the equivalent top/bottom percentages for pitch. A monocular simulator view does
+not supply the missing eye's tangents. Both-labelled points are converted for
+each available eye separately.
+
+This is a **head-vs-eye-origin approximation**, without eye translation or cant
+correction. For area, the affine drawable coordinates are
+`u=(tan(yaw)+left)/(left+right)` and `v=(tan(pitch)+bottom)/(bottom+top)`.
+`visible_area_frac` is the shoelace area in those normalised units (the drawable
+has area 1), requiring all 24 outermost rays. Side percentages have different
+scales on asymmetric frusta, so are not used directly for area. Values outside
+the drawable are retained without clamping; an unexpected area above 1 exposes
+the approximation or inconsistent measurements. Incomplete walks show **no data**,
+not zero area. A visible-but-unhighlightable dot must remain a tracker-limit note.
+
 ## Repeatable diagnostic report (D8)
 
 ```sh

@@ -38,6 +38,32 @@ struct EntryControls: View {
         }
     }
 
+    private func enterOffline(_ space: OfflineDiagnosticsLifecycle.Space) {
+        Task { @MainActor in
+            guard model.offlineDiagnostics.begin(space: space, diagnostics: Diag.isOn,
+                      connected: eventHandler.connectionState == .connected,
+                      streaming: eventHandler.streamingActive, onlineShowing: model.isShowingClient) else { return }
+            // Manual entry consumes auto-enter for an arriving connection, even
+            // if its publication lands after offline dismissal has finished.
+            _ = autoEnter.update(connected: true, showing: true)
+            switch await openImmersiveSpace(id: space.rawValue) {
+            case .opened:
+                while model.offlineDiagnostics.space == space {
+                    if model.offlineDiagnostics.connectionArrived(
+                            connected: eventHandler.connectionState == .connected,
+                            streaming: eventHandler.streamingActive) {
+                        await dismissImmersiveSpace()
+                        model.offlineDiagnostics.dismissed()
+                        break
+                    }
+                    do { try await Task.sleep(nanoseconds: 100_000_000) }
+                    catch { break }
+                }
+            default: model.offlineDiagnostics.dismissed()
+            }
+        }
+    }
+
     var body: some View {
         @Bindable var model = model
         
@@ -59,34 +85,24 @@ struct EntryControls: View {
                                      diagnostics: Diag.isOn, realityKit: useRealityKit) == .enterDiagnostics,
                !eventHandler.streamingActive {
                 Button {
-                    Task { @MainActor in
-                        guard model.offlineDiagnostics.begin(diagnostics: Diag.isOn,
-                                  connected: eventHandler.connectionState == .connected,
-                                  streaming: eventHandler.streamingActive) else { return }
-                        // This manual entry consumes auto-enter for the arriving connection,
-                        // including publication that lands after offline dismissal finishes.
-                        _ = autoEnter.update(connected: true, showing: true)
-                        switch await openImmersiveSpace(id: "MetalDiagnosticsOffline") {
-                        case .opened:
-                            while model.isShowingDiagnosticsOffline {
-                                if model.offlineDiagnostics.connectionArrived(
-                                        connected: eventHandler.connectionState == .connected,
-                                        streaming: eventHandler.streamingActive) {
-                                    await dismissImmersiveSpace()
-                                    model.offlineDiagnostics.dismissed()
-                                    break
-                                }
-                                try? await Task.sleep(nanoseconds: 100_000_000)
-                            }
-                        default: model.offlineDiagnostics.dismissed()
-                        }
-                    }
+                    enterOffline(.metal)
                 } label: {
                     Label("Enter diagnostics", systemImage: "visionpro")
                         .labelStyle(.titleAndIcon)
                         .padding(15)
                 }
-                .disabled(model.isShowingDiagnosticsOffline)
+                .disabled(model.isShowingDiagnosticsOffline || model.isShowingClient)
+            }
+            if EntryEnterPolicy.boundaryDotsVisible(diagnostics: Diag.isOn,
+                    connected: eventHandler.connectionState == .connected, streaming: eventHandler.streamingActive) {
+                Button {
+                    enterOffline(.boundaryDots)
+                } label: {
+                    Label("Boundary dots", systemImage: "circle.dotted")
+                        .labelStyle(.titleAndIcon)
+                        .padding(15)
+                }
+                .disabled(model.isShowingDiagnosticsOffline || model.isShowingClient)
             }
             
         }
