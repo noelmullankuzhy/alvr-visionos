@@ -1,5 +1,92 @@
 import Foundation
 
+struct HDRStaticMetadata: Equatable {
+    let masteringPeak: Double?
+    let maxCLL: Double?
+    let maxFALL: Double?
+
+    init(masteringPeak: Double, maxCLL: Double?, maxFALL: Double?) throws {
+        guard masteringPeak.isFinite, masteringPeak > 0, masteringPeak <= 10000 else {
+            throw ClipMetadataFailure("--mastering-peak must be > 0 and <= 10000 nits")
+        }
+        try Self.validateCLL(maxCLL, name: "--max-cll")
+        try Self.validateCLL(maxFALL, name: "--max-fall")
+        if let maxCLL, let maxFALL, maxFALL > maxCLL {
+            throw ClipMetadataFailure("--max-fall must be <= --max-cll")
+        }
+        self.masteringPeak = masteringPeak
+        self.maxCLL = maxCLL
+        self.maxFALL = maxFALL
+    }
+
+    static func parse(masteringPeak: String?, maxCLL: String?, maxFALL: String?) throws -> HDRStaticMetadata? {
+        guard masteringPeak != nil || maxCLL != nil || maxFALL != nil else { return nil }
+        guard let masteringPeak, let peak = Double(masteringPeak) else {
+            throw ClipMetadataFailure("--mastering-peak is required with HDR10 static metadata")
+        }
+        guard (maxCLL == nil) == (maxFALL == nil) else {
+            throw ClipMetadataFailure("--max-cll and --max-fall must be supplied together")
+        }
+        func number(_ value: String?, _ name: String) throws -> Double? {
+            guard let value else { return nil }
+            guard let parsed = Double(value) else { throw ClipMetadataFailure("invalid \(name)") }
+            return parsed
+        }
+        return try HDRStaticMetadata(masteringPeak: peak, maxCLL: number(maxCLL, "--max-cll"), maxFALL: number(maxFALL, "--max-fall"))
+    }
+
+    var masteringDisplayBytes: Data {
+        guard let masteringPeak else { return Data() }
+        var bytes: [UInt8] = []
+        // ST 2086 chromaticities are unsigned 16-bit values in units of 0.00002.
+        // ISO/IEC 23008-2 D.2.28 indexes display primaries as G, B, R.
+        for value: UInt16 in [8500, 39850, 6550, 2300, 35400, 14600, 15635, 16450] {
+            bytes.append(UInt8(value >> 8)); bytes.append(UInt8(value & 0xff))
+        }
+        append(UInt32((masteringPeak * 10000).rounded()), to: &bytes)
+        append(50, to: &bytes) // 0.0050 cd/m² in 0.0001 cd/m² units.
+        return Data(bytes)
+    }
+
+    var contentLightBytes: Data {
+        guard let maxCLL, let maxFALL else { return Data() }
+        return Data([UInt8(UInt16(maxCLL) >> 8), UInt8(UInt16(maxCLL) & 0xff), UInt8(UInt16(maxFALL) >> 8), UInt8(UInt16(maxFALL) & 0xff)])
+    }
+
+    var filenameSuffix: String {
+        var suffix = ""
+        if let masteringPeak { suffix += "-md\(Self.nameNumber(masteringPeak))" }
+        if let maxCLL { suffix += "-cll\(Self.nameNumber(maxCLL))" }
+        if let maxFALL { suffix += "-fall\(Self.nameNumber(maxFALL))" }
+        return suffix
+    }
+
+    var manifest: [String: Double] {
+        var value: [String: Double] = [:]
+        if let masteringPeak { value["masteringPeakNits"] = masteringPeak }
+        if let maxCLL { value["maxCLL"] = maxCLL }
+        if let maxFALL { value["maxFALL"] = maxFALL }
+        return value
+    }
+
+    private static func validateCLL(_ value: Double?, name: String) throws {
+        guard let value else { return }
+        guard value.isFinite, value > 0, value <= 10000, value.rounded() == value else {
+            throw ClipMetadataFailure("\(name) must be an integer > 0 and <= 10000")
+        }
+    }
+    private static func nameNumber(_ value: Double) -> String { value == value.rounded() ? String(Int(value)) : String(value) }
+    private func append(_ value: UInt32, to bytes: inout [UInt8]) {
+        bytes.append(UInt8((value >> 24) & 0xff)); bytes.append(UInt8((value >> 16) & 0xff))
+        bytes.append(UInt8((value >> 8) & 0xff)); bytes.append(UInt8(value & 0xff))
+    }
+}
+
+struct ClipMetadataFailure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
+}
+
 // Shared by the CLI and encoder-free tests. A successful callback may contain no image.
 enum ClipCallbackResult: Equatable {
     case encoded, dropped, failure(Int32)
@@ -147,16 +234,19 @@ struct GridClip {
     let area: Int
     let range: String
     let lo, hi: Double
+    let surround: Double
     let width = 1920, height = 1080
     var side: Double { sqrt(Double(width * height * area) / 100) / 5 }
     var originX: Double { (Double(width) - 5 * side) / 2 }
     var originY: Double { (Double(height) - 5 * side) / 2 }
-    init(area: Int, range: String, lo: Double = 600, hi: Double = 2000) throws {
+    var filenameSuffix: String { surround == 0 ? "" : "-sur\(surround == surround.rounded() ? String(Int(surround)) : String(surround))" }
+    init(area: Int, range: String, lo: Double = 600, hi: Double = 2000, surround: Double = 0) throws {
         guard [1, 10, 50].contains(area), ["coarse", "fine"].contains(range),
-              lo.isFinite, hi.isFinite, lo > 0, lo < hi, hi <= 10000 else {
+              lo.isFinite, hi.isFinite, lo > 0, lo < hi, hi <= 10000,
+              surround.isFinite, surround >= 0, surround <= 10000 else {
             throw InvalidGrid(message: "grid requires --area 1|10|50, --range coarse|fine, 0 < --lo < --hi <= 10000")
         }
-        self.area = area; self.range = range
+        self.area = area; self.range = range; self.surround = surround
         self.lo = range == "coarse" ? 100 : lo
         self.hi = range == "coarse" ? 10000 : hi
     }
@@ -182,7 +272,7 @@ struct GridClip {
         }
     }
     func raster() -> [UInt16] {
-        var pixels = [UInt16](repeating: 64 << 6, count: width * height)
+        var pixels = [UInt16](repeating: (surround == 0 ? 64 : pqCode(surround)) << 6, count: width * height)
         for cell in cells {
             let r = bounds(cell)
             let value = cell.code << 6
@@ -203,6 +293,7 @@ struct GridClip {
     var manifest: [String: Any] {
         ["areaPercent": area, "rangeName": range, "loNits": lo, "hiNits": hi,
          "cellSide": side, "originX": originX, "originY": originY,
+         "surroundNits": surround, "surroundLumaCode": Int(surround == 0 ? 64 : pqCode(surround)),
          "rasterBounds": gridBounds.fields, "rasterAreaPercent": Double(gridBounds.width * gridBounds.height) * 100 / Double(width * height),
          "labelNits": 100, "labelLumaCode": Int(pqCode(100)),
          "labels": labels.map { ["text": $0.text, "bounds": $0.rect.fields] as [String: Any] },

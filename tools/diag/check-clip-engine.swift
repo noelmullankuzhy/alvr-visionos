@@ -74,10 +74,14 @@ func checkGrid(_ clip: [String: Any], asset: AVAsset, track: AVAssetTrack) throw
         throw Invalid(message: "invalid grid manifest")
     }
     try require(range != "coarse" || (lo == 100 && hi == 10000), "coarse endpoints")
+    let surroundNits = grid["surroundNits"] as? Double ?? 0
+    let surroundCode = grid["surroundLumaCode"] as? Int ?? 64
     func code(_ nits: Double) -> Int {
         let p = pow(nits / 10000, 2610.0 / 16384)
         return Int((64 + 876 * pow((3424.0 / 4096 + 2413.0 / 128 * p) / (1 + 2392.0 / 128 * p), 2523.0 / 32)).rounded())
     }
+    let expectedSurround = surroundNits == 0 ? 64 : code(surroundNits)
+    try require(surroundCode == expectedSurround && surroundNits >= 0 && surroundNits <= 10000, "grid surround manifest")
     let side = sqrt(Double(1920 * 1080 * area) / 100) / 5
     let ox = (1920 - side * 5) / 2, oy = (1080 - side * 5) / 2
     func ex(_ i: Int) -> Int { Int((ox + Double(i) * side).rounded()) }
@@ -129,7 +133,7 @@ func checkGrid(_ clip: [String: Any], asset: AVAsset, track: AVAssetTrack) throw
             }
         }
         for y in stride(from: 0, to: 1080, by: 8) {
-            for x in stride(from: 0, to: 1920, by: 8) where !exclusions.contains(where: { x >= $0.0 && x < $0.1 && y >= $0.2 && y < $0.3 }) { try verify(x, y, 64) }
+                for x in stride(from: 0, to: 1920, by: 8) where !exclusions.contains(where: { x >= $0.0 && x < $0.1 && y >= $0.2 && y < $0.3 }) { try verify(x, y, surroundCode) }
         }
         frame += 1
     }
@@ -202,6 +206,27 @@ func check(_ path: String) throws {
         try require(Int(dimensions.width) == clip["width"] as? Int && Int(dimensions.height) == clip["height"] as? Int, "dimensions differ")
         let recorded = clip["format"] as! [String: Any]
         try require(recorded["levelIDC"] as? Int == Int(config[12]), "manifest level differs")
+        if let metadata = clip["hdrStaticMetadata"] as? [String: Double] {
+            if let peak = metadata["masteringPeakNits"] {
+                var expected: [Int] = []
+                for value in [8500,39850,6550,2300,35400,14600,15635,16450] {
+                    expected.append((value >> 8) & 255); expected.append(value & 255)
+                }
+                for value in [UInt32((peak * 10000).rounded()), UInt32(50)] {
+                    expected.append(Int((value >> 24) & 255)); expected.append(Int((value >> 16) & 255))
+                    expected.append(Int((value >> 8) & 255)); expected.append(Int(value & 255))
+                }
+                let actual = (ext[kCMFormatDescriptionExtension_MasteringDisplayColorVolume] as? Data).map { Array($0).map(Int.init) }
+                try require(actual == expected && recorded["masteringDisplayColorVolume"] as? [Int] == expected, "ST 2086 mastering metadata missing or differs")
+            }
+            if let cll = metadata["maxCLL"], let fall = metadata["maxFALL"] {
+                let expected = [Int(cll) >> 8, Int(cll) & 255, Int(fall) >> 8, Int(fall) & 255]
+                let actual = (ext[kCMFormatDescriptionExtension_ContentLightLevelInfo] as? Data).map { Array($0).map(Int.init) }
+                try require(actual == expected && recorded["contentLightLevelInfo"] as? [Int] == expected, "content light metadata missing or differs")
+            }
+        } else {
+            try require(ext[kCMFormatDescriptionExtension_MasteringDisplayColorVolume] == nil && ext[kCMFormatDescriptionExtension_ContentLightLevelInfo] == nil, "unexpected HDR10 static metadata")
+        }
         if clip["transfer"] as? String == "SMPTE ST 2084" {
             try require(ext[kCMFormatDescriptionExtension_ColorPrimaries] as? String == kCVImageBufferColorPrimaries_ITU_R_2020 as String, "missing BT.2020 primaries")
             try require(ext[kCMFormatDescriptionExtension_TransferFunction] as? String == kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ as String, "missing PQ transfer")

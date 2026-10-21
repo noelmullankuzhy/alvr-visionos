@@ -37,6 +37,8 @@ final class Sink {
                           "levelIDC": Int(config[12]), "chromaFormatIDC": Int(config[16] & 3),
                           "lumaBitDepth": Int(config[17] & 7) + 8, "chromaBitDepth": Int(config[18] & 7) + 8]
             }
+            if let data = ext[kCMFormatDescriptionExtension_MasteringDisplayColorVolume] as? Data { format["masteringDisplayColorVolume"] = Array(data).map(Int.init) }
+            if let data = ext[kCMFormatDescriptionExtension_ContentLightLevelInfo] as? Data { format["contentLightLevelInfo"] = Array(data).map(Int.init) }
         }
         let timeout = Date().addingTimeInterval(30)
         while !input.isReadyForMoreMediaData && Date() < timeout { Thread.sleep(forTimeInterval: 0.001) }
@@ -46,7 +48,7 @@ final class Sink {
     }
 }
 
-func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int, kind: String, content: String, noiseAmplitude: Double = 1, encoderBitrate: Int? = nil, limited: Bool = false, referenceNits: Double = 203, grid: GridClip? = nil, level: LevelClip? = nil) throws -> [String: Any] {
+func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int, kind: String, content: String, noiseAmplitude: Double = 1, encoderBitrate: Int? = nil, limited: Bool = false, referenceNits: Double = 203, grid: GridClip? = nil, level: LevelClip? = nil, hdrMetadata: HDRStaticMetadata? = nil) throws -> [String: Any] {
     let writer = try AVAssetWriter(outputURL: out, fileType: .mov)
     let input = AVAssetWriterInput(mediaType: .video, outputSettings: nil)
     input.expectsMediaDataInRealTime = false
@@ -80,6 +82,10 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
     ]
     let stillQuality = kind == "grid" || kind == "level"
     if stillQuality { properties[kVTCompressionPropertyKey_Quality] = 1.0 }
+    if let hdrMetadata {
+        properties[kVTCompressionPropertyKey_MasteringDisplayColorVolume] = hdrMetadata.masteringDisplayBytes as CFData
+        if !hdrMetadata.contentLightBytes.isEmpty { properties[kVTCompressionPropertyKey_ContentLightLevelInfo] = hdrMetadata.contentLightBytes as CFData }
+    }
     for (key, value) in properties { try check(VTSessionSetProperty(session, key: key, value: value as CFTypeRef), "set \(key)") }
     var capApplied = false
     if limited {
@@ -212,10 +218,10 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
 }
 
 func calibratedEncode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrate: Int,
-                      kind: String, content: String, overload: Bool, referenceNits: Double = 203, grid: GridClip? = nil, level: LevelClip? = nil) throws -> [String: Any] {
+                      kind: String, content: String, overload: Bool, referenceNits: Double = 203, grid: GridClip? = nil, level: LevelClip? = nil, hdrMetadata: HDRStaticMetadata? = nil) throws -> [String: Any] {
     try calibrateClip(bitrate: bitrate, targeted: content == "noise" && !overload, overload: overload, encode: { amplitude, hint, limited in
         try encode(out: out, width: width, height: height, fps: fps, seconds: seconds, bitrate: bitrate,
-                   kind: kind, content: content, noiseAmplitude: amplitude, encoderBitrate: hint, limited: limited, referenceNits: referenceNits, grid: grid, level: level)
+                   kind: kind, content: content, noiseAmplitude: amplitude, encoderBitrate: hint, limited: limited, referenceNits: referenceNits, grid: grid, level: level, hdrMetadata: hdrMetadata)
     }, discard: {
         if FileManager.default.fileExists(atPath: out.path) { try FileManager.default.removeItem(at: out) }
     }, reportRetry: { achieved, drops, amplitude in
@@ -228,10 +234,10 @@ func main() throws {
     let overload = CommandLine.arguments.contains("--stress")
     let args = Array(CommandLine.arguments.dropFirst()).filter { $0 != "--stress" }
     if args.contains("--help") {
-        print("--out DIR [--sizes 3840x2160,5120x2880,7680x4320,3648x2912] [--fps 90,120] [--seconds 5] [--bitrate 40000000] [--content default|noise] [--stress (uncapped noise overload)]; PQ defaults: 1920x1080, 30fps, 14s steps + 5s gradient + 40s split. --kind split selects only split; --reference-nits 203 sets its left patch. --seconds overrides each clip except grid and level. --kind grid: fixed 1920x1080/30fps/30s; --area 1|10|50 (default 10), --range coarse|fine (default coarse), --lo 600 --hi 2000 for fine. --kind level: fixed 1920x1080/30fps/60s, 10% patch; --nits 203 (or comma-separated list).")
+        print("--out DIR [--sizes 3840x2160,5120x2880,7680x4320,3648x2912] [--fps 90,120] [--seconds 5] [--bitrate 40000000] [--content default|noise] [--stress (uncapped noise overload)]; PQ defaults: 1920x1080, 30fps, 14s steps + 5s gradient + 40s split. --kind split selects only split; --reference-nits 203 sets its left patch. --seconds overrides each clip except grid and level. --kind grid: fixed 1920x1080/30fps/30s; --area 1|10|50 (default 10), --range coarse|fine (default coarse), --lo 600 --hi 2000 for fine, --surround NITS (default 0=black). --kind level: fixed 1920x1080/30fps/60s, 10% patch; --nits 203 (or comma-separated list). --mastering-peak NITS --max-cll NITS --max-fall NITS set HDR10 static metadata for grid/level.")
         return
     }
-    let known = ["--out", "--sizes", "--fps", "--seconds", "--bitrate", "--kind", "--content", "--reference-nits", "--area", "--range", "--lo", "--hi", "--nits"]
+    let known = ["--out", "--sizes", "--fps", "--seconds", "--bitrate", "--kind", "--content", "--reference-nits", "--area", "--range", "--lo", "--hi", "--nits", "--mastering-peak", "--max-cll", "--max-fall", "--surround"]
     guard args.count % 2 == 0 else { throw Failure("expected --option value; use --help") }
     for i in stride(from: 0, to: args.count, by: 2) {
         guard known.contains(args[i]) else { throw Failure("unknown option \(args[i])") }
@@ -241,16 +247,19 @@ func main() throws {
     let requestedKind = options["--kind"] ?? "stress"
     guard ["pq", "split", "grid", "level", "stress"].contains(requestedKind) else { throw Failure("--kind pq|split|grid|level|stress") }
     let isPQ = requestedKind != "stress"
+    let hdrMetadata = try HDRStaticMetadata.parse(masteringPeak: options["--mastering-peak"], maxCLL: options["--max-cll"], maxFALL: options["--max-fall"])
+    if hdrMetadata != nil && !["grid", "level"].contains(requestedKind) { throw Failure("HDR10 static metadata requires --kind grid or --kind level") }
     var grid: GridClip?
     if requestedKind == "grid" {
         guard let area = Int(options["--area"] ?? "10"),
               let lo = Double(options["--lo"] ?? "600"), let hi = Double(options["--hi"] ?? "2000") else { throw Failure("invalid grid area/range") }
-        grid = try GridClip(area: area, range: options["--range"] ?? "coarse", lo: lo, hi: hi)
+        guard let surround = Double(options["--surround"] ?? "0") else { throw Failure("invalid --surround") }
+        grid = try GridClip(area: area, range: options["--range"] ?? "coarse", lo: lo, hi: hi, surround: surround)
         guard (options["--sizes"] ?? "1920x1080") == "1920x1080",
               (options["--fps"] ?? "30") == "30", (options["--seconds"] ?? "30") == "30" else {
             throw Failure("grid is fixed at 1920x1080, 30 fps, 30 seconds")
         }
-    } else if ["--area", "--range", "--lo", "--hi"].contains(where: { options[$0] != nil }) {
+    } else if ["--area", "--range", "--lo", "--hi", "--surround"].contains(where: { options[$0] != nil }) {
         throw Failure("grid flags require --kind grid")
     }
     guard let referenceNits = Double(options["--reference-nits"] ?? "203"),
@@ -285,12 +294,13 @@ func main() throws {
             guard let fps = Int(rate), fps > 0, fps <= 240 else { throw Failure("invalid fps") }
             for level in levels {
                 for kind in (["split", "grid", "level"].contains(requestedKind) ? [requestedKind] : (isPQ ? ["steps", "gradient", "split"] : ["stress"])) {
-                    let prefix = grid.map { "grid-\($0.area)-\($0.range)" } ?? level.map { "level-\($0.text)" } ?? kind
+                    let prefix = (grid.map { "grid-\($0.area)-\($0.range)\($0.filenameSuffix)" } ?? level.map { "level-\($0.text)" } ?? kind) + (hdrMetadata?.filenameSuffix ?? "")
                     let url = out.appendingPathComponent("\(prefix)-\(size)-\(fps).mov")
                     guard !FileManager.default.fileExists(atPath: url.path) else { throw Failure("file exists: \(url.path)") }
                     do {
                         let duration = kind == "level" ? 60 : kind == "grid" ? 30 : options["--seconds"] == nil ? (kind == "steps" ? 14 : (kind == "split" ? 40 : seconds)) : seconds
-                        let clip = try calibratedEncode(out: url, width: parts[0], height: parts[1], fps: fps, seconds: duration, bitrate: bitrate, kind: kind, content: content, overload: overload, referenceNits: referenceNits, grid: grid, level: level)
+                        var clip = try calibratedEncode(out: url, width: parts[0], height: parts[1], fps: fps, seconds: duration, bitrate: bitrate, kind: kind, content: content, overload: overload, referenceNits: referenceNits, grid: grid, level: level, hdrMetadata: hdrMetadata)
+                        if let hdrMetadata { clip["hdrStaticMetadata"] = hdrMetadata.manifest }
                         clips.append(clip)
                         print("Wrote \(url.lastPathComponent)")
                     } catch {
