@@ -65,6 +65,18 @@ final class CornerChartRenderer {
         self.depthState = depthState
     }
 
+    // Read-only state for diagnostics capture; the caller gets value copies under the chart's lock.
+    func captureSnapshot() -> [String: Any] {
+        lock.lock()
+        defer { lock.unlock() }
+        let marks = Dictionary(uniqueKeysWithValues: session.marks.map { eye, values in
+            (eye.rawValue, Dictionary(uniqueKeysWithValues: values.map { (String($0.key), $0.value) }))
+        })
+        return ["mode": session.mode.rawValue, "eye": session.eye?.rawValue as Any? ?? NSNull(),
+                "spoke": session.spoke, "pct": session.pct, "ring_percents": CornerChart.ringPercents,
+                "cut_percents": CornerChart.cutPercents, "marks": marks, "ring_stroke_alignment": "center"]
+    }
+
     func apply(_ action: CornerChartSession.Action) {
         lock.lock()
         defer { lock.unlock() }

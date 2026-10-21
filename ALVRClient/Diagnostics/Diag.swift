@@ -37,9 +37,17 @@ enum Diag {
         sink = DiagSink(directory: directory, maxBytes: maxFileBytes, now: { Date() }, console: console)
     }
 
-    static func log(_ topic: String, _ fields: @autoclosure () -> KeyValuePairs<String, Any>) {
+    static func log(_ topic: String, tMs: Int? = nil, _ fields: @autoclosure () -> KeyValuePairs<String, Any>) {
         guard let sink else { return }
-        sink.write(line(topic: topic, tMs: monotonicMs(), fields: fields()))
+        let values = fields()
+        if topic == "corner" {
+            let dict = Dictionary(values.map { ($0.key, $0.value) }, uniquingKeysWith: { _, last in last })
+            if let eye = dict["eye"] as? String, let pct = dict["ring_pct"] as? Int,
+               let degrees = dict["pos_deg"].flatMap({ Double(String(describing: $0)) }) {
+                DiagCaptureRequests.shared.mark(eye: eye, spoke: 0, pct: pct, positionDegrees: degrees)
+            }
+        }
+        sink.write(line(topic: topic, tMs: tMs ?? monotonicMs(), fields: values))
     }
 
     // Work for the Diag queue (off when Diagnostics is off: never queued).
@@ -394,4 +402,52 @@ final class DiagDrawableSnapshot<View, Map> {
     var maps: [Map] = []
     init() { views.reserveCapacity(32); maps.reserveCapacity(64) }
     func reset() { views.removeAll(keepingCapacity: true); maps.removeAll(keepingCapacity: true) }
+}
+
+// Process-wide capture admission, also fed by the existing corner mark log event.
+// Marks are bounded and retain their event state even when several arrive between frames.
+final class DiagCaptureRequests {
+    struct Request {
+        let number: Int
+        let eye: String?
+        let spoke: Int?
+        let pct: Int?
+        let positionDegrees: Double?
+    }
+    static let shared = DiagCaptureRequests(acceptsMarks: false)
+    private let lock = NSLock()
+    private var acceptsMarks: Bool
+    init(acceptsMarks: Bool = true) { self.acceptsMarks = acceptsMarks }
+
+    func setAcceptsMarks(_ enabled: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        acceptsMarks = enabled
+        if !enabled { marks.removeAll(keepingCapacity: true) }
+    }
+
+    private var firstIdleMs: Int?
+    private var timerTaken = false
+    private var count = 0
+    private var marks: [(String, Int, Int, Double?)] = []
+
+    func mark(eye: String, spoke: Int, pct: Int, positionDegrees: Double? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        if acceptsMarks && count + marks.count < 24 { marks.append((eye, spoke, pct, positionDegrees)) }
+    }
+
+    func take(nowMs: Int, idle: Bool) -> Request? {
+        lock.lock(); defer { lock.unlock() }
+        guard idle, count < 24 else { return nil }
+        if firstIdleMs == nil { firstIdleMs = nowMs }
+        var mark: (String, Int, Int, Double?)?
+        if !marks.isEmpty {
+            mark = marks.removeFirst()
+        } else if !timerTaken, nowMs - firstIdleMs! >= 3000 {
+            timerTaken = true
+        } else {
+            return nil
+        }
+        count += 1
+        return Request(number: count, eye: mark?.0, spoke: mark?.1, pct: mark?.2, positionDegrees: mark?.3)
+    }
 }

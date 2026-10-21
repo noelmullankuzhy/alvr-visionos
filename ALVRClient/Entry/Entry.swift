@@ -379,6 +379,10 @@ struct Entry: View {
                         if Diag.isOn { DiagBenchView() }
 
                         if gStore.settings.diagnostics {
+                            Toggle("Capture diagnostic frames", isOn: $gStore.settings.captureDiagnosticFrames)
+                                .onChange(of: gStore.settings.captureDiagnosticFrames) { saveAction() }
+                            Text("Idle Metal diagnostics only. Applies when entering the immersive space. Saves up to 24 frames per app session to Documents/diag/captures.")
+                                .font(.system(size: 10))
                             Picker(selection: $gStore.settings.cornerChart) {
                                 ForEach(CornerChartMode.allCases, id: \.rawValue) {
                                     Text($0.rawValue).tag($0.rawValue)

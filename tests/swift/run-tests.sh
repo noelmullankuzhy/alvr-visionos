@@ -34,7 +34,7 @@ for t in "$ROOT"/tests/swift/*Tests.swift; do
   # Optional `// METAL: tests/swift/Foo.metal`: compiled for the Mac GPU, the metallib path passed as argument 1.
   metal=$(sed -n 's#^// METAL: ##p' "$t" | head -1)
   if [ -n "$metal" ]; then
-    xcrun -sdk macosx metal -fmodules-cache-path="$ROOT/build/clang-module-cache" -o "$OUT/$name.metallib" "$ROOT/$metal"
+    xcrun -sdk macosx metal -fmodules-cache-path="$CLANG_MODULE_CACHE_PATH" -o "$OUT/$name.metallib" "$ROOT/$metal"
     if "$OUT/$name" "$OUT/$name.metallib"; then :; else fail=1; fi
   elif "$OUT/$name"; then :; else fail=1; fi
   ran=$((ran + 1))
