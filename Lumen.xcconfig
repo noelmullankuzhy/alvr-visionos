@@ -1,0 +1,5 @@
+// Lumen IO signing for Noel's Vision Pro. Enable with tools/use-lumen-signing.sh.
+DEVELOPMENT_TEAM = G58K96Q5LJ
+CODE_SIGN_STYLE = Automatic
+ALVR_BUNDLE_ID = uk.lumenio.alvr
+ALVR_APP_GROUP = group.uk.lumenio.alvr

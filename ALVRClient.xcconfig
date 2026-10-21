@@ -9,7 +9,11 @@
 // https://help.apple.com/xcode/#/dev745c5c974
 
 DEVELOPMENT_TEAM = 3D7RY439N
-PRODUCT_BUNDLE_IDENTIFIER = alvr.client
+
+// Identifiers: upstream defaults; Override.xcconfig (e.g. Lumen.xcconfig) replaces them.
+ALVR_BUNDLE_ID = alvr.client
+ALVR_APP_GROUP = group.alvr.client.ALVR
+PRODUCT_BUNDLE_IDENTIFIER = $(ALVR_BUNDLE_ID)
 
 #include? "AppStore.xcconfig"
 #include? "Override.xcconfig"
