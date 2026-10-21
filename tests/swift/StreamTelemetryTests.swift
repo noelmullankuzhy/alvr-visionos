@@ -6,7 +6,8 @@ private final class CaptureSink: StreamTelemetrySink {
     var sessions: [Date] = []
     var lines: [(prefix: String, json: String)] = []
     func beginSession(utcStart: Date) { sessions.append(utcStart) }
-    func write(prefix: String, json: String) { lines.append((prefix, json)) }
+    let encoder = StreamTelemetryRecord.makeEncoder()
+    func write(_ record: StreamTelemetryRecord) { lines.append((record.prefix, record.json(using: encoder) ?? "")) }
     func objects(_ prefix: String) -> [[String: Any]] {
         lines.filter { $0.prefix == prefix }.map {
             (try? JSONSerialization.jsonObject(with: Data($0.json.utf8))) as? [String: Any] ?? [:]
@@ -167,9 +168,12 @@ private func testStatsJsonShape() {
 private func testFormatRecords() {
     let (telemetry, sink, _) = makeTelemetry()
     telemetry.updateFormat { $0.renderer = "metal" }
+    expectEqual(sink.lines.count, 0, "format changes before a session are buffered, not written")
+    expectEqual(sink.sessions.count, 0, "no session before the stream starts")
     startStream(telemetry)
     var formats = sink.objects("ALVRFORMAT")
-    expectEqual(formats.count, 2, "renderer change, then stream start always emits")
+    expectEqual(formats.count, 1, "stream start emits the current format as the session's first record")
+    expectEqual(sink.lines.first?.prefix, "ALVRFORMAT", "format is the first record of the session")
     guard let started = formats.last else { return }
     expectEqual(started["type"] as? String, "format", "type")
     expectEqual(started["renderer"] as? String, "metal", "renderer kept")
@@ -185,14 +189,14 @@ private func testFormatRecords() {
     telemetry.updateFormat { $0.codec = "hevc"; $0.codedWidth = 5664; $0.codedHeight = 2240; $0.bitDepth = 10 }
     telemetry.updateFormat { $0.codec = "hevc" }  // unchanged -> no record
     formats = sink.objects("ALVRFORMAT")
-    expectEqual(formats.count, 3, "only real changes emit")
+    expectEqual(formats.count, 2, "only real changes emit")
 
     telemetry.noteDecoderOutput(pixelFormat: 0x2678_6630, lumaTextureFormat: 508, chromaTextureFormat: 0, name: "Lossless")
     telemetry.noteDecoderOutput(pixelFormat: 0x2678_6630, lumaTextureFormat: 508, chromaTextureFormat: 0, name: "Lossless")
     telemetry.noteDrawable(pixelFormat: 81, view0Width: 1888, view0Height: 1824, view1Width: 1888, view1Height: 1824)
     telemetry.noteDrawable(pixelFormat: 81, view0Width: 1888, view0Height: 1824, view1Width: 1888, view1Height: 1824)
     formats = sink.objects("ALVRFORMAT")
-    expectEqual(formats.count, 5, "decoder output and drawable each emit once")
+    expectEqual(formats.count, 4, "decoder output and drawable each emit once")
     guard let last = formats.last else { return }
     expectEqual(last["decoder_pixel_format"] as? String, "&xf0", "FourCC string")
     expectEqual(last["decoder_pixel_format_name"] as? String, "Lossless", "pixel format name")
@@ -204,8 +208,12 @@ private func testFormatRecords() {
 
     // Stop clears decoder-derived fields so the next session reports its own decoder.
     telemetry.streamingStopped()
+    let linesAtStop = sink.lines.count
+    telemetry.updateFormat { $0.displayRefreshRateHz = 90 }
+    expectEqual(sink.lines.count, linesAtStop, "no records between sessions")
     startStream(telemetry)
     guard let restarted = sink.objects("ALVRFORMAT").last else { return }
+    expectEqual(double(restarted, "display_refresh_rate_hz"), 90, "change made between sessions is in the next session's first record")
     expect(restarted["codec"] == nil, "codec cleared by stop")
     expect(restarted["decoder_pixel_format"] == nil, "pixel format cleared by stop")
     expectEqual(restarted["renderer"] as? String, "metal", "renderer survives stop")
@@ -265,28 +273,58 @@ private func testFileSink() {
     expectEqual(StreamTelemetryFileSink.fileName(for: Date(timeIntervalSince1970: 1_792_546_200)), "20261021T013000Z.jsonl", "UTC file name")
 
     let sink = StreamTelemetryFileSink(directory: dir, echo: false)
+    var format = StreamFormatRecord()
+    format.renderer = "metal"
     sink.beginSession(utcStart: Date(timeIntervalSince1970: 1_792_546_200))
-    sink.write(prefix: "ALVRFORMAT", json: "{\"type\":\"format\"}")
-    sink.write(prefix: "ALVRSTATS", json: "{\"type\":\"stats\"}")
+    sink.write(.format(StreamFormatRecord()))
+    sink.write(.format(format))
     sink.flush()
     let file = dir.appendingPathComponent("20261021T013000Z.jsonl")
     let text = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
-    expectEqual(text, "{\"type\":\"format\"}\n{\"type\":\"stats\"}\n", "records appended as jsonl")
+    expectEqual(text, "{\"type\":\"format\"}\n{\"renderer\":\"metal\",\"type\":\"format\"}\n", "records encoded and appended as jsonl")
 
     sink.beginSession(utcStart: Date(timeIntervalSince1970: 1_792_546_201))
-    sink.write(prefix: "ALVRSTATS", json: "{}")
+    sink.write(.format(StreamFormatRecord()))
     sink.flush()
     let second = dir.appendingPathComponent("20261021T013001Z.jsonl")
-    expectEqual((try? String(contentsOf: second, encoding: .utf8)) ?? "", "{}\n", "new session, new file")
+    expectEqual((try? String(contentsOf: second, encoding: .utf8)) ?? "", "{\"type\":\"format\"}\n", "new session, new file")
 
     // Writing before any session starts one lazily.
     let lazyDir = dir.appendingPathComponent("lazy")
     let lazy = StreamTelemetryFileSink(directory: lazyDir, echo: false)
-    lazy.write(prefix: "ALVRSTATS", json: "{}")
+    lazy.write(.format(StreamFormatRecord()))
     lazy.flush()
     let made = (try? FileManager.default.contentsOfDirectory(atPath: lazyDir.path)) ?? []
     expectEqual(made.count, 1, "lazy session file created")
     expect(made.first?.hasSuffix("Z.jsonl") ?? false, "lazy file named by UTC start")
+}
+
+private func testPrunePolicy() {
+    let names = (1...23).map { String(format: "202610%02dT120000Z.jsonl", $0) }.shuffled() + ["notes.txt", ".DS_Store", "x.jsonl"]
+    let pruned = StreamTelemetryFileSink.filesToPrune(names, keep: 20)
+    expectEqual(pruned.sorted(), ["20261001T120000Z.jsonl", "20261002T120000Z.jsonl", "20261003T120000Z.jsonl"], "oldest telemetry files beyond the newest 20")
+    expectEqual(StreamTelemetryFileSink.filesToPrune(Array(names.prefix(5)), keep: 20), [], "nothing pruned under the limit")
+    expectEqual(StreamTelemetryFileSink.filesToPrune(["notes.txt", "x.jsonl"], keep: 0), [], "foreign files never pruned")
+}
+
+private func testFileSinkPrunesOnSessionStart() {
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let dir = root.appendingPathComponent("local-scratch/stream-telemetry-test/prune")
+    try? FileManager.default.removeItem(at: dir)
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    for day in 1...25 {
+        try? Data().write(to: dir.appendingPathComponent(String(format: "202609%02dT000000Z.jsonl", day)))
+    }
+    try? Data().write(to: dir.appendingPathComponent("keep.txt"))
+    let sink = StreamTelemetryFileSink(directory: dir, echo: false)
+    sink.beginSession(utcStart: Date(timeIntervalSince1970: 1_792_546_200))
+    sink.flush()
+    let left = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted()
+    expectEqual(left.count, 21, "newest 20 telemetry files plus the foreign file")
+    expect(left.contains("20261021T013000Z.jsonl"), "new session file kept")
+    expect(!left.contains("20260906T000000Z.jsonl"), "older files pruned")
+    expect(left.contains("20260907T000000Z.jsonl"), "19 newest older files kept")
+    expect(left.contains("keep.txt"), "foreign file kept")
 }
 
 @main
@@ -299,6 +337,8 @@ enum StreamTelemetryTests {
         testFormatRecords()
         testCodecHelpers()
         testFileSink()
+        testPrunePolicy()
+        testFileSinkPrunesOnSessionStart()
         finishTests("StreamTelemetryTests")
     }
 }

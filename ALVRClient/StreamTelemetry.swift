@@ -7,14 +7,44 @@
 // - the same records appended to Documents/telemetry/<session-start-utc>.jsonl
 //
 // Foundation-only so it is unit tested on macOS (tests/swift/StreamTelemetryTests.swift).
-// Hot path: counters and preallocated sample slots under one lock; JSON is encoded once per window.
+// Hot path: counters and preallocated sample slots under one lock; records are built once per window
+// and JSON-encoded by the sink on its own queue.
 //
 
 import Foundation
 
 protocol StreamTelemetrySink: AnyObject {
     func beginSession(utcStart: Date)
-    func write(prefix: String, json: String)
+    func write(_ record: StreamTelemetryRecord)
+}
+
+enum StreamTelemetryRecord {
+    case stats(StreamStatsRecord)
+    case format(StreamFormatRecord)
+
+    var prefix: String {
+        switch self {
+        case .stats: return "ALVRSTATS"
+        case .format: return "ALVRFORMAT"
+        }
+    }
+
+    static func makeEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }
+
+    // One line of JSON with sorted keys; nil fields are omitted.
+    func json(using encoder: JSONEncoder) -> String? {
+        let data: Data?
+        switch self {
+        case .stats(let record): data = try? encoder.encode(record)
+        case .format(let record): data = try? encoder.encode(record)
+        }
+        return data.map { String(decoding: $0, as: UTF8.self) }
+    }
 }
 
 // Latency samples for one window, stored in preallocated slots. The mean covers every sample;
@@ -135,12 +165,6 @@ final class StreamTelemetry {
     private let clock: () -> UInt64
     private let wallClock: () -> Double
     private let lock = NSLock()
-    private let encoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.keyEncodingStrategy = .convertToSnakeCase
-        encoder.outputFormatting = [.sortedKeys]
-        return encoder
-    }()
 
     private var active = false
     private var windowStartNs: UInt64 = 0
@@ -192,10 +216,11 @@ final class StreamTelemetry {
         format.enableHdr = enableHdr
         format.forceFastSecretTextureFormats = forceFastSecretTextureFormats
         let record = takeFormatIfChanged(force: newSession)
-        lock.unlock()
         if newSession {
+            // Under the lock so no record from another thread reaches the sink ahead of the session.
             sink.beginSession(utcStart: Date(timeIntervalSince1970: wallClock()))
         }
+        lock.unlock()
         emit(record)
     }
 
@@ -389,8 +414,10 @@ final class StreamTelemetry {
         return record
     }
 
+    // Outside a session changes are only accumulated; streamingStarted emits the full format as the
+    // session's first record, so nothing is written (and no file created) before a stream starts.
     private func takeFormatIfChanged(force: Bool) -> StreamFormatRecord? {
-        if !force && format == lastEmittedFormat {
+        if !active || (!force && format == lastEmittedFormat) {
             return nil
         }
         lastEmittedFormat = format
@@ -402,13 +429,15 @@ final class StreamTelemetry {
     // MARK: - Output (call without the lock)
 
     private func emit(_ record: StreamStatsRecord?) {
-        guard let record, let data = try? encoder.encode(record) else { return }
-        sink.write(prefix: "ALVRSTATS", json: String(decoding: data, as: UTF8.self))
+        if let record {
+            sink.write(.stats(record))
+        }
     }
 
     private func emit(_ record: StreamFormatRecord?) {
-        guard let record, let data = try? encoder.encode(record) else { return }
-        sink.write(prefix: "ALVRFORMAT", json: String(decoding: data, as: UTF8.self))
+        if let record {
+            sink.write(.format(record))
+        }
     }
 
     // MARK: - Pure helpers
@@ -490,13 +519,19 @@ final class StreamTelemetry {
     }
 }
 
-// Prints each record to the console and appends it to <directory>/<session-start-utc>.jsonl.
-// Both happen on a private serial queue, off the render and decode threads.
+// Encodes each record, prints it to the console and appends it to <directory>/<session-start-utc>.jsonl.
+// All of that happens on a private serial queue, off the render and decode threads.
+// File I/O uses only the throwing FileHandle APIs: an I/O error (disk full, file revoked) stops file
+// output until the next session instead of raising an Objective-C exception.
 final class StreamTelemetryFileSink: StreamTelemetrySink {
+    static let keepFiles = 20
+
     private let directory: URL?
     private let echo: Bool
     private let queue = DispatchQueue(label: "StreamTelemetry.Sink", qos: .utility)
+    private let encoder = StreamTelemetryRecord.makeEncoder()
     private var handle: FileHandle? = nil
+    private var fileDisabled = false
     private var reportedError = false
 
     // Documents/telemetry in the app data container (simulator and device).
@@ -513,6 +548,19 @@ final class StreamTelemetryFileSink: StreamTelemetrySink {
         return formatter.string(from: start) + ".jsonl"
     }
 
+    // Telemetry files (named by fileName(for:)) beyond the newest `keep`; other files are never touched.
+    static func filesToPrune(_ names: [String], keep: Int) -> [String] {
+        let telemetry = names.filter(isTelemetryFileName).sorted(by: >)
+        return Array(telemetry.dropFirst(keep))
+    }
+
+    private static func isTelemetryFileName(_ name: String) -> Bool {
+        let chars = Array(name.utf8)
+        guard chars.count == 22, name.hasSuffix("Z.jsonl"), chars[8] == UInt8(ascii: "T") else { return false }
+        let digits = chars[0..<8] + chars[9..<15]
+        return digits.allSatisfy { $0 >= UInt8(ascii: "0") && $0 <= UInt8(ascii: "9") }
+    }
+
     init(directory: URL?, echo: Bool) {
         self.directory = directory
         self.echo = echo
@@ -520,19 +568,27 @@ final class StreamTelemetryFileSink: StreamTelemetrySink {
 
     func beginSession(utcStart: Date) {
         queue.async {
+            self.fileDisabled = false
             self.openFile(utcStart)
+            self.pruneOldFiles()
         }
     }
 
-    func write(prefix: String, json: String) {
+    func write(_ record: StreamTelemetryRecord) {
         queue.async {
+            guard let json = record.json(using: self.encoder) else { return }
             if self.echo {
-                print(prefix + " " + json)
+                print(record.prefix + " " + json)
             }
-            if self.handle == nil {
+            if self.handle == nil && !self.fileDisabled {
                 self.openFile(Date())
             }
-            self.handle?.write(Data((json + "\n").utf8))
+            guard let handle = self.handle else { return }
+            do {
+                try handle.write(contentsOf: Data((json + "\n").utf8))
+            } catch {
+                self.fail("cannot write telemetry file: \(error)")
+            }
         }
     }
 
@@ -554,14 +610,29 @@ final class StreamTelemetryFileSink: StreamTelemetrySink {
                 try Data().write(to: url)
             }
             let fileHandle = try FileHandle(forWritingTo: url)
-            fileHandle.seekToEndOfFile()
             handle = fileHandle
+            try fileHandle.seekToEnd()
             print("StreamTelemetry: writing", url.path)
         } catch {
-            if !reportedError {
-                reportedError = true
-                print("StreamTelemetry: cannot open \(url.path): \(error)")
-            }
+            fail("cannot open \(url.path): \(error)")
+        }
+    }
+
+    // Stops file output until the next session; logs only the first failure.
+    private func fail(_ message: String) {
+        try? handle?.close()
+        handle = nil
+        fileDisabled = true
+        if !reportedError {
+            reportedError = true
+            print("StreamTelemetry:", message)
+        }
+    }
+
+    private func pruneOldFiles() {
+        guard let directory, let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return }
+        for name in StreamTelemetryFileSink.filesToPrune(names, keep: StreamTelemetryFileSink.keepFiles) {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
         }
     }
 }
