@@ -372,6 +372,10 @@ struct Entry: View {
                             saveAction()
                         }
 
+                        Toggle("Render quality sweep", isOn: $gStore.settings.renderQualitySweep)
+                            .disabled(!Diag.isOn || EventHandler.shared.streamingActive)
+                            .onChange(of: gStore.settings.renderQualitySweep) { saveAction() }
+
                         Button {
                             openWindow(id: "InputDebug")
                         } label: {

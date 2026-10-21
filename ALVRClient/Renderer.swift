@@ -167,6 +167,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var isRealityKit = false
     // Diagnostics M5/M6/M9 (GM decision 65): Metal renderer only, nil when Diagnostics is off.
     let diagProbe: DiagRenderProbe?
+    private var rqSweep: RQRenderer?
     var hdrEnabled = false
     var currentRenderColorFormat = renderColorFormatSDR
     var currentDrawableRenderColorFormat = renderColorFormatDrawableSDR
@@ -724,11 +725,24 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         
     }
 
+    func stopQualitySweep() {
+        if let layer = layerRenderer { rqSweep?.update(layer: layer, enabled: false, streaming: false) }
+    }
+
     // Render the frame, only used in MetalClientSystem renderer.
     func renderFrame() {
         /// Per frame updates hare
         EventHandler.shared.framesRendered += 1
         EventHandler.shared.totalFramesRendered += 1
+        if diagProbe != nil, let layer = layerRenderer {
+            let enabled = ALVRClientApp.gStore.settings.renderQualitySweep
+            if enabled && !EventHandler.shared.streamingActive && rqSweep == nil {
+                do { rqSweep = try RQRenderer(device: device, library: device.makeDefaultLibrary()!) }
+                catch { Diag.log("rq", ["error": error.localizedDescription]) }
+            }
+            rqSweep?.update(layer: layer, enabled: enabled, streaming: EventHandler.shared.streamingActive)
+            if !enabled { rqSweep = nil }
+        }
         var streamingActiveForFrame = EventHandler.shared.streamingActive
         var isReprojected = false
         
@@ -1170,8 +1184,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 }
             }
             
-            drawable.encodePresent(commandBuffer: commandBuffer)
         }
+        if let rqSweep, !EventHandler.shared.streamingActive {
+            rqSweep.encode(layer: layerRenderer!, drawables: drawables, buffer: commandBuffer)
+        }
+        for drawable in drawables { drawable.encodePresent(commandBuffer: commandBuffer) }
         diagProbe?.frame(layerRenderer: layerRenderer!, drawables: drawables, predicted: timing, sourceId: diagSourceId)
 
         coolPulsingColorsTime += 0.005

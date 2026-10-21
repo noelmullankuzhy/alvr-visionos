@@ -36,6 +36,7 @@ struct GlobalSettings: Codable {
     var hdrPQ: Bool = false
     // "Diagnostics" (GM decision 65): DIAG lines to alvr_log and Documents/diag; read once at launch.
     var diagnostics: Bool = false
+    var renderQualitySweep: Bool = false
 
     init() {}
     
@@ -67,6 +68,7 @@ struct GlobalSettings: Codable {
         self.showPerformanceHud = try container.decodeIfPresent(Bool.self, forKey: .showPerformanceHud) ?? self.showPerformanceHud
         self.claimControllerHomeButton = try container.decodeIfPresent(Bool.self, forKey: .claimControllerHomeButton) ?? self.claimControllerHomeButton
         self.hdrPQ = try container.decodeIfPresent(Bool.self, forKey: .hdrPQ) ?? self.hdrPQ
+        self.renderQualitySweep = try container.decodeIfPresent(Bool.self, forKey: .renderQualitySweep) ?? self.renderQualitySweep
         self.diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? self.diagnostics
     }
 }

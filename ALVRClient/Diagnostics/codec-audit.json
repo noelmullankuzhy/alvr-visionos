@@ -1,0 +1,35 @@
+[
+  {
+    "bitDepth" : 10,
+    "chroma" : "420",
+    "encoderStatus" : 0,
+    "parameterSets" : [
+      "QAEMAf\/\/AiAAAAMAsAAAAwAAAwAeC8CQ",
+      "QgEBAiAAAAMAsAAAAwAAAwAeoBQgQcGO2IC+5FkUv\/Ln8T+i",
+      "RAHAcvBTJA=="
+    ],
+    "reason" : "verified_hvcC"
+  },
+  {
+    "bitDepth" : 10,
+    "chroma" : "422",
+    "encoderStatus" : 0,
+    "parameterSets" : [
+      "QAEMAf\/\/BAgAAAMAvQgAAAMAAB4LwJA=",
+      "QgEBBAgAAAMAvQgAAAMAAB6wFCBBwY7YgL7kWRS\/8ufxP6I=",
+      "RAHAcvBTJA=="
+    ],
+    "reason" : "verified_hvcC"
+  },
+  {
+    "bitDepth" : 10,
+    "chroma" : "444",
+    "encoderStatus" : 0,
+    "parameterSets" : [
+      "QAEMAf\/\/BAgAAAMAvAgAAAMAAB4LwJA=",
+      "QgEBBAgAAAMAvAgAAAMAAB6QAoQIOBh2xAX3Isil\/5c\/if0Q",
+      "RAHAcvBTJA=="
+    ],
+    "reason" : "verified_hvcC"
+  }
+]
