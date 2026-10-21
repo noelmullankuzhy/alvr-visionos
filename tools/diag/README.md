@@ -380,3 +380,69 @@ a Metal device there: use `SWIFT_SKIP_TESTS=HDRGPUTests sh tools/run-tests.sh`
 for the remaining tests (the runner prints the explicit skip), and run the normal
 suite, noise test, and both loopback suites outside that sandbox. Hardware decode
 acceptance/throughput/format and real PC→AVP network tails remain device-only.
+
+## Repeatable diagnostic report (D8)
+
+```sh
+/usr/bin/python3 tools/diag/diag-report.py /tmp/avp-diag-logs -o /tmp/avp-report.md
+/opt/homebrew/bin/python3 tools/diag/diag-report.py /tmp/avp-diag-logs \
+  --sender-log /tmp/ladder.jsonl -o /tmp/avp-report.md
+/usr/bin/python3 -m unittest tools/diag/test_diag_report.py
+/opt/homebrew/bin/python3 -m unittest tools/diag/test_diag_report.py
+```
+
+Python 3.9+, standard library only. The input directory's `diag-*.log` files
+are read in natural filename order (including rotation suffixes); stdout is the
+default output. Identical inputs produce identical Markdown, with no generation
+time. Every section names `filename:line` sources, retains every emitted field,
+and uses **no data** for absent/nonfinite measurements. Invalid lines are skipped,
+counted and listed by source; unreadable diagnostic files are reported in file
+health. Unknown topics are retained there too. No app/device changes are needed.
+
+An optional sender ladder log has one JSON object per sink run, in the same order,
+including TCP runs. Add the requested rate and cadence to each sender summary:
+
+```json
+{"mode":"udp","requested_mbps":100,"fps":90,"packets":250000,"payload_mbps":99.8,"bytes":300000000,"elapsed_seconds":24.05,"late_frames":0}
+{"mode":"tcp","payload_mbps":750,"bytes":937500000,"elapsed_seconds":10,"packets":14306,"late_frames":0}
+```
+
+`mbps` is accepted as an alias for `requested_mbps`. The existing sender emits
+`payload_mbps`, `packets`, etc., but does **not** emit requested rate or fps;
+without those added fields the report leaves the requested rate/deadline/knee
+unknown. Clocks are not aligned across hosts: steps align by run order. Start a
+fresh sink for each sender step, as required above. Interval records and their
+final `summary=true` form one step; counters are cumulative and are never summed
+across intervals. A decreasing `seconds` or changed mode also splits an unfinished
+run. Unfinished runs are excluded from the knee. Unmatched sender steps and mode
+mismatches are reported. Any malformed sender line disables sender alignment and
+the knee for the entire report, because that line might have represented a step.
+
+For final UDP summaries, observed loss percent is `100 * sink loss / sender packets`.
+The sink cannot observe trailing loss, so this percentage and the knee are observed
+bounds. Without sender packet counts, loss percent is **no data**, even when the
+sink reports zero loss. Completion p99 uses `spread_p99_ms` (or the equivalent
+`burst_tail_p99_ms`), the complete-frame first-to-last receipt spread, rather than
+absolute one-way latency. The knee is the highest **requested** step with observed
+loss ≤0.1% and completion p99 ≤1000/fps ms. It requires a final summary, completed
+frames, finite measurements, no distribution overflow and no sender error.
+TCP bulk throughput is reported separately and never qualifies for the UDP knee.
+
+Decode fps/Mpix/s aggregate sessions; per-session achieved fps is `fps / sessions`.
+The 90/96/100 Hz flags require enough per-session throughput, zero drops,
+`hw=true`, and `err=0`. Highest passing per coded size ranks source fps × sessions
+among trials meeting their source cadence. These checks establish throughput,
+not sustained backlog stability or unlogged latency tails. Codec hardware queries
+and session checks keep separate source references. EDR threshold hold times use
+the most recent matching step in that session and name that source; they are
+configured holds, not a measured time between the step and mark.
+
+Current M6 logs contain interval p50/p95/max, without interval samples/counts or
+window durations. The report therefore gives the median target cadence estimate
+(`1000 / target_interval_p50_ms`), and explicitly marks the histogram and achieved
+Hz **no data**. Actual photon presentation remains unavailable. M9 GPU and decode
+latency logs have p50/p95, not p99; p95 is preserved and never relabelled p99.
+RQ sweep GPU p99 is logged and reported. M9 footprint is bytes; RQ `footprint_mb`
+is MiB. Corner radii/shape/exponents/area come from the recorded summary, with
+16 radii expanded in logged spoke order; missing marks are never filled in.
+These reports cannot manufacture measurements the headset did not record.

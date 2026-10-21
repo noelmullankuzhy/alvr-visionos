@@ -15,3 +15,6 @@ ALVRClient_profiled.gputrace/
 # Local scratch (tests, typecheck)
 local-scratch/
 .typecheck/
+
+# Python diagnostic tools
+__pycache__/
