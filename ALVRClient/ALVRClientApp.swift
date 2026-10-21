@@ -263,6 +263,30 @@ struct ALVRClientApp: App {
         .immersionStyle(selection: $realityKitImmersionStyle, in: .mixed, .progressive)
         .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
 
+        // Independent entry for offline diagnostics; the online Enter path is unchanged.
+        ImmersiveSpace(id: "MetalDiagnosticsOffline") {
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
+                let system = MetalClientSystem(layerRenderer)
+                system.startRenderLoop()
+                // connectionState stops publishing once rendering starts. Watch streamingActive
+                // too, while this offline request owns the space. The existing renderer takes
+                // over a new stream normally; clearing the offline flag completes the handoff.
+                Task { @MainActor in
+                    defer { model.isShowingDiagnosticsOffline = false }
+                    while layerRenderer.state != .invalidated && !Task.isCancelled {
+                        guard EntryEnterPolicy.keepOffline(requested: model.isShowingDiagnosticsOffline,
+                                connected: EventHandler.shared.connectionState == .connected,
+                                streaming: EventHandler.shared.streamingActive) else { break }
+                        do { try await Task.sleep(nanoseconds: 100_000_000) }
+                        catch { break }
+                    }
+                }
+            }
+        }
+        .disablePersistentSystemOverlaysForVisionOS2(shouldDisable: ALVRClientApp.gStore.settings.disablePersistentSystemOverlays ? .hidden : .automatic)
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
+
         ImmersiveSpace(id: "MetalClient") {
             // clientImmersionStyle starts .mixed and is never reassigned.
             CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in

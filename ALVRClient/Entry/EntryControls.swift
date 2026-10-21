@@ -52,6 +52,29 @@ struct EntryControls: View {
                     .labelStyle(.titleOnly)
                     .padding(15)
             }
+
+            if EntryEnterPolicy.mode(connected: eventHandler.connectionState == .connected,
+                                     diagnostics: Diag.isOn, realityKit: useRealityKit) == .enterDiagnostics,
+               !eventHandler.streamingActive {
+                Button {
+                    Task { @MainActor in
+                        guard !model.isShowingDiagnosticsOffline,
+                              EntryEnterPolicy.keepOffline(requested: true,
+                                  connected: eventHandler.connectionState == .connected,
+                                  streaming: eventHandler.streamingActive) else { return }
+                        model.isShowingDiagnosticsOffline = true
+                        switch await openImmersiveSpace(id: "MetalDiagnosticsOffline") {
+                        case .opened: break
+                        default: model.isShowingDiagnosticsOffline = false
+                        }
+                    }
+                } label: {
+                    Label("Enter diagnostics", systemImage: "visionpro")
+                        .labelStyle(.titleAndIcon)
+                        .padding(15)
+                }
+                .disabled(model.isShowingDiagnosticsOffline)
+            }
             
         }
         .toggleStyle(.button)
