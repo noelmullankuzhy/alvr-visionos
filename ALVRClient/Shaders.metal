@@ -125,6 +125,11 @@ constant float4 ENCODING_YUV_TRANSFORM_3 [[ function_constant(ALVRFunctionConsta
 constant float3 GAMUT_TO_OUTPUT_0 [[ function_constant(ALVRFunctionConstantGamutToOutput_0) ]];
 constant float3 GAMUT_TO_OUTPUT_1 [[ function_constant(ALVRFunctionConstantGamutToOutput_1) ]];
 constant float3 GAMUT_TO_OUTPUT_2 [[ function_constant(ALVRFunctionConstantGamutToOutput_2) ]];
+// PQ (SMPTE ST 2084) stream, HDRPipeline.swift: HDR_PQ_SCALE = 10000 / reference white nits, so PQ reference white is
+// EDR 1.0; EDR_HEADROOM is the roll-off target (assumed: visionOS has no headroom query, see HDRPipeline.swift).
+constant bool HDR_PQ [[ function_constant(ALVRFunctionConstantHdrPQ) ]];
+constant float HDR_PQ_SCALE [[ function_constant(ALVRFunctionConstantHdrPQScale) ]];
+constant float EDR_HEADROOM [[ function_constant(ALVRFunctionConstantEdrHeadroom) ]];
 
 float2 TextureToEyeUV(float2 textureUV, bool isRightEye) {
     // flip distortion horizontally for right eye
@@ -249,6 +254,30 @@ float3 EncodingNonlinearToLinearRGB(float3 color, float gamma) {
     return sign(color) * pow(abs(color), float3(gamma));
 }
 
+// SMPTE ST 2084 EOTF: non-linear signal -> luminance / 10000 nits. Mirrored by HDRPipeline.pqEOTF.
+float3 PQToLinear(float3 e) {
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 4096.0 * 128.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 4096.0 * 32.0;
+    const float c3 = 2392.0 / 4096.0 * 32.0;
+    float3 ep = pow(clamp(e, 0.0, 1.0), float3(1.0 / m2));
+    return pow(max(ep - c1, 0.0) / (c2 - c3 * ep), float3(1.0 / m1));
+}
+
+// Soft roll-off on max(R, G, B): identity up to 0.75 x headroom, then approaches the headroom without reaching past it.
+// Mirrored by HDRPipeline.rollOff.
+float3 EDRRollOff(float3 rgb, float headroom) {
+    float h = max(headroom, 1.0);
+    float knee = 0.75 * h;
+    float m = max(rgb.r, max(rgb.g, rgb.b));
+    if (m <= knee) {
+        return rgb;
+    }
+    float rolled = h - (h - knee) * exp(-(m - knee) / (h - knee));
+    return rgb * (rolled / m);
+}
+
 half colorclose_hsv(half3 hsv, half3 keyHsv, half2 tol)
 {
     // Saturation or value too low, don't consider it at all.
@@ -291,14 +320,25 @@ half3 rgb2hsv(half3 rgb) {
 
 // color_in: sRGB-EOTF-decoded RGB in the stream's primaries, still carrying the server's encoding gamma.
 // All maths in float; half only for the chroma-key mask and the final write.
+half4 videoFrameFragmentShader_output(float3 linearSource);
+
 half4 videoFrameFragmentShader_common(float3 color_in) {
     float3 linearSource = EncodingNonlinearToLinearRGB(color_in, ENCODING_GAMMA);
+    return videoFrameFragmentShader_output(linearSource);
+}
+
+// linearSource: linear light in the stream's primaries (EDR units for PQ: 1.0 = reference white).
+half4 videoFrameFragmentShader_output(float3 linearSource) {
     float3 color = linearSource;
     // Output primaries follow ColourOutput: extended linear sRGB by default (measured in the simulator), Display P3
-    // opt-in. RealityKit's interpretation of its texture is UNVERIFIED, so that path keeps the unconverted output.
-    if (!REALITYKIT_ENABLED) {
+    // opt-in. RealityKit's interpretation of its texture is UNVERIFIED, so that path keeps the unconverted output for
+    // SDR; PQ is always converted, since unconverted BT.2020 is wrong under either interpretation.
+    if (!REALITYKIT_ENABLED || HDR_PQ) {
         const float3x3 gamutToOutput = float3x3(GAMUT_TO_OUTPUT_0, GAMUT_TO_OUTPUT_1, GAMUT_TO_OUTPUT_2);
         color = gamutToOutput * linearSource;
+    }
+    if (HDR_PQ) {
+        color = EDRRollOff(color, EDR_HEADROOM);
     }
 
     half4 colorOut = half4(half3(color), 1.0);
@@ -348,6 +388,10 @@ fragment half4 videoFrameFragmentShader_YpCbCrBiPlanar(ColorInOut in [[stage_in]
     );
 
     float3 rgb_uncorrect = (transform * ycbcr).rgb;
+    if (HDR_PQ) {
+        // R'G'B' PQ -> absolute nits / 10000 -> EDR (no sRGB EOTF or encoding gamma on this path).
+        return videoFrameFragmentShader_output(PQToLinear(rgb_uncorrect) * HDR_PQ_SCALE);
+    }
     float3 color = NonlinearToLinearRGB(rgb_uncorrect);
 
     return videoFrameFragmentShader_common(color);

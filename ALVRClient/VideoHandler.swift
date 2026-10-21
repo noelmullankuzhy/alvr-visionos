@@ -168,7 +168,14 @@ struct VideoHandler {
         //}
         
         let videoDecoderSpecification:[NSString: AnyObject] = [kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder:kCFBooleanTrue]
-        let destinationImageBufferAttributes:[NSString: AnyObject] = [kCVPixelBufferMetalCompatibilityKey: true as NSNumber, kCVPixelBufferPoolMinimumBufferCountKey: 3 as NSNumber]
+        var destinationImageBufferAttributes:[NSString: AnyObject] = [kCVPixelBufferMetalCompatibilityKey: true as NSNumber, kCVPixelBufferPoolMinimumBufferCountKey: 3 as NSNumber]
+        // PQ: request uncompressed 10-bit biplanar output, so the explicit shader path decodes PQ (the private *_sRGB
+        // samplers would apply the sRGB EOTF) and HDRProbe can read the codes. Costs a copy; SDR streams are untouched.
+        explicitPlanes = HDRPipeline.requiresExplicitPlanes(transfer: videoFormat!.extensions[kCMFormatDescriptionExtension_TransferFunction] as? String)
+        if explicitPlanes {
+            let pixelFormat = getIsFullRangeForVideoFormat(videoFormat!) ? kCVPixelFormatType_420YpCbCr10BiPlanarFullRange : kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+            destinationImageBufferAttributes[kCVPixelBufferPixelFormatTypeKey] = pixelFormat as NSNumber
+        }
         // TODO come back to this maybe idk
         //if pixelFormat != nil {
         //    destinationImageBufferAttributes[kCVPixelBufferPixelFormatTypeKey] = pixelFormat! as NSNumber
@@ -780,7 +787,7 @@ struct VideoHandler {
                  kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,
                  kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange,
                  kCVPixelFormatType_444YpCbCr10BiPlanarFullRange:
-                return forceFastSecretTextureFormats ? [MTLPixelFormat.init(rawValue: MTLPixelFormatYCBCR10_420_2P_sRGB)!, MTLPixelFormat.invalid] : [MTLPixelFormat.r16Unorm, MTLPixelFormat.rg16Unorm]
+                return forceFastSecretTextureFormats && !explicitPlanes ? [MTLPixelFormat.init(rawValue: MTLPixelFormatYCBCR10_420_2P_sRGB)!, MTLPixelFormat.invalid] : [MTLPixelFormat.r16Unorm, MTLPixelFormat.rg16Unorm]
 
             //
             // If it's good enough for WebKit, it's good enough for me.
@@ -821,6 +828,8 @@ struct VideoHandler {
         }
     }
     private static var loggedUnknownFormats = Set<OSType>()
+    // Set per decoder (createVideoDecoder): the stream is PQ, so 10-bit planes bind as r16Unorm/rg16Unorm.
+    static var explicitPlanes = false
     
     static func isFormatSecret(_ format: OSType) -> Bool
     {
@@ -864,7 +873,7 @@ struct VideoHandler {
                  kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,
                  kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange,
                  kCVPixelFormatType_444YpCbCr10BiPlanarFullRange:
-                return forceFastSecretTextureFormats
+                return forceFastSecretTextureFormats && !explicitPlanes
             default:
                 return false
         }

@@ -57,11 +57,13 @@ struct ColourSelection: Equatable {
     // Applied to float4(Y, Cb, Cr, 1) texture samples; columns are Y, Cb, Cr gains and offsets.
     var yuvToRGB: simd_float4x4
     var output: ColourOutput
-    // Linear source RGB -> linear output primaries, unclipped. Identity for PQ/HLG, whose shader path is not
+    // Linear source RGB -> linear output primaries, unclipped. Identity for HLG, whose shader path is not
     // implemented yet.
     var sourceToOutput: simd_float3x3
 
     var convertsGamut: Bool { sourceToOutput != matrix_identity_float3x3 }
+    // ST 2084 stream: the shader decodes it to EDR (HDRPipeline.swift) instead of the sRGB EOTF and encoding gamma.
+    var isPQ: Bool { transfer == .pq }
 
     func logLine(path: String) -> String {
         func tag(_ value: String, _ assumed: Bool) -> String { assumed ? value + "(assumed)" : value }
@@ -183,8 +185,7 @@ enum ColourPipeline {
         let full = fullRange ?? false
         let bits = bitDepth ?? 8
         let planeBits = planeBitDepth ?? bits
-        let hdrTransfer = parsedTransfer == .pq || parsedTransfer == .hlg
-        let gamut = hdrTransfer ? matrix_identity_double3x3 : primariesConversion(from: p, to: output.primaries)
+        let gamut = parsedTransfer == .hlg ? matrix_identity_double3x3 : primariesConversion(from: p, to: output.primaries)
         return ColourSelection(
             primaries: p, transfer: parsedTransfer, matrix: m, fullRange: full, bitDepth: bits, planeBitDepth: planeBits,
             primariesAssumed: parsedPrimaries == nil, matrixAssumed: parsedMatrix == nil, rangeAssumed: fullRange == nil,

@@ -159,6 +159,9 @@ class Renderer {
     let gpuTimes = GpuTimeEstimator()
     var currentYuvTransform: simd_float4x4 = matrix_identity_float4x4
     var currentGamutTransform: simd_float3x3 = matrix_identity_float3x3
+    // PQ stream (HDR_PQ shader path) and its roll-off headroom (HDRPipeline.swift: assumed, ALVRHDRHeadroom overrides).
+    var currentHdrPQ = false
+    let edrHeadroom = HDRPipeline.headroom(defaultsValue: UserDefaults.standard.double(forKey: HDRPipeline.headroomDefaultsKey))
     
     // Was curious if it improved; it's still juddery.
     var useApplesReprojection = false
@@ -557,6 +560,11 @@ class Renderer {
         fragmentConstants.setConstantValue(&currentGamutTransform.columns.0, type: .float3, index: ALVRFunctionConstant.gamutToOutput_0.rawValue)
         fragmentConstants.setConstantValue(&currentGamutTransform.columns.1, type: .float3, index: ALVRFunctionConstant.gamutToOutput_1.rawValue)
         fragmentConstants.setConstantValue(&currentGamutTransform.columns.2, type: .float3, index: ALVRFunctionConstant.gamutToOutput_2.rawValue)
+        var hdrPQScale = Float(10000 / HDRPipeline.referenceWhiteNits)
+        var headroom = edrHeadroom
+        fragmentConstants.setConstantValue(&currentHdrPQ, type: .bool, index: ALVRFunctionConstant.hdrPQ.rawValue)
+        fragmentConstants.setConstantValue(&hdrPQScale, type: .float, index: ALVRFunctionConstant.hdrPQScale.rawValue)
+        fragmentConstants.setConstantValue(&headroom, type: .float, index: ALVRFunctionConstant.edrHeadroom.rawValue)
 
         let fragmentFunction = try library?.makeFunction(name: "videoFrameFragmentShader_" + variantName, constantValues: fragmentConstants)
 
@@ -920,6 +928,10 @@ class Renderer {
                     needsPipelineRebuild = true
                 }
                 currentGamutTransform = nextGamutTransform
+                if colour.isPQ != currentHdrPQ {
+                    needsPipelineRebuild = true
+                }
+                currentHdrPQ = colour.isPQ
             }
 
             if needsPipelineRebuild {
@@ -1848,6 +1860,9 @@ class Renderer {
                 print("NO COMPRESSION ON VT FRAME!!!! AAAAAAAAA go file feedback again :(")
             }
             renderEncoder.setFragmentTexture(metalTexture, index: i)
+        }
+        if HDRProbe.enabled, let videoFormat = EventHandler.shared.videoFormat {
+            HDRProbe.shared.sample(pixelBuffer: pixelBuffer, selection: VideoHandler.getColourSelectionForVideoFormat(videoFormat))
         }
         
         // Snoop for pixel formats

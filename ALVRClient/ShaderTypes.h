@@ -89,4 +89,7 @@ typedef NS_ENUM(EnumBackingType, ALVRFunctionConstant)
     ALVRFunctionConstantGamutToOutput_0 = 308,
     ALVRFunctionConstantGamutToOutput_1 = 309,
     ALVRFunctionConstantGamutToOutput_2 = 310,
+    ALVRFunctionConstantHdrPQ = 311,
+    ALVRFunctionConstantHdrPQScale = 312,
+    ALVRFunctionConstantEdrHeadroom = 313,
 };

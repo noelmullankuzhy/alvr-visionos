@@ -342,6 +342,16 @@ struct Entry: View {
                             }
                         }
                         
+                        Toggle(isOn: $gStore.settings.hdrPQ) {
+                            Text("HDR (PQ)")
+                            Text("Requests an HDR10 stream from the streamer. Applies after an app restart.")
+                                .font(.system(size: 10))
+                        }
+                        .toggleStyle(.switch)
+                        .onChange(of: gStore.settings.hdrPQ) {
+                            saveAction()
+                        }
+
                         Toggle(isOn: $gStore.settings.showPerformanceHud) {
                             Text("Performance HUD")
                             Text("Shows a performance panel anchored to your left forearm.")

@@ -1585,6 +1585,12 @@ class RealityKitClientSystemCorrectlyAssociated : System {
                     needsPipelineRebuild = true
                 }
                 renderer.currentYuvTransform = nextYuvTransform
+                let colour = VideoHandler.getColourSelectionForVideoFormat(videoFormat)
+                if colour.isPQ != renderer.currentHdrPQ {
+                    needsPipelineRebuild = true
+                }
+                renderer.currentHdrPQ = colour.isPQ
+                renderer.currentGamutTransform = colour.sourceToOutput
             }
             
             if needsPipelineRebuild {
