@@ -2,7 +2,8 @@
 //  FakeHeadPose.swift
 //
 // Orientation for the fixed head pose sent when there is no device anchor (visionOS simulator fallback,
-// bootstrap tracking before the immersive space is up).
+// bootstrap tracking before the immersive space is up), and in simulator builds for the static simulated
+// head sent by the real tracking path (WorldTracker.sendTracking).
 //
 // The server tags every frame with the target timestamp of the tracking sample whose rotation is closest to
 // the frame's pose (server_openvr PoseHistory::GetBestPoseMatch over the last 360 poses, first minimum wins).
@@ -28,5 +29,11 @@ enum FakeHeadPose {
 
     static func orientation(sequence: UInt64) -> simd_quatf {
         return simd_quatf(angle: yaw(sequence: sequence), axis: simd_float3(0, 1, 0))
+    }
+
+    // Real tracking path in the simulator: the simulated head is static, so its device-anchor orientation is
+    // identical every sample (same server tie). Apply the same yaw sawtooth in head-local space.
+    static func dithered(_ headOrientation: simd_quatf, sequence: UInt64) -> simd_quatf {
+        return headOrientation * orientation(sequence: sequence)
     }
 }

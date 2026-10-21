@@ -265,7 +265,7 @@ class WorldTracker {
     var crownPressCount = 0
     var sentPoses = 0
     var loggedSimFallbackHeadPose = false
-    var fakeHeadPoseSequence: UInt64 = 0 // FakeHeadPose: unique orientation per fake tracking sample
+    var fakeHeadPoseSequence: UInt64 = 0 // FakeHeadPose: unique orientation per fake (and, in the simulator, real) head sample
     var debuggableMats: [simd_float4x4] = []
     var debuggableScales: [Float] = []
     /// Solid geometry to draw as wireframe, alongside the basis gadgets.
@@ -3349,9 +3349,18 @@ class WorldTracker {
         lastHeadPose = headPose
         lastHeadTimestamp = targetTimestampWalkedBack
         
-        let headMotion = AlvrDeviceMotion(device_id: WorldTracker.deviceIdHead, pose: headPose, linear_velocity: headLinVel, angular_velocity: headAngVel)
+#if targetEnvironment(simulator)
+        // The simulated head is static: make each sample's orientation unique so the server matches frames to their
+        // own timestamps (FakeHeadPose.swift). Applied after the velocities so they stay those of the real pose.
+        var sentHeadPose = headPose
+        sentHeadPose.orientation = AlvrQuat(FakeHeadPose.dithered(headPose.orientation.asQuatf(), sequence: fakeHeadPoseSequence))
+        fakeHeadPoseSequence &+= 1
+#else
+        let sentHeadPose = headPose
+#endif
+        let headMotion = AlvrDeviceMotion(device_id: WorldTracker.deviceIdHead, pose: sentHeadPose, linear_velocity: headLinVel, angular_velocity: headAngVel)
         trackingMotions.append(headMotion)
-        
+
         // selection ray tests, replaces left forearm
 #if false
         var testPoseApple = matrix_identity_float4x4
