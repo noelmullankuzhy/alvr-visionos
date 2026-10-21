@@ -19,7 +19,7 @@ class BoundaryDotsReportTests(unittest.TestCase):
                 for i, line in enumerate(text.splitlines(), 1)]
 
     def test_asymmetric_tangent_percentages_and_drawable_coordinates(self):
-        for yaw, pitch, expected in [(45, 45, (50, 25, .75, .625)),
+        for yaw, pitch, expected in [(45, 45, (50, 25, 2 / 3, .625)),
                                      (-45, -45, (-100, -25, 0, .375))]:
             actual = report.dots_coordinates(yaw, pitch, (1, 2, 4, 4))
             for key, value in zip(('x_pct', 'y_pct', 'u', 'v'), expected):

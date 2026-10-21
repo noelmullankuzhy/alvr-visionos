@@ -132,6 +132,10 @@ struct ALVRClientApp: App {
                     saveSettings()
                 }
             }
+            // Keep the window and auto-enter state alive, but clear the field
+            // while measuring. Dismissing/recreating Entry would rearm auto-enter.
+            .opacity(model.offlineDiagnostics.space == .boundaryDots ? 0 : 1)
+            .allowsHitTesting(model.offlineDiagnostics.space != .boundaryDots)
             .task {
                 model.isShowingClient = false
                 EventHandler.shared.initializeAlvr()
@@ -273,17 +277,25 @@ struct ALVRClientApp: App {
                 // entry action, which retains ownership until dismissImmersiveSpace returns.
                 Task { @MainActor in
                     while layerRenderer.state != .invalidated && !Task.isCancelled {
-                        guard model.offlineDiagnostics.phase == .offline else { return }
+                        guard model.offlineDiagnostics.space == .metal, model.offlineDiagnostics.phase == .offline else { return }
                         do { try await Task.sleep(nanoseconds: 100_000_000) }
                         catch { break }
                     }
-                    if model.offlineDiagnostics.phase == .offline { model.offlineDiagnostics.dismissed() }
+                    if model.offlineDiagnostics.space == .metal, model.offlineDiagnostics.phase == .offline { model.offlineDiagnostics.dismissed() }
                 }
             }
         }
         .disablePersistentSystemOverlaysForVisionOS2(shouldDisable: ALVRClientApp.gStore.settings.disablePersistentSystemOverlays ? .hidden : .automatic)
         .immersionStyle(selection: .constant(.mixed), in: .mixed)
         .upperLimbVisibility(ALVRClientApp.gStore.settings.showHandsOverlaid ? .visible : .hidden)
+
+        // Own RealityKit input scene: system gaze hover + targeted pinch, offline only.
+        ImmersiveSpace(id: "BoundaryDotsOffline") {
+            BoundaryDotsView()
+                .environment(model)
+        }
+        .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        .upperLimbVisibility(.hidden)
 
         ImmersiveSpace(id: "MetalClient") {
             // clientImmersionStyle starts .mixed and is never reassigned.

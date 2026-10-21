@@ -88,6 +88,8 @@
 		D66000000000000000000032 /* codec-audit.json in Resources */ = {isa = PBXBuildFile; fileRef = D66000000000000000000031 /* codec-audit.json */; };
 		D65D5E012C00000100650001 /* DiagEye.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D5E022C00000100650001 /* DiagEye.swift */; };
 		D65D5E012C00000100650002 /* DiagEyeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D5E022C00000100650002 /* DiagEyeRenderer.swift */; };
+		B26548012C00000100000001 /* BoundaryDots.swift in Sources */ = {isa = PBXBuildFile; fileRef = B26548022C00000100000001 /* BoundaryDots.swift */; };
+		B26548012C00000100000002 /* BoundaryDotsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B26548022C00000100000002 /* BoundaryDotsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -218,6 +220,8 @@
 		D66000000000000000000031 /* codec-audit.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = Diagnostics/codec-audit.json; sourceTree = "<group>"; };
 		D65D5E022C00000100650001 /* DiagEye.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagEye.swift; sourceTree = "<group>"; };
 		D65D5E022C00000100650002 /* DiagEyeRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagEyeRenderer.swift; sourceTree = "<group>"; };
+		B26548022C00000100000001 /* BoundaryDots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/BoundaryDots.swift; sourceTree = "<group>"; };
+		B26548022C00000100000002 /* BoundaryDotsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/BoundaryDotsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -320,6 +324,8 @@
 				D65D2E022C00000100650002 /* EDRRenderer.swift */,
 				D65D2E022C00000100650001 /* EDRDiagnostic.swift */,
 				D65D0E022C00000100650006 /* CornerChart.swift */,
+				B26548022C00000100000002 /* BoundaryDotsView.swift */,
+				B26548022C00000100000001 /* BoundaryDots.swift */,
 				D65D0E022C00000100650008 /* CornerChartRenderer.swift */,
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
@@ -566,6 +572,8 @@
 				D65D2E012C00000100650002 /* EDRRenderer.swift in Sources */,
 				D65D2E012C00000100650001 /* EDRDiagnostic.swift in Sources */,
 				D65D0E012C00000100650005 /* CornerChart.swift in Sources */,
+				B26548012C00000100000002 /* BoundaryDotsView.swift in Sources */,
+				B26548012C00000100000001 /* BoundaryDots.swift in Sources */,
 				D65D0E012C00000100650007 /* CornerChartRenderer.swift in Sources */,
 				D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */,
 				9ED257172B8062A2008DC22F /* Settings.swift in Sources */,
