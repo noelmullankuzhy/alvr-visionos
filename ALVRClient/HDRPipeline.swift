@@ -15,7 +15,13 @@
 //  renderer therefore uses assumedHeadroom 2.0, overridable with UserDefaults ALVRHDRHeadroom, until the headset run
 //  measures it.
 //
+//  Decision 63e: PQ content is never drawn through the SDR/sRGB path. Any non-packed biplanar Y'CbCr buffer (8- or
+//  10-bit) is bound as raw normalised planes and runs the PQ conversion; other formats are dropped. The HDR setting,
+//  headroom, output policy and encoding gamma are captured once per stream (StreamContext, VideoStreamGate), and
+//  pipeline builds snapshot one generation's inputs; stale-generation builds are discarded (VideoPipelineSlot).
+//
 
+import CoreVideo
 import Foundation
 import simd
 
@@ -65,11 +71,55 @@ enum HDRPipeline {
         return rgb * (rollOff(m, headroom: headroom) / m)
     }
 
-    // PQ with the HDR setting on needs the explicit 10-bit plane path (the private *_sRGB YCbCr samplers apply the
-    // sRGB EOTF themselves); HDR off keeps the decoder's default output. transfer is the CMFormatDescription
+    // PQ needs the explicit plane path whatever the HDR setting (the private *_sRGB YCbCr samplers apply the sRGB EOTF
+    // themselves), so the decoder is asked for 10-bit biplanar planes. transfer is the CMFormatDescription
     // TransferFunction extension value.
-    static func requiresExplicitPlanes(transfer: String?, hdrEnabled: Bool) -> Bool {
-        hdrEnabled && transfer == "SMPTE_ST_2084_PQ"
+    static func requiresExplicitPlanes(transfer: String?) -> Bool {
+        transfer == "SMPTE_ST_2084_PQ"
+    }
+
+    // Code depth a PQ frame's planes bind at as raw normalised codes (decision 63e (1)): 8 for 8-bit biplanar
+    // (r8Unorm/rg8Unorm), 10 for the CV 10-bit biplanar formats (r16Unorm/rg16Unorm, codes in the MSBs). nil for packed,
+    // private or unknown formats, which have no raw plane binding: those frames are dropped.
+    static func pqPlaneBitDepth(pixelFormat: OSType) -> Int? {
+        switch pixelFormat {
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+             kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+             kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange,
+             kCVPixelFormatType_422YpCbCr8BiPlanarFullRange,
+             kCVPixelFormatType_444YpCbCr8BiPlanarVideoRange,
+             kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
+             kCVPixelFormatType_Lossy_420YpCbCr8BiPlanarVideoRange,
+             kCVPixelFormatType_Lossy_420YpCbCr8BiPlanarFullRange,
+             kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarVideoRange,
+             kCVPixelFormatType_Lossless_420YpCbCr8BiPlanarFullRange:
+            return 8
+        case kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+             kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
+             kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
+             kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,
+             kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange,
+             kCVPixelFormatType_444YpCbCr10BiPlanarFullRange:
+            return 10
+        default:
+            return nil
+        }
+    }
+
+    // Swift mirror of the video fragment shader for a stream colour state, with the constants Renderer builds from it
+    // (gamut applied on Metal, and on RealityKit for PQ; the RealityKit SDR state carries an identity gamut).
+    static func shade(sample: simd_float4, colour: StreamColourState) -> simd_float3 {
+        let rgb = colour.yuvToRGB * sample
+        if colour.hdrPQ {
+            let scale = Float(10000 / referenceWhiteNits)
+            func edr(_ e: Float) -> Float { Float(pqEOTF(Double(e)) / 10000) * scale }
+            return rollOff(colour.gamutToOutput * simd_float3(edr(rgb.x), edr(rgb.y), edr(rgb.z)), headroom: colour.headroom)
+        }
+        let lin = simd_float3(ColourPipeline.srgbEOTF(rgb.x), ColourPipeline.srgbEOTF(rgb.y), ColourPipeline.srgbEOTF(rgb.z))
+        let gamma = colour.encodingGamma
+        return colour.gamutToOutput * simd_float3(ColourPipeline.encodingGammaToLinear(lin.x, gamma: gamma),
+                                                  ColourPipeline.encodingGammaToLinear(lin.y, gamma: gamma),
+                                                  ColourPipeline.encodingGammaToLinear(lin.z, gamma: gamma))
     }
 
     // Swift mirror of the video fragment shader for the Metal renderer (no chroma key): sample = float4(Y, Cb, Cr, 1).
@@ -115,66 +165,170 @@ enum HDRPipeline {
     }
 }
 
-// Colour state of one stream (decision 63c (4)): a pure function of the frame's own format description (selection),
-// the plane depth its decoded pixel format binds at (nil for the private sampler formats), the HDR setting and the
+// Immutable inputs of one stream (decision 63e (2)), captured once at STREAMING_STARTED by VideoStreamGate: the HDR
+// setting, the display headroom, the SDR output policy and the server's encoding gamma. Decode and render threads read
+// only this, never the UI settings. generation increases with every stream start.
+struct StreamContext: Equatable {
+    let generation: UInt64
+    let hdrEnabled: Bool
+    let headroom: Float
+    let output: ColourOutput
+    let encodingGamma: Float
+}
+
+// How a frame's buffer is bound for the video shader.
+enum VideoFrameBinding: Equatable {
+    // PQ in a format with no raw plane binding (packed, private or unknown): never drawn.
+    case drop
+    // Raw normalised Y and CbCr planes: r8Unorm/rg8Unorm (8) or r16Unorm/rg16Unorm (10, codes in the MSBs).
+    case explicitPlanes(bitDepth: Int)
+    // SDR: the decoder's buffer bound as before (private *_sRGB formats on device).
+    case decoderDefault
+}
+
+// Colour state of one stream's frames: a pure function of the frame's format description (selection), the plane depth
+// its decoded pixel format binds at (HDRPipeline.pqPlaneBitDepth for PQ), the stream's captured context and the
 // renderer. Never mutated; Renderer publishes it together with the pipelines built from it (VideoPipelineSlot).
 struct StreamColourState: Equatable {
+    let stream: StreamContext
     let selection: ColourSelection
-    // HDR_PQ shader path on explicit 10-bit planes.
+    let binding: VideoFrameBinding
+    // HDR_PQ shader path: PQ on raw planes of any depth (decision 63e (1)), with the HDR setting on or off.
     let hdrPQ: Bool
-    // PQ stream with HDR on whose decoded format is not explicit 10-bit planes (the decoder ignored the request):
-    // HDR is refused for the stream, which then takes the HDR-off path (decision 63c (3)).
-    let pqRefused: Bool
+    // PQ frames with no raw plane binding: dropped, never drawn through another path.
+    let dropFrames: Bool
+    // 8-bit PQ planes: drawn on the PQ path, with one precision warning per stream.
+    let lowPrecisionPQ: Bool
+    // EDR roll-off limit: the stream's headroom with the HDR setting on, SDR range (1.0) with it off.
+    let headroom: Float
     // GAMUT_TO_OUTPUT constants.
     let gamutToOutput: simd_float3x3
 
     var yuvToRGB: simd_float4x4 { selection.yuvToRGB }
-    // Plane policy for binding: 10-bit biplanar buffers as r16Unorm/rg16Unorm instead of the *_sRGB private format.
-    var explicitPlanes: Bool { hdrPQ }
+    var encodingGamma: Float { stream.encodingGamma }
 
-    init(selection: ColourSelection, planeBitDepth: Int?, hdrEnabled: Bool, realityKit: Bool) {
+    init(selection: ColourSelection, planeBitDepth: Int?, stream: StreamContext, realityKit: Bool) {
+        self.stream = stream
         self.selection = selection
-        let pq = hdrEnabled && selection.isPQ
-        pqRefused = pq && planeBitDepth != 10
-        hdrPQ = pq && !pqRefused
-        // Without the HDR path: the previous SDR constants exactly (RealityKit never set a gamut, and PQ/HLG streams
-        // were not converted).
-        if hdrPQ || (!realityKit && !selection.isPQ) {
+        if selection.isPQ {
+            if let bits = planeBitDepth {
+                binding = .explicitPlanes(bitDepth: bits)
+            } else {
+                binding = .drop
+            }
+            hdrPQ = planeBitDepth != nil
+            dropFrames = planeBitDepth == nil
+            lowPrecisionPQ = planeBitDepth == 8
+            // BT.2020 -> Display P3 on both renderers.
             gamutToOutput = selection.sourceToOutput
         } else {
-            gamutToOutput = matrix_identity_float3x3
+            binding = .decoderDefault
+            hdrPQ = false
+            dropFrames = false
+            lowPrecisionPQ = false
+            // SDR: the previous constants exactly (RealityKit never set a gamut).
+            gamutToOutput = realityKit ? matrix_identity_float3x3 : selection.sourceToOutput
         }
+        headroom = stream.hdrEnabled ? stream.headroom : 1
     }
 }
 
-// Video pipelines published with the colour state they were built for (decision 63c (4)). A frame draws only with
-// pipelines built for its own state; a build for a state no longer requested is dropped.
-final class VideoPipelineSlot<Pipelines> {
+// The current stream and its generation (decision 63e (2), (3); the decision-61 ControllerInputGate pattern): one lock,
+// a generation bumped at every stream start, and the stream's immutable context with its payload (the Renderer's
+// foveation). VideoPipelineSlot runs every operation under the same lock, so a pipeline build's inputs come from one
+// generation and a build whose generation is stale is discarded. beforeLock/inLock are test seams called with the
+// entry name just before and just after the lock is taken.
+final class VideoStreamGate<Payload> {
     private let lock = NSLock()
+    private let beforeLock: ((String) -> Void)?
+    private let inLock: ((String) -> Void)?
+    private var generation: UInt64 = 0
+    private var stream: (context: StreamContext, payload: Payload)?
+
+    init(beforeLock: ((String) -> Void)? = nil, inLock: ((String) -> Void)? = nil) {
+        self.beforeLock = beforeLock
+        self.inLock = inLock
+    }
+
+    func locked<T>(_ entry: String, _ body: () -> T) -> T {
+        beforeLock?(entry)
+        lock.lock()
+        defer { lock.unlock() }
+        inLock?(entry)
+        return body()
+    }
+
+    // STREAMING_STARTED: captures the stream's inputs once.
+    @discardableResult
+    func streamStarted(hdrEnabled: Bool, headroom: Float, output: ColourOutput, encodingGamma: Float, payload: Payload) -> StreamContext {
+        locked("streamStarted") {
+            generation += 1
+            let context = StreamContext(generation: generation, hdrEnabled: hdrEnabled, headroom: headroom, output: output, encodingGamma: encodingGamma)
+            stream = (context, payload)
+            return context
+        }
+    }
+
+    func streamStopped() {
+        locked("streamStopped") { stream = nil }
+    }
+
+    var currentStream: StreamContext? {
+        locked("currentStream") { stream?.context }
+    }
+
+    // Only inside locked(_:_:).
+    var currentLocked: (context: StreamContext, payload: Payload)? { stream }
+}
+
+// Video pipelines published with the colour state, and so the stream generation, they were built for (decisions 63c
+// (4), 63e (3)). A frame draws only with pipelines built for its own state on the current generation; a build for a
+// state no longer requested, or for a stream that has since stopped or restarted, is discarded, never published.
+final class VideoPipelineSlot<Payload, Pipelines> {
+    private let gate: VideoStreamGate<Payload>
     private var requested: StreamColourState?
     private var published: (colour: StreamColourState, pipelines: Pipelines)?
 
-    var requestedColour: StreamColourState? { lock.withLock { requested } }
+    init(gate: VideoStreamGate<Payload>) {
+        self.gate = gate
+    }
 
-    // Records the state the next build uses; true when it changed (the caller rebuilds).
+    private func isCurrent(_ colour: StreamColourState) -> Bool {
+        gate.currentLocked?.context.generation == colour.stream.generation
+    }
+
+    // Records the state the next build uses; true when it changed (the caller rebuilds). A stale-generation frame
+    // never requests a build.
     func request(_ colour: StreamColourState) -> Bool {
-        lock.withLock {
-            if requested == colour { return false }
+        gate.locked("request") {
+            guard isCurrent(colour), requested != colour else { return false }
             requested = colour
             return true
         }
     }
 
+    // Everything a build needs, from one generation: the requested colour state (with its stream's gamma and
+    // headroom) and that stream's payload. nil when nothing is requested for the current stream.
+    func buildInputs() -> (colour: StreamColourState, payload: Payload)? {
+        gate.locked("buildInputs") {
+            guard let requested, isCurrent(requested), let current = gate.currentLocked else { return nil }
+            return (requested, current.payload)
+        }
+    }
+
     func publish(_ pipelines: Pipelines, builtFor colour: StreamColourState) -> Bool {
-        lock.withLock {
-            guard requested == colour else { return false }
+        gate.locked("publish") {
+            guard isCurrent(colour), requested == colour else { return false }
             published = (colour, pipelines)
             return true
         }
     }
 
     func pipelines(for colour: StreamColourState) -> Pipelines? {
-        lock.withLock { published?.colour == colour ? published?.pipelines : nil }
+        gate.locked("pipelines") {
+            guard isCurrent(colour), let published, published.colour == colour else { return nil }
+            return published.pipelines
+        }
     }
 }
 

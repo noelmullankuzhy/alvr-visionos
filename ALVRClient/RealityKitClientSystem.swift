@@ -1525,7 +1525,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             defer { nalViewsPtr.deallocate() }
             alvr_report_compositor_start(queuedFrame!.timestamp, nalViewsPtr)
 
-            queuedFrame = QueuedFrame(imageBuffer: queuedFrame!.imageBuffer, timestamp: queuedFrame!.timestamp, viewParamsValid: true, viewParams: [nalViewsPtr[0], nalViewsPtr[1]], videoFormat: queuedFrame!.videoFormat)
+            queuedFrame = QueuedFrame(imageBuffer: queuedFrame!.imageBuffer, timestamp: queuedFrame!.timestamp, viewParamsValid: true, viewParams: [nalViewsPtr[0], nalViewsPtr[1]], videoFormat: queuedFrame!.videoFormat, stream: queuedFrame!.stream)
         }
 
         //print(queuedFrame, EventHandler.shared.alvrInitialized, streamingActiveForFrame)
@@ -1558,9 +1558,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             }
             
             let settings = ALVRClientApp.gStore.settings
-            if EventHandler.shared.encodingGamma != renderer.encodingGamma {
-                needsPipelineRebuild = true
-            }
+            // Encoding gamma travels with the stream's colour state (a new stream is a new state, so it rebuilds below).
             
             /*if currentSetRenderScale != realityKitRenderScale {
                 currentSetRenderScale = realityKitRenderScale
