@@ -13,7 +13,7 @@ private let leftEye = CornerTangents(left: 1.394, right: 1.10, bottom: 1.292, to
 private let cantedEye = CornerTangents(left: 0.80, right: 1.70, bottom: 1.40, top: 0.95)
 
 private func testSpokes() {
-    expectEqual(CornerChart.ringPercents, [100, 98, 96, 94, 92, 90, 88, 85, 80, 75], "ring set")
+    expectEqual(CornerChart.ringPercents, [100, 95, 90, 85, 80, 75, 70, 65, 60, 55], "ring set: 100 to 55 in 5% steps (decision 65c)")
     expectEqual(CornerSpokes.count, 16, "16 spokes")
     expectEqual((0..<16).map(CornerSpokes.degText), ["0", "22.5", "45", "67.5", "90", "112.5", "135", "157.5", "180",
                                                      "202.5", "225", "247.5", "270", "292.5", "315", "337.5"], "every 22.5 degrees from right, CCW")
@@ -77,10 +77,22 @@ private func testLabels() {
         for i in 0..<labels.count { for j in (i + 1)..<labels.count where overlaps(labels[i].rect, labels[j].rect) { clashes += 1 } }
         expectEqual(clashes, 0, "no two labels overlap")
         let top100 = labels.first { $0.spoke == 4 && $0.pct == 100 }!.rect
-        let top75 = labels.first { $0.spoke == 4 && $0.pct == 75 }!.rect
-        expect(top75.y1 - top75.y0 > top100.y1 - top100.y0, "inner labels larger")
+        let top55 = labels.first { $0.spoke == 4 && $0.pct == 55 }!.rect
+        expect(top55.y1 - top55.y0 > top100.y1 - top100.y0, "innermost labels larger")
+        // The eye glyph and the status below it stay clear of every label and every ring stroke, down to the 55 ring.
+        let g = CornerChart.glyphRect(t, widthPx: w, heightPx: h)
+        let status = CornerChart.statusRect(t, "L 337.5 55", widthPx: w, heightPx: h)
+        expect(!overlaps(g, status), "status clear of the glyph")
+        for label in labels {
+            expect(!overlaps(g, label.rect), "glyph clear of label \(label.pct) spoke \(label.spoke)")
+            expect(!overlaps(status, label.rect), "status clear of label \(label.pct) spoke \(label.spoke)")
+        }
+        for pct in CornerChart.ringPercents {
+            let r = CornerChart.ringRect(t, pct: pct)
+            expect(inside(g, r) && inside(status, r), "glyph and status inside ring \(pct), clear of its line")
+        }
         for k in 0..<16 {
-            for pct in [100, 75] {
+            for pct in [100, 55] {
                 let quads = CornerChart.geometry(t, eye: .left, widthPx: w, heightPx: h, selected: (k, pct), status: "L 22.5 94")
                 expect(quads.allSatisfy { inside($0.rect, drawable) }, "all chart geometry inside the drawable, spoke \(k) \(pct) selected")
                 expect(quads.count > labels.count, "rings, labels, spokes, selection and status")
@@ -97,15 +109,17 @@ private func testSession() {
     expectEqual(s.pct, 100, "starts at the drawable edge")
     expect(s.apply(.outward).isEmpty && s.pct == 100, "outermost clamps")
     _ = s.apply(.inward); _ = s.apply(.inward); _ = s.apply(.inward)
-    expectEqual(s.pct, 94, "three steps in")
-    expectEqual(s.apply(.record), [.mark(.left, 0, 94)], "record logs the mark")
+    expectEqual(s.pct, 85, "three steps in")
+    expectEqual(s.apply(.record), [.mark(.left, 0, 85)], "record logs the mark")
     expectEqual(s.spoke, 1, "then the next spoke")
-    expectEqual(s.statusText, "L 22.5 94", "status: eye, spoke degrees, ring")
+    expectEqual(s.statusText, "L 22.5 85", "status: eye, spoke degrees, ring")
     _ = s.apply(.back)
     expectEqual(s.spoke, 0, "back to re-record")
     _ = s.apply(.inward)
     _ = s.apply(.record)
-    expectEqual(s.marks[.left]?[0], 92, "re-recorded mark wins")
+    expectEqual(s.marks[.left]?[0], 80, "re-recorded mark wins")
+    for _ in 0..<20 { _ = s.apply(.inward) }
+    expectEqual(s.pct, 55, "innermost ring clamps at 55")
     var events: [CornerChartSession.Event] = []
     for _ in 1..<CornerSpokes.count { events += s.apply(.record) }
     expectEqual(events.suffix(2), [.summary(.left), .done], "after L the summary, left only ends")
@@ -162,8 +176,16 @@ private func testShape() {
     expect(near(wide.axisR, 0.9) && near(wide.rectR, (1 + 0.64).squareRoot()), "axes 1 / 0.8: rect corner sqrt(1 + 0.64)")
     expect(near(wide.ellipseR, 1 / ((1 + 1 / 0.64) / 2).squareRoot()), "ellipse radius at the diagonal")
     expect(CornerShape.classify([0: 100, 4: 100]) == nil, "needs the 4 axis and 4 diagonal spokes")
-    expect(!CornerShape.classify(axesAnd(diag: 80))!.diagFloor && CornerShape.classify(axesAnd(diag: 75))!.diagFloor,
-           "a diagonal at the innermost ring is flagged (the true edge may be further in)")
+    // Decision 65c: rings now reach 55, below an ellipse's ~71% diagonal, so the ellipse case is measurable.
+    let at70 = CornerShape.classify(axesAnd(diag: 70))!
+    expectEqual(at70.label, "ellipse", "diagonal marks at the 70 ring: ellipse")
+    expect(!at70.diagFloor, "70 is above the floor")
+    expectEqual(CornerShape.classify(axesAnd(diag: 65, axis: 95))!.label, "ellipse", "axes at 95, diagonals at 65: ellipse")
+    expectEqual(CornerShape.classify(axesAnd(diag: 75))!.label, "rounded", "75: between the ellipse and the rectangle")
+    expectEqual(CornerShape.classify(axesAnd(diag: 95))!.label, "rectangle", "95: rectangle")
+    expect(!CornerShape.classify(axesAnd(diag: 75))!.diagFloor && !CornerShape.classify(axesAnd(diag: 60))!.diagFloor,
+           "75 and 60 are no longer the floor")
+    expect(CornerShape.classify(axesAnd(diag: 55))!.diagFloor, "a diagonal at the innermost ring (55) is flagged (the true edge may be further in)")
 }
 
 private func testLogFormats() {
@@ -212,7 +234,7 @@ private func testEyeColours() {
     for (t, w, h) in [(leftEye, 1888.0, 1792.0), (cantedEye, 2400.0, 2200.0)] {
         for eye in [CornerEye.left, .right] {
             let other: CornerEye = eye == .left ? .right : .left
-            let quads = CornerChart.geometry(t, eye: eye, widthPx: w, heightPx: h, selected: (3, 94), status: "\(eye.rawValue) 67.5 94")
+            let quads = CornerChart.geometry(t, eye: eye, widthPx: w, heightPx: h, selected: (3, 95), status: "\(eye.rawValue) 67.5 95")
             let tinted = quads.filter { $0.color != white && $0.color != black }
             expect(!tinted.isEmpty, "\(eye) has tinted geometry")
             expect(tinted.allSatisfy { $0.color == eye.color || $0.color == eye.dimColor }, "\(eye): rings, numbers and spokes in its colour")
@@ -225,7 +247,7 @@ private func testEyeColours() {
             let c = t.ndc(x: 0, y: 0)
             expect(near((g.x0 + g.x1) / 2, c.x, 1e-12) && near((g.y0 + g.y1) / 2, c.y, 1e-12), "\(eye): glyph centred on the tangent origin")
             expect(inside(g, drawable), "\(eye): glyph inside the drawable")
-            expect(inside(g, CornerChart.ringRect(t, pct: 75)), "\(eye): glyph inside the 75 ring")
+            expect(inside(g, CornerChart.ringRect(t, pct: 55)), "\(eye): glyph inside the 55 ring")
             expect((g.y1 - g.y0) * h / 2 >= 100, "\(eye): glyph large (>= 100 px)")
             let glyph = CornerChart.eyeGlyph(eye, t, widthPx: w, heightPx: h)
             expect(!glyph.isEmpty && glyph.allSatisfy { inside($0.rect, g) && $0.color == eye.color }, "\(eye): glyph strokes inside its box, in its colour")
