@@ -231,6 +231,7 @@ class EventHandler: ObservableObject {
     // Stops the EventHandler thread stream.
     func stop() {
         print("EventHandler.Stop")
+        WorldTracker.inputGate.streamStopped()
         StreamTelemetry.shared.streamingStopped()
         streamingActive = false
         vtDecompressionSession = nil
@@ -874,8 +875,11 @@ class EventHandler: ObservableObject {
                     sendBootstrapTrackingIfNeeded()
                 }
                 Settings.clearSettingsCache()
+                // Choose this stream's interaction profile once from the emulation mode (fixed for the stream), declare it, then open the gate.
+                WorldTracker.shared.startInputStream()
             case ALVR_EVENT_STREAMING_STOPPED.rawValue:
                 print("streaming stopped")
+                WorldTracker.inputGate.streamStopped()
                 if streamingActive {
                     streamingActive = false
                     stop()

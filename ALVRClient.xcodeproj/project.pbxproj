@@ -50,6 +50,9 @@
 		E7A11A0200000000000000A2 /* InputTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A11A0100000000000000A1 /* InputTypes.swift */; };
 		E7A11A0400000000000000A4 /* SteamControllerDevice.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A11A0300000000000000A3 /* SteamControllerDevice.swift */; };
 		E7A11A0700000000000000A7 /* InteractionProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A11A0600000000000000A6 /* InteractionProfile.swift */; };
+		B5A2C0D200000000000000B2 /* PSVR2SenseInputs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5A2C0D100000000000000B1 /* PSVR2SenseInputs.swift */; };
+		B5A2C0D400000000000000B4 /* ControllerInputGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5A2C0D300000000000000B3 /* ControllerInputGate.swift */; };
+		B5A2C0D600000000000000B6 /* ControllerButtonSources.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5A2C0D500000000000000B5 /* ControllerButtonSources.swift */; };
 		E7A11A0900000000000000A9 /* InputSink.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A11A0800000000000000A8 /* InputSink.swift */; };
 		E7A11A0B00000000000000AB /* InputDebugView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A11A0A00000000000000AA /* InputDebugView.swift */; };
 		E7A11A0D00000000000000AD /* IbexModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7A11A0C00000000000000AC /* IbexModel.swift */; };
@@ -153,6 +156,9 @@
 		E7A11A0100000000000000A1 /* InputTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputTypes.swift; sourceTree = "<group>"; };
 		E7A11A0300000000000000A3 /* SteamControllerDevice.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteamControllerDevice.swift; sourceTree = "<group>"; };
 		E7A11A0600000000000000A6 /* InteractionProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InteractionProfile.swift; sourceTree = "<group>"; };
+		B5A2C0D100000000000000B1 /* PSVR2SenseInputs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PSVR2SenseInputs.swift; sourceTree = "<group>"; };
+		B5A2C0D300000000000000B3 /* ControllerInputGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControllerInputGate.swift; sourceTree = "<group>"; };
+		B5A2C0D500000000000000B5 /* ControllerButtonSources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControllerButtonSources.swift; sourceTree = "<group>"; };
 		E7A11A0800000000000000A8 /* InputSink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSink.swift; sourceTree = "<group>"; };
 		E7A11A0A00000000000000AA /* InputDebugView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputDebugView.swift; sourceTree = "<group>"; };
 		E7A11A0C00000000000000AC /* IbexModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IbexModel.swift; sourceTree = "<group>"; };
@@ -324,6 +330,9 @@
 				E7A11A0100000000000000A1 /* InputTypes.swift */,
 				E7A11A0300000000000000A3 /* SteamControllerDevice.swift */,
 				E7A11A0600000000000000A6 /* InteractionProfile.swift */,
+				B5A2C0D100000000000000B1 /* PSVR2SenseInputs.swift */,
+				B5A2C0D300000000000000B3 /* ControllerInputGate.swift */,
+				B5A2C0D500000000000000B5 /* ControllerButtonSources.swift */,
 				E7A11A0800000000000000A8 /* InputSink.swift */,
 				E7A11A0A00000000000000AA /* InputDebugView.swift */,
 				E7A11A0C00000000000000AC /* IbexModel.swift */,
@@ -479,6 +488,9 @@
 				E7A11A0200000000000000A2 /* InputTypes.swift in Sources */,
 				E7A11A0400000000000000A4 /* SteamControllerDevice.swift in Sources */,
 				E7A11A0700000000000000A7 /* InteractionProfile.swift in Sources */,
+				B5A2C0D200000000000000B2 /* PSVR2SenseInputs.swift in Sources */,
+				B5A2C0D400000000000000B4 /* ControllerInputGate.swift in Sources */,
+				B5A2C0D600000000000000B6 /* ControllerButtonSources.swift in Sources */,
 				E7A11A0900000000000000A9 /* InputSink.swift in Sources */,
 				E7A11A0B00000000000000AB /* InputDebugView.swift in Sources */,
 				E7A11A0D00000000000000AD /* IbexModel.swift in Sources */,
