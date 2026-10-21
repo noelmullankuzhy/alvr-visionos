@@ -72,8 +72,10 @@ final class EDRRenderer {
     let badge: DiagEyeRenderer?
     let runID = EDRSession.shared.currentRun
     private var anchorMissingLogged = false
-    init(_ layer: LayerRenderer) throws {
+    let immersion: String
+    init(_ layer: LayerRenderer, immersion: String) throws {
         self.layer = layer
+        self.immersion = immersion
         badge = Diag.isOn ? DiagEyeRenderer(layer) : nil
         queue = layer.device.makeCommandQueue()!
         drawing = try EDRDrawing(device: layer.device, library: layer.device.makeDefaultLibrary()!)
@@ -111,15 +113,20 @@ final class EDRRenderer {
         // shown on device (21 Oct). The patches are drawn in view space, so the current pose keeps them head-locked.
         let presentation = LayerRenderer.Clock.Instant.epoch.duration(to: timing.presentationTime).timeInterval
         let anchor = WorldTracker.shared.worldTracking.queryDeviceAnchor(atTimestamp: presentation)
-        if anchor == nil, !anchorMissingLogged { anchorMissingLogged = true; Diag.log("edr", ["device_anchor": "missing"]) }
-        let patches = EDRSession.shared.frame()
+        if anchor == nil, !anchorMissingLogged { anchorMissingLogged = true; Diag.log("edr", ["device_anchor": "missing", "immersion": immersion]) }
+        let snapshot = EDRSession.shared.frame()
         for drawable in drawables {
             drawable.deviceAnchor = anchor
             for (index, view) in drawable.views.enumerated() {
                 let map = view.textureMap
+                let projection = drawable.computeProjection(viewIndex: index)
+                let centre = EDRView.centre(projectionX: Double(projection.columns.2.x),
+                                            projectionY: Double(projection.columns.2.y))
+                let patches = snapshot.patches(centre: centre, aspect: map.viewport.width / map.viewport.height,
+                                               pixelHeight: map.viewport.height)
                 drawing.encode(buffer: buffer, colour: drawable.colorTextures[map.textureIndex],
                                depth: drawable.depthTextures[map.textureIndex], slice: map.sliceIndex,
-                               viewport: map.viewport, patches: patches, projection: drawable.computeProjection(viewIndex: index))
+                               viewport: map.viewport, patches: patches, projection: projection)
             }
             badge?.encode(buffer: buffer, drawable: drawable, mode: "edr_ramp", generation: nil)
             drawable.encodePresent(commandBuffer: buffer)

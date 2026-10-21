@@ -77,6 +77,13 @@ struct PQImmersiveView: View {
     }
 }
 
+// Shared by the controls and the EDR scene so the selected style and log attribution agree.
+@MainActor final class EDRPresentation: ObservableObject {
+    static let shared = EDRPresentation()
+    @Published var immersion = EDRImmersion.defaultStyle
+    var style: ImmersionStyle { immersion == .full ? .full : .mixed }
+}
+
 struct BrightnessDiagnostics: View {
     var body: some View {
         if Diag.isOn { BrightnessControls() }
@@ -85,14 +92,22 @@ struct BrightnessDiagnostics: View {
 
 private struct BrightnessControls: View {
     @StateObject private var pq = PQDiagnostic.shared
+    @StateObject private var edr = EDRPresentation.shared
     @Environment(\.openImmersiveSpace) private var openSpace
     @Environment(\.dismissImmersiveSpace) private var dismissSpace
     @State private var layout = EDRLayout.onePercent
+    @State private var fine = false
+    @State private var gridRange = EDRGridRange.fine
+    @State private var mirror = false
     @State private var automatic = false
     @State private var sustained = false
     @State private var busy = false
     @State private var error = ""
-    private func configure() { EDRSession.shared.configure(layout: layout, automatic: automatic, sustained: sustained) }
+    private func configure() {
+        EDRSession.shared.setImmersion(edr.immersion.rawValue)
+        EDRSession.shared.configure(layout: layout, automatic: automatic, sustained: sustained,
+                                    fine: fine, gridRange: gridRange, mirror: mirror)
+    }
     private func enter(_ id: String) {
         busy = true
         Task {
@@ -114,17 +129,47 @@ private struct BrightnessControls: View {
     var body: some View {
         VStack(spacing: 12) {
             Text("EDR ramp").font(.title2)
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                Text(EDRSession.shared.currentValue.map { "Submitted EDR value: \($0)" } ?? "Start the ramp to begin")
+            Picker("Immersion", selection: $edr.immersion) {
+                Text("Full").tag(EDRImmersion.full)
+                Text("Mixed").tag(EDRImmersion.mixed)
+            }.disabled(pq.space != nil)
+            if layout.gridArea == nil {
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    Text(EDRSession.shared.currentValue.map { "Submitted EDR value: \($0)" } ?? "Start the ramp to begin")
+                }
             }
             Picker("Layout", selection: $layout) { ForEach(EDRLayout.allCases, id: \.self) { Text($0.rawValue) } }
-            Toggle("Automatic steps every 4 seconds", isOn: $automatic)
-            Toggle("Sustained: hold each automatic step for 60 seconds", isOn: $sustained)
+            if layout.gridArea != nil {
+                Picker("Grid range", selection: $gridRange) {
+                    ForEach(EDRGridRange.allCases, id: \.self) { Text($0.rawValue) }
+                }
+                Toggle("Mirror", isOn: $mirror)
+                Text("Close one eye. Compare neighbouring cells; rows A–E, columns 1–5.").font(.caption)
+            } else {
+                Picker("Steps", selection: $fine) {
+                    Text("Default").tag(false)
+                    Text("Fine").tag(true)
+                }
+            }
+            if layout.gridArea == nil {
+                Toggle("Automatic steps every 4 seconds", isOn: $automatic)
+                Toggle("Sustained: hold each automatic step for 60 seconds", isOn: $sustained)
+            }
             HStack {
                 Button("EDR ramp") { enter("EDRDiagnostic") }
-                Button("Next (or pinch the ramp)") { EDRSession.shared.next() }.disabled(pq.space != "EDRDiagnostic")
+                Button("Back") { EDRSession.shared.back() }.disabled(pq.space != "EDRDiagnostic" || layout.gridArea != nil)
+                Button("Next (or pinch the ramp)") { EDRSession.shared.next() }.disabled(pq.space != "EDRDiagnostic" || layout.gridArea != nil)
             }
-            Button("Brightness stopped increasing here") { EDRSession.shared.mark() }.disabled(pq.space != "EDRDiagnostic")
+            if layout.isComparison {
+                HStack {
+                    Button("Right brighter") { EDRSession.shared.answer(.brighter) }
+                    Button("Same") { EDRSession.shared.answer(.same) }
+                    Button("Right darker") { EDRSession.shared.answer(.darker) }
+                }.disabled(pq.space != "EDRDiagnostic")
+                Text("Close one eye. Compare right with the fixed 1.0 reference on the left; answer after each change.").font(.caption)
+            } else if layout.gridArea == nil {
+                Button("Brightness stopped increasing here") { EDRSession.shared.mark() }.disabled(pq.space != "EDRDiagnostic")
+            }
             Divider()
             Text("PQ player").font(.title2)
             Picker("Clip", selection: $pq.selected) {
@@ -145,7 +190,11 @@ private struct BrightnessControls: View {
         }
         .padding().disabled(busy)
         .onAppear { pq.refresh(); configure() }
+        .onChange(of: edr.immersion) { configure() }
         .onChange(of: layout) { configure() }
+        .onChange(of: fine) { configure() }
+        .onChange(of: gridRange) { configure() }
+        .onChange(of: mirror) { configure() }
         .onChange(of: automatic) { configure() }
         .onChange(of: sustained) { configure() }
         .onDisappear { pq.stop(); Task { if pq.space != nil { await dismissSpace(); pq.space = nil } } }

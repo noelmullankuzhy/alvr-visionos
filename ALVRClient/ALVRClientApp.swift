@@ -53,6 +53,7 @@ struct ALVRClientApp: App {
     @Environment(\.openWindow) var openWindow
     @Environment(\.dismissWindow) var dismissWindow
     static var gStore = GlobalSettingsStore()
+    @ObservedObject private var edrPresentation = EDRPresentation.shared
     // Triggers body re-evaluation, and the .upper​Limb​Visibility modifiers will pick up the new show​Hands​Overlaid or progressive value live
     @ObservedObject private var observedGStore = ALVRClientApp.gStore
 
@@ -217,11 +218,12 @@ struct ALVRClientApp: App {
         ImmersiveSpace(id: "EDRDiagnostic") {
             CompositorLayer(configuration: EDRConfiguration()) { layer in
                 guard Diag.isOn else { return }
-                do { try EDRRenderer(layer).start() }
-                catch { Diag.log("edr", ["error": error.localizedDescription]) }
+                EDRSession.shared.setImmersion(edrPresentation.immersion.rawValue)
+                do { try EDRRenderer(layer, immersion: edrPresentation.immersion.rawValue).start() }
+                catch { Diag.log("edr", ["error": error.localizedDescription, "immersion": edrPresentation.immersion.rawValue]) }
             }
         }
-        .immersionStyle(selection: .constant(.mixed), in: .mixed)
+        .immersionStyle(selection: .constant(edrPresentation.style), in: .full, .mixed)
         .upperLimbVisibility(.hidden)
 
         ImmersiveSpace(id: "PQDiagnostic") {
