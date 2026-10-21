@@ -7,9 +7,16 @@ import Foundation
 
     static func main() throws {
         // Setting: simulator builds default on, device off (macOS test builds are not the simulator).
-        expectEqual(GlobalSettings().eyeDecodeWindows, GlobalSettings.eyeDecodeWindowsDefault, "default follows the build")
+        // Literal expectation, not the constant against itself: on for the simulator, off otherwise.
+#if targetEnvironment(simulator)
+        let expectedDefault = true
+#else
+        let expectedDefault = false
+#endif
+        expectEqual(GlobalSettings.eyeDecodeWindowsDefault, expectedDefault, "default is on only for the simulator")
+        expectEqual(GlobalSettings().eyeDecodeWindows, expectedDefault, "new settings get the default")
         let legacy = try JSONDecoder().decode(GlobalSettings.self, from: Data("{\"hdrPQ\":true}".utf8))
-        expectEqual(legacy.eyeDecodeWindows, GlobalSettings.eyeDecodeWindowsDefault, "legacy file gets the default")
+        expectEqual(legacy.eyeDecodeWindows, expectedDefault, "legacy file gets the default")
         for value in [true, false] {
             var s = GlobalSettings()
             s.eyeDecodeWindows = value

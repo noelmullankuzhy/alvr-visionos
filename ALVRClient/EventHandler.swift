@@ -617,7 +617,6 @@ class EventHandler: ObservableObject {
 
 
                     StreamTelemetry.shared.recordFrameQueued(timestampNs: timestamp)
-                    EyeDecodeWindows.shared.decoded(timestampNs: timestamp)
                     frameQueueLastTimestamp = timestamp
                     frameQueueLastImageBuffer = imageBuffer
                     timeLastFrameSent = CACurrentMediaTime()
@@ -632,6 +631,8 @@ class EventHandler: ObservableObject {
                 }
 
                 objc_sync_exit(frameQueueLock)
+                // After the lock: it takes its own lock and may write the once-a-second log line.
+                EyeDecodeWindows.shared.decoded(timestampNs: timestamp)
                 //print("End VT callback")
             }
         } else {

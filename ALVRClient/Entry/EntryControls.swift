@@ -168,7 +168,8 @@ struct EntryControls: View {
                     VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
                     if gStore.settings.eyeDecodeWindows && eventHandler.streamingActive {
                         EyeDecodeWindows.shared.start()
-                        EyeDecodeWindows.windowIDs.forEach { openWindow(id: $0) }
+                        // Right opens from the Left window's onAppear, so it can be placed beside it.
+                        openWindow(id: EyeDecodeWindows.windowIDs[0])
                     }
                     if gStore.settings.dismissWindowOnEnter {
                         dismissWindow(id: "Entry")

@@ -25,6 +25,7 @@ final class EyeDecodeWindows: ObservableObject {
 
     private let lock = NSLock()
     private var running = false
+    private var rightWindowOpened = false
     private var counters = [EyeDecodeCounters(frameIntervalNs: 11_111_111), EyeDecodeCounters(frameIntervalNs: 11_111_111)]
     private var gate = EyeCopyGate(minIntervalNs: 66_000_000)
     private var shown = [0, 0]
@@ -39,6 +40,7 @@ final class EyeDecodeWindows: ObservableObject {
         lock.lock()
         if !running {
             running = true
+            rightWindowOpened = false
             let interval = UInt64(1e9 / (refreshRate >= 1 ? refreshRate : 90))
             counters = [EyeDecodeCounters(frameIntervalNs: interval), EyeDecodeCounters(frameIntervalNs: interval)]
             gate = EyeCopyGate(minIntervalNs: 66_000_000)
@@ -51,11 +53,22 @@ final class EyeDecodeWindows: ObservableObject {
     func stop() {
         lock.lock()
         running = false
+        rightWindowOpened = false
         lock.unlock()
         DispatchQueue.main.async {
             self.active = false
             self.models.forEach { $0.reset() }
         }
+    }
+
+    // The Left window asks once per stream to open the Right one, after it has appeared, so the Right window can be
+    // placed relative to it.
+    func claimRightWindow() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard running, !rightWindowOpened else { return false }
+        rightWindowOpened = true
+        return true
     }
 
     // VT callback, every decoded frame. Both eyes come from one side-by-side buffer, so both see this timestamp.
@@ -77,7 +90,10 @@ final class EyeDecodeWindows: ObservableObject {
         lock.lock()
         let due = running && gate.admit(nowNs: Self.nowNs())
         lock.unlock()
-        guard due, copyAvailable.wait(timeout: .now()) == .success else { return }
+        guard due else { return }
+        // Checked per copy: turning the setting off mid-stream stops the copies and closes the windows now.
+        guard ALVRClientApp.gStore.settings.eyeDecodeWindows else { stop(); return }
+        guard copyAvailable.wait(timeout: .now()) == .success else { return }
         copyQueue.async { [self] in
             let eyes = Self.sample(pixelBuffer: pixelBuffer, colour: colour)
             let format = ColourPipeline.fourCC(CVPixelBufferGetPixelFormatType(pixelBuffer))
@@ -102,6 +118,7 @@ final class EyeDecodeWindows: ObservableObject {
                         + String(format: "decoded %ld (%.1f/s)  unique %ld (%.1f/s)  repeats %ld\n", c.decoded, c.decodedFps(nowNs: now), c.unique, c.uniqueFps(nowNs: now), c.repeats)
                         + String(format: "gaps %ld (%ld missing)  stalls %ld  max %.0f nits\n", c.gaps, c.missing, c.stalls, c.maxNits)
                         + (eyes == nil ? "unsupported pixel format \(format)" : "raw decoded half, foveation-warped | \(mapping)")
+                        + "\nL and R counters always match: both eyes come from one side-by-side decoded buffer; only the images can show a one-eye fault."
                         + "\n" + EyeDecodeCounters.definitions)
                 }
             }
@@ -198,6 +215,7 @@ struct EyeWindowView: View {
     @ObservedObject private var hub = EyeDecodeWindows.shared
     @ObservedObject private var model: EyeWindowModel
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
 
     init(eye: Int) {
         self.eye = eye
@@ -221,7 +239,13 @@ struct EyeWindowView: View {
         .padding()
         .frame(minWidth: 480, minHeight: 560)
         // Restored after a relaunch with no stream, or the stream ended: close.
-        .onAppear { if !hub.active { dismissWindow(id: EyeDecodeWindows.windowIDs[eye]) } }
+        .onAppear {
+            if !hub.active {
+                dismissWindow(id: EyeDecodeWindows.windowIDs[eye])
+            } else if eye == 0, hub.claimRightWindow() {
+                openWindow(id: EyeDecodeWindows.windowIDs[1])
+            }
+        }
         .onChange(of: hub.active) { _, active in
             if !active { dismissWindow(id: EyeDecodeWindows.windowIDs[eye]) }
         }
@@ -230,18 +254,14 @@ struct EyeWindowView: View {
 
 extension Scene {
     // Both windows fully visible: the Left window opens at the default spot, the Right one on its trailing side.
-    // defaultWindowPlacement needs visionOS 2; on 1.x the windows overlap as before.
-    @SceneBuilder func eyeWindowPlacement(trailingOf otherID: String?) -> some Scene {
-        if #available(visionOS 2.0, *) {
-            self.defaultSize(width: 520, height: 640)
-                .defaultWindowPlacement { _, context in
-                    if let otherID = otherID, let other = context.windows.first(where: { $0.id == otherID }) {
-                        return WindowPlacement(.trailing(other))
-                    }
-                    return WindowPlacement()
+    // The app target deploys visionOS 2.1, so defaultWindowPlacement needs no availability check.
+    func eyeWindowPlacement(trailingOf otherID: String?) -> some Scene {
+        defaultSize(width: 520, height: 640)
+            .defaultWindowPlacement { _, context in
+                if let otherID = otherID, let other = context.windows.first(where: { $0.id == otherID }) {
+                    return WindowPlacement(.trailing(other))
                 }
-        } else {
-            self
-        }
+                return WindowPlacement()
+            }
     }
 }
