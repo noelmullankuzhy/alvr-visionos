@@ -8,10 +8,10 @@ import Foundation
                 var expected: Set<EDRControl> = layout.gridArea != nil ? [.gridOptions] : [.steps]
                 if running {
                     if layout.gridArea != nil { expected.insert(.gridHint) }
-                    else if layout.isComparison { expected.insert(.answers) }
+                    else if layout.isComparison { expected.formUnion([.answers, .navigation]) }
                     else { expected.formUnion([.navigation, .mark]) }
                 }
-                expectEqual(edrVisibleControls(layout: layout, running: running), expected, "only relevant EDR controls")
+                expectEqual(edrVisibleControls(layout: layout, running: running), expected, "only relevant EDR controls for \(layout.rawValue), running=\(running)")
             }
         }
         expectEqual(EDRStep.values, [0, 0.25, 0.5, 1, 1.25, 1.5, 1.75, 2, 2.5, 4], "M2 levels")
