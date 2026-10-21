@@ -242,6 +242,7 @@ class EventHandler: ObservableObject {
         WorldTracker.inputGate.streamStopped()
         EventHandler.videoStreams.streamStopped()
         StreamTelemetry.shared.streamingStopped()
+        EyeDecodeWindows.shared.stop()
         streamingActive = false
         vtDecompressionSession = nil
         videoFormat = nil
@@ -616,6 +617,7 @@ class EventHandler: ObservableObject {
 
 
                     StreamTelemetry.shared.recordFrameQueued(timestampNs: timestamp)
+                    EyeDecodeWindows.shared.decoded(timestampNs: timestamp)
                     frameQueueLastTimestamp = timestamp
                     frameQueueLastImageBuffer = imageBuffer
                     timeLastFrameSent = CACurrentMediaTime()
@@ -867,6 +869,7 @@ class EventHandler: ObservableObject {
                 enableHdr = alvrEvent.STREAMING_STARTED.enable_hdr
                 let started = alvrEvent.STREAMING_STARTED
                 StreamTelemetry.shared.streamingStarted(viewWidth: Int(started.view_width), viewHeight: Int(started.view_height), refreshRateHint: Double(started.refresh_rate_hint), encodingGamma: Double(started.encoding_gamma), enableFoveatedEncoding: started.enable_foveated_encoding, enableHdr: started.enable_hdr, forceFastSecretTextureFormats: forceFastSecretTextureFormats)
+                EyeDecodeWindows.shared.start(refreshRate: Double(started.refresh_rate_hint))
                 if !streamingActive {
                     streamEvent = alvrEvent
                     streamingActive = true

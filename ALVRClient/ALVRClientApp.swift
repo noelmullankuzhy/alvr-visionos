@@ -213,6 +213,9 @@ struct ALVRClientApp: App {
         }
         .windowResizability(.contentSize)
 
+        WindowGroup(EyeDecodeWindows.titles[0], id: EyeDecodeWindows.windowIDs[0]) { EyeWindowView(eye: 0) }
+        WindowGroup(EyeDecodeWindows.titles[1], id: EyeDecodeWindows.windowIDs[1]) { EyeWindowView(eye: 1) }
+
         WindowGroup(id: "BrightnessDiagnostics") {
             BrightnessDiagnostics()
         }

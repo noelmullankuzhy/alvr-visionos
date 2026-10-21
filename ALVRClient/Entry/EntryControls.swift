@@ -11,6 +11,7 @@ struct EntryControls: View {
     @Environment(\.openImmersiveSpace) private var openImmersiveSpace
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var eventHandler = EventHandler.shared
     @EnvironmentObject var gStore: GlobalSettingsStore
     
@@ -165,6 +166,10 @@ struct EntryControls: View {
                         await openImmersiveSpace(id: spaceID)
                     }
                     VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
+                    if gStore.settings.eyeDecodeWindows && eventHandler.streamingActive {
+                        EyeDecodeWindows.shared.start()
+                        EyeDecodeWindows.windowIDs.forEach { openWindow(id: $0) }
+                    }
                     if gStore.settings.dismissWindowOnEnter {
                         dismissWindow(id: "Entry")
                     }
