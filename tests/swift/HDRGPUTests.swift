@@ -124,8 +124,8 @@ enum HDRGPUTests {
             for (i, nits) in [100.0, 203.0, 1000.0].enumerated() {
                 expect(abs(Double(out[i].x) * 203 / nits - 1) < 0.01, "code \(codes[i].x) ~ \(nits) nits, got \(Double(out[i].x) * 203)")
             }
-            // At the assumed 2.0 headroom 1000 nits rolls off to 2 - 0.5 exp(-(4.946758 - 1.5) / 0.5) = 1.999491.
-            let rolled = gpu.run(codes: [codes[2], codes[1]], bits: 10, params: params(pqState(realityKit: realityKit, headroom: HDRPipeline.assumedHeadroom), realityKit: realityKit))
+            // At an explicit 2.0 headroom 1000 nits rolls off to 2 - 0.5 exp(-(4.946758 - 1.5) / 0.5) = 1.999491.
+            let rolled = gpu.run(codes: [codes[2], codes[1]], bits: 10, params: params(pqState(realityKit: realityKit, headroom: 2), realityKit: realityKit))
             expect(close(rolled[0], simd_float3(repeating: 1.999491), abs: 2e-4, rel: 0), "1000 nits at headroom 2 -> 1.999491, got \(rolled[0])")
             expect(close(rolled[1], simd_float3(repeating: 1.003463), abs: 1e-4, rel: 2e-3), "203 nits below the knee unchanged at headroom 2, got \(rolled[1])")
         }

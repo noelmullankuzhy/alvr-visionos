@@ -39,6 +39,8 @@ enum HDRPipelineTests {
         testRollOff()
         testSelection()
         testHeadroomDefault()
+        testDisplayReferenceWhite()
+        testImmersionOrdering()
         testStreamColourState()
         testEightBitPQRendersPQ()
         testSettingCapturedPerStream()
@@ -151,12 +153,51 @@ enum HDRPipelineTests {
         expect(!HDRPipeline.requiresExplicitPlanes(transfer: nil), "unsignalled keeps today's decoder output")
     }
 
-    // Decision 63c (2): assumed headroom 2.0 until the headset measures it; ALVRHDRHeadroom >= 1 overrides.
     static func testHeadroomDefault() {
-        expectEqual(HDRPipeline.assumedHeadroom, 2, "assumed EDR headroom")
-        expectEqual(HDRPipeline.headroom(defaultsValue: 0), 2, "unset ALVRHDRHeadroom -> assumed")
-        expectEqual(HDRPipeline.headroom(defaultsValue: 3.5), 3.5, "ALVRHDRHeadroom overrides")
-        expectEqual(HDRPipeline.headroom(defaultsValue: 0.5), 2, "ALVRHDRHeadroom below 1 ignored")
+        for full in [false, true] {
+            for value in [0.0, -1, 0.5, 1, 3.5] {
+                let expected: Float = value >= 1 ? Float(value) : (full ? 1.5 : 1)
+                expectEqual(HDRPipeline.headroom(defaultsValue: value, fullImmersion: full), expected, "headroom override=\(value) full=\(full)")
+            }
+        }
+        for x in stride(from: Float(0), through: 100, by: 0.001) {
+            let mapped = HDRPipeline.rollOff(x, headroom: 1.5)
+            expect(mapped <= 1.5, "measured ceiling")
+            if x <= 1.125 { expectEqual(mapped, x, "identity below measured knee") }
+        }
+        expectEqual(HDRPipeline.rollOff(1.125, headroom: 1.5), 1.125, "identity at measured knee")
+    }
+
+    static func testDisplayReferenceWhite() {
+        for value in [0.0, -1, 0.5, 1, 100, 203, 300] {
+            expectEqual(HDRPipeline.referenceWhiteNits(defaultsValue: value), value >= 1 ? value : 203, "reference-white override \(value)")
+        }
+        let gate = VideoStreamGate<String>()
+        let stream = gate.streamStarted(hdrEnabled: true, headroom: 1.5, output: .srgb, encodingGamma: 1, referenceWhiteNits: 100, payload: "fov")
+        expectEqual(stream.referenceWhiteNits, 100, "reference white captured per stream")
+        let colour = StreamColourState(selection: pqSelection(planeBitDepth: 10), planeBitDepth: 10, stream: stream, realityKit: false)
+        let codes = referenceCodes2020(simd_double3(repeating: referencePQEncode(50)))
+        let sample = simd_float4(Float(codes.x * 64 / 65535), Float(codes.y * 64 / 65535), Float(codes.z * 64 / 65535), 1)
+        expect(near(Double(HDRPipeline.shade(sample: sample, colour: colour).x), 0.5, 0.001), "display mapping uses captured white")
+        expect(near(HDRPipeline.decodeNits(codes: codes, selection: colour.selection).x, 50, 0.01), "probe remains absolute nits")
+    }
+
+    static func testImmersionOrdering() {
+        let gate = StreamImmersionGate()
+        var choices: [Bool] = []
+        gate.whenOpened { choices.append($0) }
+        expect(choices.isEmpty, "stream before space waits for actual immersion")
+        gate.opened(fullImmersion: true)
+        expectEqual(choices, [true], "pending stream receives opened immersion")
+        gate.whenOpened { choices.append($0) }
+        expectEqual(choices, [true, true], "reconnect keeps opened immersion")
+        gate.closed()
+        gate.whenOpened { choices.append($0) }
+        gate.cancelPendingStream()
+        gate.opened(fullImmersion: false)
+        expectEqual(choices, [true, true], "stopped pending stream is discarded")
+        gate.whenOpened { choices.append($0) }
+        expectEqual(choices, [true, true, false], "next opening uses mixed")
     }
 
     static func pqSelection(planeBitDepth: Int?) -> ColourSelection {
