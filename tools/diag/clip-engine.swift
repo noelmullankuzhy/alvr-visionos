@@ -67,7 +67,7 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
     guard let session = session else { throw Failure("no encoder") }
     defer { VTCompressionSessionInvalidate(session) }
     let isPQ = kind != "stress"
-    let properties: [CFString: Any] = [
+    var properties: [CFString: Any] = [
         kVTCompressionPropertyKey_ProfileLevel: kVTProfileLevel_HEVC_Main10_AutoLevel,
         kVTCompressionPropertyKey_RealTime: true,
         kVTCompressionPropertyKey_AllowFrameReordering: false,
@@ -78,6 +78,8 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
         kVTCompressionPropertyKey_TransferFunction: isPQ ? kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ : kCVImageBufferTransferFunction_ITU_R_709_2,
         kVTCompressionPropertyKey_YCbCrMatrix: isPQ ? kCVImageBufferYCbCrMatrix_ITU_R_2020 : kCVImageBufferYCbCrMatrix_ITU_R_709_2
     ]
+    let stillQuality = kind == "grid" || kind == "level"
+    if stillQuality { properties[kVTCompressionPropertyKey_Quality] = 1.0 }
     for (key, value) in properties { try check(VTSessionSetProperty(session, key: key, value: value as CFTypeRef), "set \(key)") }
     var capApplied = false
     if limited {
@@ -202,6 +204,7 @@ func encode(out: URL, width: Int, height: Int, fps: Int, seconds: Double, bitrat
         result["gapStart"] = split.gap(width: width).lowerBound
         result["gapWidth"] = split.gap(width: width).count
     }
+    if stillQuality { result["encoderQuality"] = 1.0 }
     if let grid { result["grid"] = grid.manifest }
     if let level { result["level"] = level.manifest }
     if kind == "gradient" { result["gradientNits"] = [0, 10000] }

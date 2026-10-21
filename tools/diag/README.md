@@ -83,6 +83,15 @@ explicit rather than silently claiming an exact integer-pixel area. The checker
 independently reconstructs the layout and log sequence, decodes every frame to
 limited P010, and checks an interior lattice in **every cell** (±3 codes), plus
 the black surround (code 64), excluding labels and boundary ringing.
+The cell body inset is `ceil(max(8 pixels, 20% of the continuous cell side))`,
+which gives 8/19/41 pixels for the 1%/10%/50% grids. Each `GRID_BODY` line
+reports the file, cell, sampled body mean code, expected code, maximum absolute
+**individual sample** error, sample count and inset. Statistics aggregate the
+interior lattice across all 900 frames; they are not a full-pixel body average.
+Every cell's statistics print before the body tolerance is judged, including
+cells that exceed ±3. Black-surround failures still stop immediately.
+The checker entry script assembles `clip-inspection.swift` with
+`check-clip-engine.swift`; the unit tests use that same inset/statistics policy.
 
 Push the selected directory using `push-clips.sh`, reload clips in the PQ player,
 and play in a **window** first. Follow the snake from dim to bright and record
@@ -96,7 +105,15 @@ windowed AVKit brightening through 1000 nits against a 203-nit reference, while
 the Metal layer stopped near 1.45× SDR white. Source PQ nits and perceived
 plateaus do not directly measure panel luminance.
 
+Grid and level encodes explicitly request
+`kVTCompressionPropertyKey_Quality = 1.0`; successful manifests record
+`encoderQuality: 1.0`. The average bitrate target remains the requested value
+(default 40 Mb/s). Unsupported quality settings fail with the existing property
+OSStatus diagnostic; visual/code accuracy must be checked after regeneration.
+Existing GM clips can be checked with the new body inset before regenerating.
+
 Encoder-free regression tests:
+`sh tests/swift/run-tests.sh GridInspection`,
 `sh tests/swift/run-tests.sh GridClip`, `sh tests/swift/run-tests.sh SplitClip`,
 and `sh tests/swift/run-tests.sh ClipEncoding`.
 
