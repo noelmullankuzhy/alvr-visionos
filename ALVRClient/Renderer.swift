@@ -820,8 +820,6 @@ class Renderer {
                 
                 EventHandler.shared.viewFovs = [leftFovCorrected, rightFovCorrected]
                 EventHandler.shared.viewTransforms = [fixTransform(transformLeftCorrected), mainDrawable.views.count > 1 ? fixTransform(transformRightCorrected) : fixTransform(transformLeftCorrected)]
-                EventHandler.shared.lastIpd = ipd
-                
                 // Wait, is this correct?
                 if mainDrawable.views.count > 1 {
                     EventHandler.shared.sentViewTangents = [tangentsLeftCorrected, tangentsRightCorrected]
@@ -833,7 +831,8 @@ class Renderer {
                 }
                 
                 
-                WorldTracker.shared.sendViewParams(viewTransforms:  EventHandler.shared.viewTransforms, viewFovs: EventHandler.shared.viewFovs)
+                // Sets lastIpd under the lock that serialises fake tracking sends.
+                EventHandler.shared.sendRealViewParams(ipd: ipd)
             }
             
             var needsPipelineRebuild = false
