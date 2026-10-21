@@ -1626,6 +1626,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
                 anchorTimestamp = vsyncTime - visionProVsyncPrediction.vsyncLatency
             }
             
+            EventHandler.shared.sendBootstrapTrackingIfNeeded()
             let sentAnchor = WorldTracker.shared.sendTracking(viewTransforms: viewTransforms, viewFovs: viewFovs, targetTimestamp: targetTimestamp, reportedTargetTimestamp: reportedTargetTimestamp, anchorTimestamp: anchorTimestamp, delay: 0.0)
             
             // Make overlay look correct

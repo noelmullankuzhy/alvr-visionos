@@ -264,6 +264,7 @@ class WorldTracker {
     var lastUpdatedTs: TimeInterval = 0
     var crownPressCount = 0
     var sentPoses = 0
+    var loggedSimFallbackHeadPose = false
     var debuggableMats: [simd_float4x4] = []
     var debuggableScales: [Float] = []
     /// Solid geometry to draw as wireframe, alongside the basis gadgets.
@@ -2570,6 +2571,14 @@ class WorldTracker {
         // Well, I'm out of ideas.
         guard let deviceAnchor = deviceAnchor else {
             print("Failed to get device anchor for future prediction!!")
+#if targetEnvironment(simulator)
+            // The simulator may yield no device anchors; keep the stream flowing with a fixed head pose.
+            if !loggedSimFallbackHeadPose {
+                loggedSimFallbackHeadPose = true
+                print("ALVRSIM using fallback head pose")
+            }
+            sendFakeTracking(viewFovs: viewFovs, targetTimestamp: reportedTargetTimestamp, includeViewParams: false)
+#endif
             // Prevent audio crackling issues
             if sentPoses > 30 {
                 // Yayyy they fixed it, but this also caused audio to cut out for random device anchor failures...
@@ -3518,7 +3527,8 @@ class WorldTracker {
     
     // We want video frames ASAP, so we send a fake view pose/FOVs to keep the frames coming
     // until we have access to real values
-    func sendFakeTracking(viewFovs: [AlvrFov], targetTimestamp: Double) {
+    // includeViewParams false sends only the head pose (real view params already sent).
+    func sendFakeTracking(viewFovs: [AlvrFov], targetTimestamp: Double, includeViewParams: Bool = true) {
         // Shouldn't happen
         if viewFovs.isEmpty {
             return
@@ -3540,10 +3550,14 @@ class WorldTracker {
         let headMotion = AlvrDeviceMotion(device_id: WorldTracker.deviceIdHead, pose: dummyPoseHeadset, linear_velocity: headLinVel, angular_velocity: headAngVel)
         trackingMotions.append(headMotion)
         
-        alvr_send_view_params(UnsafePointer(viewFovsPtr))
+        if includeViewParams {
+            alvr_send_view_params(UnsafePointer(viewFovsPtr))
+        }
         alvr_send_tracking(targetTimestampNS, trackingMotions, UInt64(trackingMotions.count), nil, nil)
-        
-        print("Sending fake tracking...")
+
+        if includeViewParams {
+            print("Sending fake tracking...")
+        }
     }
     
     func angularVelocityBetweenQuats(_ q1: AlvrQuat, _ q2: AlvrQuat, _ dt: Float) -> (Float, Float, Float) {

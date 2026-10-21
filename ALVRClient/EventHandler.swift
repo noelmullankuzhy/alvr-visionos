@@ -175,7 +175,9 @@ class EventHandler: ObservableObject {
     var needsEncoderReset = true
     var encodingGamma: Float = 1.0
     var enableHdr = false
-    
+    // Guarded by frameQueueLock (event, render and decoder threads).
+    var streamBootstrap = StreamBootstrap()
+
     init() {}
     
     func initializeAlvr() {
@@ -237,7 +239,8 @@ class EventHandler: ObservableObject {
         framesSinceLastDecode = 0
         lastIpd = -1
         lastQueuedFrame = nil
-        
+        withStreamBootstrap { $0.streamStopped() }
+
         //outgoingWorker.stopWorkers()
         
         updateConnectionState(.disconnected)
@@ -253,6 +256,23 @@ class EventHandler: ObservableObject {
         lastRequestedTimestamp = 0
         lastSubmittedTimestamp = 0
         lastQueuedFrame = nil
+        withStreamBootstrap { $0.reentered() }
+    }
+
+    func withStreamBootstrap<T>(_ body: (inout StreamBootstrap) -> T) -> T {
+        objc_sync_enter(frameQueueLock)
+        defer { objc_sync_exit(frameQueueLock) }
+        return body(&streamBootstrap)
+    }
+
+    // Until the stream's first frame is queued, keep the server fed with fake view params and a head pose,
+    // otherwise it never encodes a frame. Called from the render loops while lastIpd == -1, on the same thread
+    // that later sends the real view params, so the fake ones can never overwrite them.
+    func sendBootstrapTrackingIfNeeded() {
+        guard alvrInitialized && streamingActive && lastIpd == -1 else { return }
+        if withStreamBootstrap({ $0.shouldSendFakeTracking(now: CACurrentMediaTime()) }) {
+            WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: CACurrentMediaTime() - 1.0)
+        }
     }
     
     // Various hacks to be performed when the headset is removed or the app is exiting.
@@ -564,6 +584,9 @@ class EventHandler: ObservableObject {
                     frameQueueLastTimestamp = timestamp
                     frameQueueLastImageBuffer = imageBuffer
                     timeLastFrameSent = CACurrentMediaTime()
+                    if let bootLine = streamBootstrap.frameQueued(now: CACurrentMediaTime()) {
+                        print(bootLine)
+                    }
                 }
 
                 // Pull the very last imageBuffer for a given timestamp
@@ -730,6 +753,13 @@ class EventHandler: ObservableObject {
                 if !renderStarted && streamingActive {
                     WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: CACurrentMediaTime() - 1.0)
                 }
+
+                // Rendering but no frame yet: ask for an IDR (it brings the decoder config) instead of waiting
+                // for the 30 s fatal-decoder path. Re-registering the decoder callback makes the core send RequestIdr.
+                if renderStarted && streamingActive && withStreamBootstrap({ $0.shouldRequestIdr(now: CACurrentMediaTime(), rendering: true) }) {
+                    print("Request IDR (stream bootstrap)")
+                    alvr_set_decoder_input_callback(nil, { data in return EventHandler.shared.handleNals(frameData: data) })
+                }
             }
             
             let diffSinceLastEvent = 0.0//currentTime - timeLastAlvrEvent
@@ -814,6 +844,7 @@ class EventHandler: ObservableObject {
                     framesSinceLastDecode = 0
                     lastIpd = -1
                     currentCodec = -1
+                    withStreamBootstrap { $0.streamStarted(now: CACurrentMediaTime()) }
                     EventHandler.shared.updateConnectionState(.connected)
                 }
                 if !renderStarted {

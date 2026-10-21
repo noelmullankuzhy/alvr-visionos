@@ -908,6 +908,7 @@ class Renderer {
             WorldTracker.shared.sendTracking(viewTransforms: viewTransforms, viewFovs: viewFovs, targetTimestamp: targetTimestamp, reportedTargetTimestamp: reportedTargetTimestamp, anchorTimestamp: anchorTimestamp, delay: 0.0)
         }
         else {
+            EventHandler.shared.sendBootstrapTrackingIfNeeded()
 #if DEBUG_ALVR_TRACKING
             let viewFovs = EventHandler.shared.viewFovs
             let viewTransforms = EventHandler.shared.viewTransforms
