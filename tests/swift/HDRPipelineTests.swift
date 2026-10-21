@@ -41,6 +41,8 @@ enum HDRPipelineTests {
         testHeadroomDefault()
         testDisplayReferenceWhite()
         testImmersionOrdering()
+        testImmersionTeardownAndReentry()
+        testRealityKitOpenFailure()
         testStreamColourState()
         testEightBitPQRendersPQ()
         testSettingCapturedPerStream()
@@ -198,6 +200,40 @@ enum HDRPipelineTests {
         expectEqual(choices, [true, true], "stopped pending stream is discarded")
         gate.whenOpened { choices.append($0) }
         expectEqual(choices, [true, true, false], "next opening uses mixed")
+    }
+
+    static func testImmersionTeardownAndReentry() {
+        let gate = StreamImmersionGate()
+        var choices: [Bool] = []
+        gate.opened(fullImmersion: true)
+        gate.whenOpened { choices.append($0) }
+        gate.closed() // Render loop teardown, before the next Enter.
+        gate.whenOpened { choices.append($0) }
+        expectEqual(choices, [true], "stream after teardown waits instead of capturing the old full immersion")
+        gate.opened(fullImmersion: false)
+        expectEqual(choices, [true, false], "pending stream captures the next opening's mixed immersion")
+        gate.closed()
+        gate.whenOpened { choices.append($0) }
+        gate.cancelPendingStream()
+        gate.opened(fullImmersion: true)
+        expectEqual(choices, [true, false], "stop cancels a stream waiting after teardown")
+    }
+
+    static func testRealityKitOpenFailure() {
+        for failure in ["cancelled", "error"] {
+            let gate = StreamImmersionGate()
+            var choices: [Bool] = []
+            gate.openCompleted(succeeded: false, fullImmersion: false)
+            gate.whenOpened { choices.append($0) }
+            expect(choices.isEmpty, "RealityKit \(failure) leaves the gate closed")
+            gate.openCompleted(succeeded: true, fullImmersion: false)
+            expectEqual(choices, [false], "only successful RealityKit opening releases the pending stream")
+            gate.closed() // RealityKit disappears.
+            gate.whenOpened { choices.append($0) }
+            expectEqual(choices, [false], "RealityKit disappearance leaves subsequent stream pending")
+            gate.opened(fullImmersion: true)
+            expectEqual(choices, [false, true], "reentry in Metal full uses its actual immersion")
+        }
     }
 
     static func pqSelection(planeBitDepth: Int?) -> ColourSelection {
