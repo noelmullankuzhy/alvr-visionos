@@ -5,12 +5,17 @@ import simd
 final class DiagEyeDrawing {
     private let pipeline: MTLRenderPipelineState
     private let depthState: MTLDepthStencilState
-    init(device: MTLDevice, library: MTLLibrary, colourFormat: MTLPixelFormat, depthFormat: MTLPixelFormat) throws {
+    static func pipelineDescriptor(colourFormat: MTLPixelFormat, depthFormat: MTLPixelFormat) -> MTLRenderPipelineDescriptor {
         let descriptor = MTLRenderPipelineDescriptor()
-        descriptor.vertexFunction = library.makeFunction(name: "diagEyeVertex")
-        descriptor.fragmentFunction = library.makeFunction(name: "diagEyeFragment")
+        descriptor.inputPrimitiveTopology = .triangle // required by diagEyeVertex's render_target_array_index
         descriptor.colorAttachments[0].pixelFormat = colourFormat
         descriptor.depthAttachmentPixelFormat = depthFormat
+        return descriptor
+    }
+    init(device: MTLDevice, library: MTLLibrary, colourFormat: MTLPixelFormat, depthFormat: MTLPixelFormat) throws {
+        let descriptor = Self.pipelineDescriptor(colourFormat: colourFormat, depthFormat: depthFormat)
+        descriptor.vertexFunction = library.makeFunction(name: "diagEyeVertex")
+        descriptor.fragmentFunction = library.makeFunction(name: "diagEyeFragment")
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
         let depth = MTLDepthStencilDescriptor()
         depth.depthCompareFunction = .always; depth.isDepthWriteEnabled = true
