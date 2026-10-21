@@ -2,7 +2,8 @@
 // Corner chart (GM decision 65): 16 spokes every 22.5 degrees per eye (0 = right, counter-clockwise) with rings at a
 // percentage of that eye's own tangent extent along the spoke (diagonals end at the drawable corner), for asymmetric
 // and canted frusta; labels inside the drawable and their own ring; the per-eye walk with its marks; the visible
-// tangent polygon; the boundary shape classification (rectangle / rounded / ellipse); the DIAG corner line formats.
+// tangent polygon; the boundary shape classification (rectangle / rounded / ellipse); the DIAG corner line formats;
+// per-eye colour and L / R glyph (decision 65a).
 import Foundation
 
 private func near(_ a: Double, _ b: Double, _ eps: Double = 1e-9) -> Bool { abs(a - b) <= eps }
@@ -80,7 +81,7 @@ private func testLabels() {
         expect(top75.y1 - top75.y0 > top100.y1 - top100.y0, "inner labels larger")
         for k in 0..<16 {
             for pct in [100, 75] {
-                let quads = CornerChart.geometry(t, widthPx: w, heightPx: h, selected: (k, pct), status: "L 22.5 94")
+                let quads = CornerChart.geometry(t, eye: .left, widthPx: w, heightPx: h, selected: (k, pct), status: "L 22.5 94")
                 expect(quads.allSatisfy { inside($0.rect, drawable) }, "all chart geometry inside the drawable, spoke \(k) \(pct) selected")
                 expect(quads.count > labels.count, "rings, labels, spokes, selection and status")
             }
@@ -193,6 +194,63 @@ private func testLogFormats() {
     expectEqual(CornerChartMode(setting: "garbage"), .off, "unknown setting is off")
 }
 
+// Decision 65a: a mono mirror capture names the eye. Left cyan, right magenta (rings, numbers, spokes) and a large
+// L / R at the eye's tangent centre; the eye comes from the view's x offset (<= 0 left) and the monocular modes keep it.
+private func testEyeColours() {
+    expectEqual(CornerEye(viewOffsetX: -0.032), .left, "negative x offset: left eye")
+    expectEqual(CornerEye(viewOffsetX: 0), .left, "zero x offset: left eye (<= 0 rule)")
+    expectEqual(CornerEye(viewOffsetX: 0.032), .right, "positive x offset: right eye")
+    expect(CornerEye.left.color == SIMD4<Float>(0, 1, 1, 1), "left cyan")
+    expect(CornerEye.right.color == SIMD4<Float>(1, 0, 1, 1), "right magenta")
+    expectEqual(CornerEye.left.glyph, "L", "left glyph")
+    expectEqual(CornerEye.right.glyph, "R", "right glyph")
+    expectEqual(CornerEye(viewOffsetX: -0.03).glyph, "L", "glyph follows the offset rule")
+    expect(CornerEye(viewOffsetX: 0.03).color == CornerEye.right.color, "colour follows the offset rule")
+
+    let white: SIMD4<Float> = [1, 1, 1, 1], black: SIMD4<Float> = [0, 0, 0, 1]
+    let drawable = CornerChart.Rect(x0: -1, y0: -1, x1: 1, y1: 1)
+    for (t, w, h) in [(leftEye, 1888.0, 1792.0), (cantedEye, 2400.0, 2200.0)] {
+        for eye in [CornerEye.left, .right] {
+            let other: CornerEye = eye == .left ? .right : .left
+            let quads = CornerChart.geometry(t, eye: eye, widthPx: w, heightPx: h, selected: (3, 94), status: "\(eye.rawValue) 67.5 94")
+            let tinted = quads.filter { $0.color != white && $0.color != black }
+            expect(!tinted.isEmpty, "\(eye) has tinted geometry")
+            expect(tinted.allSatisfy { $0.color == eye.color || $0.color == eye.dimColor }, "\(eye): rings, numbers and spokes in its colour")
+            expect(!quads.contains { $0.color == other.color || $0.color == other.dimColor }, "\(eye): none of the other eye's colour")
+            let ringQuads = CornerChart.ringPercents.count * 4, labelQuads = CornerChart.labels(t, widthPx: w, heightPx: h).count
+            expect(quads.prefix(ringQuads).allSatisfy { $0.color == eye.color }, "\(eye): rings in its colour")
+            expect(quads.dropFirst(ringQuads).prefix(labelQuads).allSatisfy { $0.color == eye.color }, "\(eye): numbers in its colour")
+            // The glyph: large, at the eye's tangent centre, inside the drawable and the innermost ring, in its colour.
+            let g = CornerChart.glyphRect(t, widthPx: w, heightPx: h)
+            let c = t.ndc(x: 0, y: 0)
+            expect(near((g.x0 + g.x1) / 2, c.x, 1e-12) && near((g.y0 + g.y1) / 2, c.y, 1e-12), "\(eye): glyph centred on the tangent origin")
+            expect(inside(g, drawable), "\(eye): glyph inside the drawable")
+            expect(inside(g, CornerChart.ringRect(t, pct: 75)), "\(eye): glyph inside the 75 ring")
+            expect((g.y1 - g.y0) * h / 2 >= 100, "\(eye): glyph large (>= 100 px)")
+            let glyph = CornerChart.eyeGlyph(eye, t, widthPx: w, heightPx: h)
+            expect(!glyph.isEmpty && glyph.allSatisfy { inside($0.rect, g) && $0.color == eye.color }, "\(eye): glyph strokes inside its box, in its colour")
+            expect(glyph.allSatisfy { q in quads.contains { $0.rect == q.rect && $0.color == q.color } }, "\(eye): chart draws the glyph")
+            expect(quads.allSatisfy { inside($0.rect, drawable) }, "\(eye): all geometry inside the drawable")
+        }
+        // L and R glyphs differ: R has the bowl and leg, L only the stem and foot.
+        let l = CornerChart.eyeGlyph(.left, t, widthPx: w, heightPx: h).map(\.rect)
+        let r = CornerChart.eyeGlyph(.right, t, widthPx: w, heightPx: h).map(\.rect)
+        expect(l != r && r.count > l.count, "L and R glyphs differ")
+        let g = CornerChart.glyphRect(t, widthPx: w, heightPx: h)
+        expect(l.contains { near($0.y0, g.y0) && near($0.x1, g.x1) }, "L foot reaches the bottom right")
+        expect(!l.contains { near($0.y1, g.y1) && near($0.x1, g.x1) }, "L has no top right")
+        expect(r.contains { near($0.y1, g.y1) && $0.x1 > (g.x0 + g.x1) / 2 }, "R has a top bar")
+        expect(r.contains { near($0.y0, g.y0) && near($0.x1, g.x1) }, "R leg reaches the bottom right")
+    }
+    // Monocular modes: the lit eye keeps its colour, the other is black (not drawn).
+    for (mode, lit) in [(CornerChartMode.left, CornerEye.left), (.right, .right)] {
+        let s = CornerChartSession(mode: mode)
+        expect(s.lit(lit) && !s.lit(lit == .left ? .right : .left), "\(mode): only \(lit) lit")
+        let quads = CornerChart.geometry(leftEye, eye: lit, widthPx: 1888, heightPx: 1792, selected: nil, status: "")
+        expect(quads.contains { $0.color == lit.color }, "\(mode): \(lit) keeps its colour")
+    }
+}
+
 private func testMirrorScript() {
     let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     let script = root.appendingPathComponent("tools/diag/capture-mirror.sh").path
@@ -212,6 +270,7 @@ private func testMirrorScript() {
         testSession()
         testShape()
         testLogFormats()
+        testEyeColours()
         testMirrorScript()
         finishTests("CornerChartTests")
     }
