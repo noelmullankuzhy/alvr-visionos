@@ -154,6 +154,9 @@ class Renderer {
     var reprojectedFramesInARow: Int = 0
     var roundTripRenderTime: Double = 0.0
     var lastRoundTripRenderTimestamp: Double = 0.0
+    // Opt-in deadline-budgeted frame selection (UserDefaults ALVRDeadlineSelect); off keeps the 5 ms poll.
+    let deadlineSelect = UserDefaults.standard.bool(forKey: FramePacing.defaultsKey)
+    let gpuTimes = GpuTimeEstimator()
     var currentYuvTransform: simd_float4x4 = matrix_identity_float4x4
     var currentGamutTransform: simd_float3x3 = matrix_identity_float3x3
     
@@ -672,6 +675,11 @@ class Renderer {
         return tangents
     }
     
+    // Nanoseconds since the LayerRenderer clock epoch, the clock of frame timing and video timestamps.
+    private func layerClockNs(_ instant: LayerRenderer.Clock.Instant) -> UInt64 {
+        UInt64(max(LayerRenderer.Clock.Instant.epoch.duration(to: instant).timeInterval, 0) * Double(NSEC_PER_SEC))
+    }
+
     func renderToDrawable(_ drawable: LayerRenderer.Drawable) {
         
     }
@@ -698,40 +706,86 @@ class Renderer {
         lastRoundTripRenderTimestamp = CACurrentMediaTime()
 
         let startPollTime = CACurrentMediaTime()
+        var selectionSource = FrameSelectionSource.none
+        var selectionSkipped = 0
+        if !deadlineSelect {
         while true {
             sched_yield()
-            
+
             // If visionOS skipped our last frame, let the queue fill up a bit
             if EventHandler.shared.lastQueuedFrame != nil {
                 if EventHandler.shared.lastQueuedFrame!.timestamp != EventHandler.shared.lastSubmittedTimestamp && EventHandler.shared.frameQueue.count < 2 {
                     queuedFrame = EventHandler.shared.lastQueuedFrame
                     EventHandler.shared.framesRendered -= 1
                     isReprojected = false
+                    selectionSource = .retry
                     break
                 }
             }
-            
+
             objc_sync_enter(EventHandler.shared.frameQueueLock)
             queuedFrame = EventHandler.shared.frameQueue.count > 0 ? EventHandler.shared.frameQueue.removeFirst() : nil
             objc_sync_exit(EventHandler.shared.frameQueueLock)
             if queuedFrame != nil {
+                selectionSource = .new
                 break
             }
-            
+
             if CACurrentMediaTime() - startPollTime > 0.005 {
                 //EventHandler.shared.framesRendered -= 1
                 break
             }
         }
-        
+
         // Recycle old frame with old timestamp/anchor (visionOS doesn't do timewarp for us?)
         if queuedFrame == nil && EventHandler.shared.lastQueuedFrame != nil {
             //print("Using last frame...")
             queuedFrame = EventHandler.shared.lastQueuedFrame
             EventHandler.shared.framesRendered -= 1
             isReprojected = true
+            selectionSource = .reuse
         }
-        
+        }
+        else {
+            // Newest decoded frame not newer than this vsync, chosen in one locked step; wait only while
+            // renderingDeadline - GPU p95 - margin leaves budget (never past the old 5 ms), else reproject.
+            let targetNs = layerClockNs(timing.presentationTime)
+            let waitDeadlineNs = FramePacing.waitDeadlineNs(startNs: layerClockNs(LayerRenderer.Clock().now), renderingDeadlineNs: layerClockNs(timing.renderingDeadline), gpuP95Ns: gpuTimes.p95Ns(), marginNs: FramePacing.marginNs)
+            while true {
+                objc_sync_enter(EventHandler.shared.frameQueueLock)
+                let lastFrame = EventHandler.shared.lastQueuedFrame
+                let choice = FramePacing.choose(queue: EventHandler.shared.frameQueue.map { $0.timestamp }, targetNs: targetNs, lastTimestamp: lastFrame?.timestamp, lastSubmitted: lastFrame == nil || lastFrame!.timestamp == EventHandler.shared.lastSubmittedTimestamp, canWait: FramePacing.budgetRemains(nowNs: layerClockNs(LayerRenderer.Clock().now), waitDeadlineNs: waitDeadlineNs))
+                if case .queued(let index) = choice {
+                    queuedFrame = EventHandler.shared.frameQueue[index]
+                    EventHandler.shared.frameQueue.removeFirst(index + 1)
+                    selectionSkipped = index
+                }
+                objc_sync_exit(EventHandler.shared.frameQueueLock)
+
+                switch choice {
+                case .queued:
+                    selectionSource = .new
+                case .retry:
+                    queuedFrame = lastFrame
+                    EventHandler.shared.framesRendered -= 1
+                    isReprojected = false
+                    selectionSource = .retry
+                case .reuse:
+                    queuedFrame = lastFrame
+                    EventHandler.shared.framesRendered -= 1
+                    isReprojected = true
+                    selectionSource = .reuse
+                case .none:
+                    break
+                case .wait:
+                    sched_yield()
+                    continue
+                }
+                break
+            }
+        }
+        StreamTelemetry.shared.recordSelection(timestampNs: queuedFrame?.timestamp, source: selectionSource, pollWaitNs: UInt64(max(CACurrentMediaTime() - startPollTime, 0) * Double(NSEC_PER_SEC)), skipped: selectionSkipped)
+
         if queuedFrame == nil && streamingActiveForFrame {
             streamingActiveForFrame = false
         }
@@ -943,16 +997,25 @@ class Renderer {
         
         let deviceAnchor = WorldTracker.shared.worldTracking.queryDeviceAnchor(atTimestamp: vsyncTime)
         
+        let gpuTimes = self.gpuTimes
         commandBuffer.addCompletedHandler { (_ commandBuffer)-> Swift.Void in
+            let completionNs = UInt64(CACurrentMediaTime() * Double(NSEC_PER_SEC))
+            if commandBuffer.gpuEndTime > commandBuffer.gpuStartTime {
+                gpuTimes.add(ns: UInt64((commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * Double(NSEC_PER_SEC)))
+            }
+            if queuedFrame != nil {
+                StreamTelemetry.shared.recordSubmitTiming(vsyncNs: vsyncTimeNs, completionNs: completionNs)
+            }
             if EventHandler.shared.alvrInitialized && queuedFrame != nil && EventHandler.shared.lastSubmittedTimestamp != queuedFrame?.timestamp {
-                let currentTimeNs = UInt64(CACurrentMediaTime() * Double(NSEC_PER_SEC))
-                
+                let currentTimeNs = completionNs
+
                 //let currentTimeNs = UInt64(commandBuffer.gpuEndTime * Double(NSEC_PER_SEC))
                 //let actualRenderTimeNs = UInt64((commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * Double(NSEC_PER_SEC))
                 //print((commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * 1000.0)
-                
+
                 //print("Finished:", queuedFrame!.timestamp)
-                alvr_report_submit(queuedFrame!.timestamp, vsyncTimeNs &- currentTimeNs)
+                // Saturated at 0: a late completion used to wrap to ~1.8e19 ns; lateness goes to ALVRSTATS.
+                alvr_report_submit(queuedFrame!.timestamp, FramePacing.submitQueueNs(vsyncNs: vsyncTimeNs, completionNs: currentTimeNs))
 
                 EventHandler.shared.lastSubmittedTimestamp = queuedFrame!.timestamp
             }

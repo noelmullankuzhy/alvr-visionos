@@ -602,6 +602,7 @@ class EventHandler: ObservableObject {
                     }
 
 
+                    StreamTelemetry.shared.recordFrameQueued(timestampNs: timestamp)
                     frameQueueLastTimestamp = timestamp
                     frameQueueLastImageBuffer = imageBuffer
                     timeLastFrameSent = CACurrentMediaTime()
