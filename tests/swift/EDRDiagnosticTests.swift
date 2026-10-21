@@ -45,6 +45,14 @@ import Foundation
         }
         expectEqual(PQSchedule.step(time: .nan, isSteps: true), -1, "indefinite time")
         expectEqual(PQSchedule.step(time: 2, isSteps: false), -1, "gradient has no steps")
+        let window = PQPlaybackContext(clip: "first steps.mov", path: "window")
+        let immersive = PQPlaybackContext(clip: "second.mov", path: "realitykit")
+        expectEqual(Diag.line(topic: "pq", tMs: 44, fields: window.statusFields(status: 2, error: "cannot open")),
+                    "DIAG pq t_ms=44 path=window clip=\"first steps.mov\" status=2 error=\"cannot open\"", "status/error retains originating playback")
+        expectEqual(Diag.line(topic: "pq", tMs: 45, fields: immersive.metadataErrorFields("bad format")),
+                    "DIAG pq t_ms=45 path=realitykit clip=second.mov metadata_error=\"bad format\"", "metadata failure attribution")
+        expectEqual(Diag.line(topic: "pq", tMs: 46, fields: window.metadataErrorFields("late failure")),
+                    "DIAG pq t_ms=46 path=window clip=\"first steps.mov\" metadata_error=\"late failure\"", "late callback cannot inherit the next playback's path")
         // Exercise the actual shader entry and make bypass regressions fail without needing a Metal device.
         let shader = try! String(contentsOfFile: "ALVRClient/Shaders.metal", encoding: .utf8)
         let ramp = shader.components(separatedBy: "fragment float4 diagEDRFragment").last!
