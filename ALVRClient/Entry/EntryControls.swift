@@ -64,6 +64,57 @@ struct EntryControls: View {
         }
     }
 
+    // The Metal streaming space, in the order StreamSpaceOpen decides; every request, pending wait and result is
+    // logged (DIAG stream_start). Streaming itself never waits on this: the event thread keeps reading the server
+    // and sending poses (EventHandler.sendPoseKeepaliveIfStale).
+    private func openStreamSpace(fullImmersion: Bool) async {
+        var spaceID = StreamSpaceOpen.spaceID(fullImmersion: fullImmersion)
+        var attempt = 1
+        while true {
+            let id = spaceID
+            let requested = ProcessInfo.processInfo.systemUptime
+            EventHandler.shared.logStreamStart(.spaceRequested, [("id", id), ("attempt", "\(attempt)")])
+            let pendingLog = Task {
+                while true {
+                    do { try await Task.sleep(nanoseconds: UInt64(StreamSpaceOpen.pendingLogInterval * 1e9)) }
+                    catch { return }
+                    let waited = Int((ProcessInfo.processInfo.systemUptime - requested) * 1000)
+                    EventHandler.shared.logStreamStart(.spaceOpenPending, [("id", id), ("waited_ms", "\(waited)")])
+                }
+            }
+            let result = await openImmersiveSpace(id: id)
+            pendingLog.cancel()
+            var outcome = StreamSpaceOpen.Result.failed
+            var resultName = "unknown"
+            switch result {
+            case .opened:
+                outcome = .opened
+                resultName = "opened"
+            case .userCancelled:
+                outcome = .userCancelled
+                resultName = "user_cancelled"
+            case .error:
+                resultName = "error"
+            @unknown default:
+                break
+            }
+            let step = StreamSpaceOpen.next(after: id, result: outcome, attempt: attempt)
+            let waited = Int((ProcessInfo.processInfo.systemUptime - requested) * 1000)
+            EventHandler.shared.logStreamStart(.spaceOpenResult, [("id", id), ("result", resultName),
+                                                                  ("waited_ms", "\(waited)"), ("next", "\(step)")])
+            switch step {
+            case .done, .giveUp:
+                return
+            case .dismissThenOpen(let next):
+                await dismissImmersiveSpace()
+                spaceID = next
+            case .open(let next):
+                spaceID = next
+            }
+            attempt += 1
+        }
+    }
+
     var body: some View {
         @Bindable var model = model
         
@@ -161,8 +212,7 @@ struct EntryControls: View {
                         }
                     }
                     else {
-                        let spaceID = gStore.settings.streamFullImmersion ? "MetalClientFull" : "MetalClient"
-                        await openImmersiveSpace(id: spaceID)
+                        await openStreamSpace(fullImmersion: gStore.settings.streamFullImmersion)
                     }
                     VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
                     if gStore.settings.dismissWindowOnEnter {

@@ -184,6 +184,12 @@ class EventHandler: ObservableObject {
     var streamBootstrap = StreamBootstrap()
     // Serialises fake tracking sends with the real view-params handoff.
     let viewParamsLock = NSObject()
+    // Guarded by viewParamsLock (event and render threads).
+    var poseKeepalive = PoseKeepalive()
+    // The stream's last real head pose, resent by the keepalive (guarded by viewParamsLock).
+    private var keepalivePose = KeepalivePose<AlvrDeviceMotion>()
+    private var streamStartTiming = StreamStartTiming()
+    private let streamStartTimingLock = NSLock()
 
     init() {}
     
@@ -253,6 +259,13 @@ class EventHandler: ObservableObject {
         lastIpd = -1
         lastQueuedFrame = nil
         withStreamBootstrap { $0.streamStopped() }
+        objc_sync_enter(viewParamsLock)
+        poseKeepalive.reset()
+        keepalivePose.reset()
+        objc_sync_exit(viewParamsLock)
+        streamStartTimingLock.lock()
+        streamStartTiming.disconnected()
+        streamStartTimingLock.unlock()
 
         //outgoingWorker.stopWorkers()
         
@@ -279,7 +292,8 @@ class EventHandler: ObservableObject {
     }
 
     // Until the stream's first frame is queued, keep the server fed with fake view params and a head pose,
-    // otherwise it never encodes a frame. Called from the event thread and the render loops. Fake sends and the
+    // otherwise it never encodes a frame. Called from the render loops (the event thread's sendPoseKeepaliveIfStale
+    // covers the time no render loop runs). Fake sends and the
     // real view-params handoff (sendRealViewParams) both hold viewParamsLock, and fake sends require
     // lastIpd == -1 under it, so a fake send can never land after the real view params.
     func sendBootstrapTrackingIfNeeded() {
@@ -288,7 +302,58 @@ class EventHandler: ObservableObject {
         guard streamingActive && lastIpd == -1 else { return }
         if withStreamBootstrap({ $0.shouldSendFakeTracking(now: CACurrentMediaTime()) }) {
             WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: CACurrentMediaTime() - 1.0)
+            noteRenderPoseSent(realHead: nil)
         }
+    }
+
+    // Event thread: head poses reach the server whatever the immersive space is doing (not open yet, opening,
+    // paused, switching, tracking lost). While no render loop has sent one for PoseKeepalive.staleAfter, every
+    // PoseKeepalive.interval resend the stream's last real head pose (KeepalivePose), or, before there is one, the
+    // fake pose with fake view params until the real ones are sent (the old bootstrap). Under viewParamsLock, so a
+    // fake view-params send can never land after the real view params.
+    func sendPoseKeepaliveIfStale() {
+        objc_sync_enter(viewParamsLock)
+        defer { objc_sync_exit(viewParamsLock) }
+        guard streamingActive else { return }
+        let now = CACurrentMediaTime()
+        guard let send = poseKeepalive.shouldSend(now: now) else { return }
+        let realViewParams = lastIpd != -1
+        let kind: String
+        switch keepalivePose.choose(target: now) {
+        case .real(let head, let timestamp):
+            WorldTracker.shared.sendKeepaliveHead(head, targetTimestamp: timestamp)
+            kind = "real"
+        case .fake:
+            WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: now - 1.0, includeViewParams: !realViewParams)
+            kind = "fake"
+        }
+        if send.startsEpisode {
+            logStreamStart(.poseKeepalive, [("state", "start"), ("pose", kind), ("view_params", realViewParams ? "real" : "fake")])
+        }
+        logStreamStart(.firstPoseSent, [("kind", kind)], once: true)
+    }
+
+    // A render loop sent a head pose (realHead: the real one sent, at timestamp): the keepalive stands down and,
+    // for a real pose, caches it. Any thread.
+    func noteRenderPoseSent(realHead: AlvrDeviceMotion?, timestamp: Double = 0) {
+        objc_sync_enter(viewParamsLock)
+        let episodeSends = poseKeepalive.renderSent(now: CACurrentMediaTime())
+        if let realHead { keepalivePose.realSent(realHead, timestamp: timestamp) }
+        objc_sync_exit(viewParamsLock)
+        if let episodeSends {
+            logStreamStart(.poseKeepalive, [("state", "end"), ("sent", "\(episodeSends)")])
+        }
+        logStreamStart(.firstPoseSent, [("kind", realHead != nil ? "real" : "fake")], once: true)
+    }
+
+    // One DIAG stream_start line (StreamStartTiming) to the server log. Any thread.
+    func logStreamStart(_ event: StreamStartTiming.Event, _ fields: [(String, String)] = [], once: Bool = false) {
+        streamStartTimingLock.lock()
+        let line = streamStartTiming.line(event, now: CACurrentMediaTime(), fields: fields, once: once)
+        streamStartTimingLock.unlock()
+        guard let line else { return }
+        print(line)
+        alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), line)
     }
 
     // The renderers' handoff to real view params; ends fake sends (see sendBootstrapTrackingIfNeeded).
@@ -621,6 +686,7 @@ class EventHandler: ObservableObject {
                     timeLastFrameSent = CACurrentMediaTime()
                     if let bootLine = streamBootstrap.frameQueued(now: CACurrentMediaTime()) {
                         print(bootLine)
+                        logStreamStart(.firstDecodedFrame, once: true)
                     }
                 }
 
@@ -785,10 +851,10 @@ class EventHandler: ObservableObject {
                         exit(0)
                     }
                 }
-                
-                if !renderStarted {
-                    sendBootstrapTrackingIfNeeded()
-                }
+
+                // Not gated on renderStarted: that is set when a renderer is built and never cleared, while the
+                // render loop only sends poses once its layer runs.
+                sendPoseKeepaliveIfStale()
             }
             
             let diffSinceLastEvent = 0.0//currentTime - timeLastAlvrEvent
@@ -878,14 +944,16 @@ class EventHandler: ObservableObject {
                     EventHandler.shared.updateConnectionState(.connected)
                 }
                 // Outside the block above: a DecoderConfig may already have set streamingActive.
-                withStreamBootstrap {
-                    if $0.phase == .idle {
-                        $0.streamStarted(now: CACurrentMediaTime())
-                    }
+                let newStream = withStreamBootstrap { (bootstrap: inout StreamBootstrap) -> Bool in
+                    guard bootstrap.phase == .idle else { return false }
+                    bootstrap.streamStarted(now: CACurrentMediaTime())
+                    return true
                 }
-                if !renderStarted {
-                    sendBootstrapTrackingIfNeeded()
+                if newStream {
+                    logStreamStart(.connect, [("full_immersion_setting", "\(ALVRClientApp.gStore.settings.streamFullImmersion)"),
+                                              ("render_started", "\(renderStarted)")])
                 }
+                sendPoseKeepaliveIfStale()
                 Settings.clearSettingsCache()
                 // This stream's video inputs, captured once into a new generation (decision 63e (2), (3)): the HDR
                 // setting, reference white and SDR output policy, the server's encoding gamma and the foveation. Decode and

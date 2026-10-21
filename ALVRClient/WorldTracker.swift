@@ -265,7 +265,8 @@ class WorldTracker {
     var crownPressCount = 0
     var sentPoses = 0
     var loggedSimFallbackHeadPose = false
-    var fakeHeadPoseSequence: UInt64 = 0 // FakeHeadPose: unique orientation per fake (and, in the simulator, real) head sample
+    private var fakeHeadPoseSequence: UInt64 = 0 // FakeHeadPose: unique orientation per fake (and, in the simulator, real) head sample
+    private let fakeHeadPoseLock = NSLock() // render and event threads both take samples
     var debuggableMats: [simd_float4x4] = []
     var debuggableScales: [Float] = []
     /// Solid geometry to draw as wireframe, alongside the basis gadgets.
@@ -2539,6 +2540,7 @@ class WorldTracker {
                 print("ALVRSIM using fallback head pose")
             }
             sendFakeTracking(viewFovs: viewFovs, targetTimestamp: reportedTargetTimestamp, includeViewParams: false)
+            EventHandler.shared.noteRenderPoseSent(realHead: nil)
 #endif
             // Prevent audio crackling issues
             if sentPoses > 30 {
@@ -3289,8 +3291,7 @@ class WorldTracker {
         // The simulated head is static: make each sample's orientation unique so the server matches frames to their
         // own timestamps (FakeHeadPose.swift). Applied after the velocities so they stay those of the real pose.
         var sentHeadPose = headPose
-        sentHeadPose.orientation = AlvrQuat(FakeHeadPose.dithered(headPose.orientation.asQuatf(), sequence: fakeHeadPoseSequence))
-        fakeHeadPoseSequence &+= 1
+        sentHeadPose.orientation = AlvrQuat(FakeHeadPose.dithered(headPose.orientation.asQuatf(), sequence: nextFakeHeadPoseSequence()))
 #else
         let sentHeadPose = headPose
 #endif
@@ -3429,6 +3430,9 @@ class WorldTracker {
             }
         }
 
+        // Cached for the keepalive (tracking loss, paused layer): held still, so without velocities.
+        EventHandler.shared.noteRenderPoseSent(realHead: AlvrDeviceMotion(device_id: WorldTracker.deviceIdHead, pose: headPose,
+                linear_velocity: (0, 0, 0), angular_velocity: (0, 0, 0)), timestamp: reportedTargetTimestamp)
         EventHandler.shared.outgoingWorker.enqueue {
             // Old API, currently in master/v20
             //alvr_send_tracking(reportedTargetTimestampNS, trackingMotions, UInt64(trackingMotions.count), [UnsafePointer(skeletonLeftPtr), UnsafePointer(skeletonRightPtr)], [UnsafePointer(eyeGazeLeftPtr), UnsafePointer(eyeGazeRightPtr)])
@@ -3484,8 +3488,7 @@ class WorldTracker {
         
         let dummyPoseView = AlvrPose()
         // Orientation unique per sample so the server matches each frame to its own timestamp (FakeHeadPose.swift).
-        let dummyOrientation = FakeHeadPose.orientation(sequence: fakeHeadPoseSequence)
-        fakeHeadPoseSequence &+= 1
+        let dummyOrientation = FakeHeadPose.orientation(sequence: nextFakeHeadPoseSequence())
         let dummyPoseHeadset = AlvrPose(orientation: AlvrQuat(dummyOrientation), position: (0.0, 1.2, 0.0)) // keep the dummy at a reasonable height for both seated/standing entry
         let targetTimestampNS = UInt64(targetTimestamp * Double(NSEC_PER_SEC))
         
@@ -3509,6 +3512,25 @@ class WorldTracker {
         }
     }
     
+    func nextFakeHeadPoseSequence() -> UInt64 {
+        fakeHeadPoseLock.lock()
+        defer { fakeHeadPoseLock.unlock() }
+        let sequence = fakeHeadPoseSequence
+        fakeHeadPoseSequence &+= 1
+        return sequence
+    }
+
+    // Keepalive (EventHandler.sendPoseKeepaliveIfStale): resend the stream's last real head pose, head only (the
+    // server keeps the view params it has).
+    func sendKeepaliveHead(_ head: AlvrDeviceMotion, targetTimestamp: Double) {
+        var motion = head
+#if targetEnvironment(simulator)
+        motion.pose.orientation = AlvrQuat(FakeHeadPose.dithered(head.pose.orientation.asQuatf(), sequence: nextFakeHeadPoseSequence()))
+#endif
+        let trackingMotions = [motion]
+        alvr_send_tracking(UInt64(targetTimestamp * Double(NSEC_PER_SEC)), trackingMotions, UInt64(trackingMotions.count), nil, nil)
+    }
+
     func angularVelocityBetweenQuats(_ q1: AlvrQuat, _ q2: AlvrQuat, _ dt: Float) -> (Float, Float, Float) {
         let r = (2.0 / dt)
         return (
