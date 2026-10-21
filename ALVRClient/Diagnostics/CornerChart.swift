@@ -85,13 +85,15 @@ struct CornerTangents: Equatable {
 }
 
 // Boundary shape from the marks, in normalised drawable units (axis spokes reach 1 at 100%, diagonals sqrt 2).
-// Per quadrant with axis radii a, b: a rectangle's corner is at sqrt(a^2 + b^2), an ellipse through the axis points
-// crosses the diagonal at 1 / sqrt((1/a^2 + 1/b^2) / 2). rectangle: diagonals >= 0.95 of the rectangle corner;
-// ellipse: <= 1.05 of the ellipse radius; rounded between. superellipse_n solves 2 (r / (sqrt2 a))^n = 1 on the means
-// (2 = ellipse, infinite = rectangle).
+// Per quadrant with axis radii a, b, along the fixed diagonal x = y: a rectangle a x b is left at sqrt 2 min(a, b) (the
+// diagonal reaches the corner only when both axes do), an ellipse through the axis points at
+// 1 / sqrt((1/a^2 + 1/b^2) / 2). rectangle: diagonals >= 0.95 of the rectangle prediction; ellipse: <= 1.05 of the
+// ellipse radius; rounded between. The superellipse (x/a)^n + (y/b)^n = 1 is solved per quadrant from its diagonal
+// (superellipse_q, 2 = ellipse, infinite = rectangle) and combined as 1 / mean(1/n), so a square quadrant counts as 0.
 struct CornerShape {
     let radii: [Double]
     let axisR, diagR, rectR, ellipseR, ratio, rectRatio, ellipseRatio, superellipseN, diagPctMean: Double
+    let quadrantN: [Double]
     let diagFloor: Bool
     let label: String
 
@@ -100,21 +102,37 @@ struct CornerShape {
         return pct / 100 * (n.u * n.u + n.v * n.v).squareRoot()
     }
 
+    // n with (s/a)^n + (s/b)^n = 1, s the diagonal point's coordinate (radius / sqrt 2); infinite at or beyond the
+    // rectangle (s >= min(a, b)). The left side falls from 2 (n = 0) to 0, so bisect on log n.
+    static func superellipseN(a: Double, b: Double, diagR: Double) -> Double {
+        let s = diagR / 2.0.squareRoot()
+        guard s < min(a, b) else { return .infinity }
+        func f(_ n: Double) -> Double { pow(s / a, n) + pow(s / b, n) - 1 }
+        var lo = log(1e-3), hi = log(1e4)
+        guard f(exp(hi)) < 0 else { return .infinity }
+        for _ in 0..<200 {
+            let mid = (lo + hi) / 2
+            if f(exp(mid)) > 0 { lo = mid } else { hi = mid }
+        }
+        return exp((lo + hi) / 2)
+    }
+
     static func classify(_ pcts: [Int: Double]) -> CornerShape? {
         guard (CornerSpokes.axes + CornerSpokes.diagonals.map(\.spoke)).allSatisfy({ pcts[$0] != nil }) else { return nil }
         func r(_ k: Int) -> Double { radius(k, pct: pcts[k]!) }
         func mean(_ xs: [Double]) -> Double { xs.reduce(0, +) / Double(xs.count) }
         let axisR = mean(CornerSpokes.axes.map(r))
         let diagR = mean(CornerSpokes.diagonals.map { r($0.spoke) })
-        let rectR = mean(CornerSpokes.diagonals.map { (r($0.x) * r($0.x) + r($0.y) * r($0.y)).squareRoot() })
+        let rectR = mean(CornerSpokes.diagonals.map { 2.0.squareRoot() * min(r($0.x), r($0.y)) })
         let ellipseR = mean(CornerSpokes.diagonals.map { 1 / ((1 / (r($0.x) * r($0.x)) + 1 / (r($0.y) * r($0.y))) / 2).squareRoot() })
-        let corner = 2.0.squareRoot() * axisR
-        let n = diagR >= corner ? Double.infinity : log(2) / log(corner / diagR)
+        let quadrantN = CornerSpokes.diagonals.map { superellipseN(a: r($0.x), b: r($0.y), diagR: r($0.spoke)) }
+        let squareness = mean(quadrantN.map { 1 / $0 })
+        let n = squareness > 0 ? 1 / squareness : Double.infinity
         let label = diagR >= 0.95 * rectR ? "rectangle" : diagR <= 1.05 * ellipseR ? "ellipse" : "rounded"
         let diagPcts = CornerSpokes.diagonals.map { pcts[$0.spoke]! }
         return CornerShape(radii: (0..<CornerSpokes.count).compactMap { k in pcts[k].map { radius(k, pct: $0) } },
                            axisR: axisR, diagR: diagR, rectR: rectR, ellipseR: ellipseR, ratio: diagR / axisR,
-                           rectRatio: rectR / axisR, ellipseRatio: ellipseR / axisR, superellipseN: n, diagPctMean: mean(diagPcts),
+                           rectRatio: rectR / axisR, ellipseRatio: ellipseR / axisR, superellipseN: n, diagPctMean: mean(diagPcts), quadrantN: quadrantN,
                            diagFloor: diagPcts.contains { $0 <= Double(CornerChart.ringPercents.last!) }, label: label)
     }
 }
@@ -338,6 +356,7 @@ enum CornerChart {
                 "area_frac": f4(area(poly) / ((t.left + t.right) * (t.bottom + t.top))), "r": s.radii.map(f4).joined(separator: ","),
                 "axis_r": f4(s.axisR), "diag_r": f4(s.diagR), "rect_r": f4(s.rectR), "ellipse_r": f4(s.ellipseR), "ratio": f4(s.ratio),
                 "rect_ratio": f4(s.rectRatio), "ellipse_ratio": f4(s.ellipseRatio), "superellipse_n": f4(s.superellipseN),
+                "superellipse_q": s.quadrantN.map(f4).joined(separator: ","),
                 "diag_pct_mean": String(format: "%.2f", s.diagPctMean), "diag_floor": s.diagFloor, "shape": s.label]
     }
 

@@ -1,11 +1,11 @@
 #!/bin/sh
 # Capture the Mac's AirPlay receiver window (the Vision Pro mirror) every N seconds into a folder (decision 65,
 # corner chart mirror comparison). macOS only; needs Screen Recording permission for the terminal running it.
-# Usage: sh tools/diag/capture-mirror.sh [-i SECONDS] [-n COUNT] [-o DIR] [-w OWNER_MATCH] [-l]
-#   -i  interval in seconds (default 2)     -n  number of captures, 0 = until Ctrl-C (default 0)
-#   -o  output folder (default ./mirror-<UTC stamp>)
+# Usage: sh tools/diag/capture-mirror.sh [-i SECONDS] [-n COUNT] [-o DIR] [-w OWNER_MATCH] [-l] [-c]
+#   -i  interval in seconds, a positive decimal (default 2)   -n  captures, a whole number, 0 = until Ctrl-C (default 0)
+#   -o  output folder (default ./mirror-<UTC stamp>); all scratch goes in <output>/.scratch and is removed at exit
 #   -w  case-insensitive match on the window's owner or title (default airplay)
-#   -l  list on-screen windows (id, owner, title, size, layer) and exit
+#   -l  list on-screen windows (id, owner, title, size, layer) and exit   -c  check the arguments, print them and exit
 # Files: mirror-<UTC stamp>-<n>.png plus index.tsv (utc, n, window id, file).
 set -eu
 
@@ -14,19 +14,34 @@ count=0
 out=""
 match=airplay
 list=0
-while getopts "i:n:o:w:lh" opt; do
+check=0
+while getopts "i:n:o:w:lch" opt; do
     case "$opt" in
         i) interval=$OPTARG ;;
         n) count=$OPTARG ;;
         o) out=$OPTARG ;;
         w) match=$OPTARG ;;
         l) list=1 ;;
+        c) check=1 ;;
         *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
     esac
 done
-case "$interval$count" in
-    *[!0-9.]*) echo "Error: -i and -n take numbers." >&2; exit 2 ;;
+case "$count" in
+    ''|*[!0-9]*) echo "Error: -n takes a whole number of captures (0 = until Ctrl-C), got '$count'." >&2; exit 2 ;;
 esac
+# Digits with at most one point and at least one digit (2, 0.5, .5, 2.), and not zero.
+case "$interval" in
+    ''|.|*[!0-9.]*|*.*.*) echo "Error: -i takes a positive number of seconds, got '$interval'." >&2; exit 2 ;;
+esac
+case "$interval" in
+    *[1-9]*) ;;
+    *) echo "Error: -i takes a positive number of seconds, got '$interval'." >&2; exit 2 ;;
+esac
+[ -n "$out" ] || out="mirror-$(date -u +%Y%m%dT%H%M%SZ)"
+if [ "$check" -eq 1 ]; then
+    echo "interval=$interval count=$count out=$out match=$match list=$list"
+    exit 0
+fi
 if [ "$(uname -s)" != Darwin ]; then
     echo "Error: macOS only (screencapture)." >&2
     exit 1
@@ -36,8 +51,17 @@ if ! command -v xcrun >/dev/null 2>&1 || ! command -v screencapture >/dev/null 2
     exit 1
 fi
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/capture-mirror.XXXXXX")
-trap 'rm -rf "$work"' EXIT INT TERM
+made_out=0
+[ -d "$out" ] || made_out=1
+work="$out/.scratch"
+mkdir -p "$work/tmp" "$work/mc"
+# Leaves no scratch behind; an output folder made only for -l (or a failed start) is removed again when empty.
+cleanup() {
+    rm -rf "$work"
+    if [ "$made_out" -eq 1 ]; then rmdir "$out" 2>/dev/null || true; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 cat > "$work/listwin.swift" <<'SWIFT'
 import CoreGraphics
 import Foundation
@@ -53,7 +77,8 @@ for w in windows {
     print(fields.map { $0.replacingOccurrences(of: "\t", with: " ") }.joined(separator: "\t"))
 }
 SWIFT
-if ! CLANG_MODULE_CACHE_PATH="$work/mc" xcrun swiftc -O -o "$work/listwin" "$work/listwin.swift" 2>"$work/swiftc.err"; then
+if ! TMPDIR="$work/tmp" CLANG_MODULE_CACHE_PATH="$work/mc" xcrun swiftc -O -module-cache-path "$work/mc" \
+        -o "$work/listwin" "$work/listwin.swift" 2>"$work/swiftc.err"; then
     echo "Error: could not build the window lister:" >&2
     cat "$work/swiftc.err" >&2
     exit 1
@@ -86,8 +111,6 @@ if [ -z "$id" ]; then
     exit 1
 fi
 
-[ -n "$out" ] || out="mirror-$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$out"
 [ -f "$out/index.tsv" ] || printf 'utc\tn\twindow_id\tfile\n' > "$out/index.tsv"
 echo "Capturing window $id every ${interval}s into $out (Ctrl-C to stop)."
 n=0

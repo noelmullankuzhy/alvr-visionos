@@ -102,9 +102,10 @@ outermost ring you could see) and with the eye's `corner_summary` line (`r=` rad
 shows the mirror's own crop, not the panel's visible area. A mirror crop smaller than
 the marks is expected; a larger one means the marks are conservative. The summary
 logs its raw numbers so the shape can be recomputed. Per quadrant with axis radii a, b
-(normalised so the axis spokes are 1 at 100%), a rectangle's diagonal is sqrt(a²+b²),
-an ellipse's is 1/sqrt((1/a²+1/b²)/2), and the superellipse exponent is
-n = ln2 / ln(√2·axis_r/diag_r). An ellipse through the axis points crosses the
+(normalised so the axis spokes are 1 at 100%), along the fixed diagonal a rectangle
+is left at √2·min(a, b) and an ellipse at 1/sqrt((1/a²+1/b²)/2). Each quadrant's
+superellipse exponent n solves (s/a)ⁿ + (s/b)ⁿ = 1 with s = diag_r/√2
+(`superellipse_q`, inf at or beyond the rectangle); `superellipse_n` = 1/mean(1/n). An ellipse through the axis points crosses the
 diagonal at ≈ 70.7%, so it marks on the 70 ring and classifies as `ellipse`
 (decision 65c). A diagonal at the innermost ring (55%) sets `diag_floor=true`
 (the true edge may be further in).
@@ -119,7 +120,12 @@ are subjective marks.
 sh tools/diag/smoke.sh
 sh -n tools/diag/pull-diag.sh
 sh -n tools/diag/capture-mirror.sh
+sh tools/diag/capture-mirror.sh -i 0.5 -n 3 -o /tmp/avp-mirror -c
 ```
+
+`-c` checks the capture arguments (whole-number `-n`, positive decimal `-i`) and
+exits without building or capturing. The window lister's source, binary, compiler
+temp, module cache and logs live in `<output>/.scratch`, removed at exit.
 
 Python defaults test the wire header, fractional rate/pacing math, sender loop
 with a deterministic clock/socket, and JSON summary without opening sockets.
