@@ -874,6 +874,7 @@ class EventHandler: ObservableObject {
                     sendBootstrapTrackingIfNeeded()
                 }
                 Settings.clearSettingsCache()
+                WorldTracker.shared.sendActiveInteractionProfile()
             case ALVR_EVENT_STREAMING_STOPPED.rawValue:
                 print("streaming stopped")
                 if streamingActive {
