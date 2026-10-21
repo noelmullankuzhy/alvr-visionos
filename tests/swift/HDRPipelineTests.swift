@@ -49,6 +49,7 @@ enum HDRPipelineTests {
         testProbeLevelsDecode()
         testProbeLineAndCadence()
         testLiveProbeFlag()
+        testFrameStats()
         finishTests("HDRPipelineTests")
     }
 
@@ -384,6 +385,79 @@ enum HDRPipelineTests {
                 expect(nearRel(decoded[c], nits, level < 0.2 ? 0.02 : 0.01), "level \(level): \(nits) nits decoded \(decoded)")
             }
         }
+    }
+
+    static func testFrameStats() {
+        let selection = pqSelection(planeBitDepth: 10)
+        // P010 stores codes in the high ten bits; padding must never enter the sample grid.
+        func word(_ nits: Double) -> UInt16 {
+            UInt16((64 + 876 * referencePQEncode(nits)).rounded()) << 6
+        }
+        let background = word(100), patch = word(462)
+        let width = 160, height = 400, yStride = 168, uvStride = 166
+        var y = [UInt16](repeating: 65535, count: yStride * height)
+        var uv = [UInt16](repeating: 65535, count: uvStride * height / 2)
+        for row in 0..<height {
+            for x in 0..<width { y[row * yStride + x] = background }
+        }
+        for row in 0..<height / 2 {
+            for x in 0..<width { uv[row * uvStride + x] = 512 << 6 }
+        }
+        // Each eye has 2,000 grid samples. L: 3 bright samples, R: 21.
+        for i in 0..<3 { y[(i * 4) * yStride] = patch }
+        for i in 0..<21 { y[(i * 4) * yStride + 80] = patch }
+        y[yStride + 1] = 1023 << 6 // off-grid: invisible
+        func stats(_ selection: ColourSelection = selection, step: Int = 4) -> [HDRFrameStats] {
+            HDRPipeline.frameStats(luma: y, lumaStride: yStride, chroma: uv, chromaStride: uvStride,
+                                   width: width, height: height, chromaWidth: width / 2, chromaHeight: height / 2,
+                                   selection: selection, step: step)
+        }
+        func decoded(_ value: UInt16) -> Double {
+            let rgb = HDRPipeline.decodeNits(codes: simd_double3(Double(value >> 6), 512, 512), selection: selection)
+            return max(rgb.x, max(rgb.y, rgb.z))
+        }
+        let low = decoded(background), high = decoded(patch)
+        expect(nearRel(low, 100, 0.01) && nearRel(high, 462, 0.01), "quantised PQ fixture levels")
+        let result = stats()
+        expectEqual(result.count, 2)
+        for (i, bright) in [3, 21].enumerated() {
+            let s = result[i]
+            expectEqual(s.eye, i == 0 ? "L" : "R")
+            expectEqual(s.count, 2000)
+            expectEqual(s.maxNits, high)
+            expectEqual(s.p999, high, "nearest-rank 99.9th percentile")
+            expectEqual(s.p99, i == 0 ? low : high, "nearest-rank 99th percentile")
+            expect(near(s.mean, (Double(2000 - bright) * low + Double(bright) * high) / 2000, 1e-8), "mean of channel maxima")
+            expectEqual(s.gt100, low > 100 ? 2000 : bright, "strict threshold on decoded quantised codes")
+            expectEqual(s.gt203, bright)
+            let expected = String(format: "HDRSTATS t_ms=1234 eye=%@ step=4 n=2000 max=%.1f p999=%.1f p99=%.1f mean=%.1f gt100=%d gt203=%d",
+                                  s.eye, high, high, i == 0 ? low : high, s.mean, s.gt100, bright)
+            expectEqual(s.line(tMs: 1234), expected)
+        }
+        expectEqual(stats(step: 8)[0].count, 500, "step controls both axes")
+        expect(stats(pqSelection(planeBitDepth: 8)).map { $0.line(tMs: 0) }.isEmpty, "8-bit PQ emits no stats")
+        expect(stats(sdrState(context(hdr: false)).selection).map { $0.line(tMs: 0) }.isEmpty, "non-PQ emits no stats")
+        expect(stats(step: 0).isEmpty, "invalid grid rejected")
+        // Odd widths use the actual x < width/2 boundary, with a global origin grid.
+        let odd = HDRPipeline.frameStats(luma: [UInt16](repeating: background, count: 45), lumaStride: 9,
+                                        chroma: [UInt16](repeating: 512 << 6, count: 30), chromaStride: 10,
+                                        width: 9, height: 5, chromaWidth: 5, chromaHeight: 3, selection: selection)
+        expectEqual(odd.map { $0.count }, [2, 4], "x=0 left; x=4,8 right; y=0,4")
+        // Coloured co-sited chroma: a blue peak proves the metric is max RGB, not Y or red.
+        var colourUV = [UInt16](repeating: 512 << 6, count: 16)
+        colourUV[4] = 700 << 6 // x=4, chroma x=2 belongs to the right eye
+        let coloured = HDRPipeline.frameStats(luma: [UInt16](repeating: background, count: 16), lumaStride: 8,
+                                             chroma: colourUV, chromaStride: 8, width: 8, height: 2,
+                                             chromaWidth: 4, chromaHeight: 1, selection: selection)
+        let rgb = HDRPipeline.decodeNits(codes: simd_double3(Double(background >> 6), 700, 512), selection: selection)
+        expect(rgb.z > rgb.x && rgb.z > rgb.y, "fixture has a blue peak")
+        expectEqual(coloured[0].maxNits, low, "left chroma remains neutral")
+        expectEqual(coloured[1].maxNits, rgb.z, "right uses co-sited chroma and maximum channel")
+        var centre = HDRProbeClock()
+        var frame = HDRProbeClock(intervalMs: 1000)
+        expect(centre.shouldSample(nowMs: 0) && frame.shouldSample(nowMs: 0), "independent initial samples")
+        expect(centre.shouldSample(nowMs: 250) && !frame.shouldSample(nowMs: 250), "centre cadence stays 250ms")
+        expect(!frame.shouldSample(nowMs: 999) && frame.shouldSample(nowMs: 1000), "frame cadence 1s")
     }
 
     static func testLiveProbeFlag() {

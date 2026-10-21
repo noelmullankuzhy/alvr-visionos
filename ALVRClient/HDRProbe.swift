@@ -9,6 +9,8 @@
 // colour conversion (HDRPipeline.decodeNits: yuvToRGB + ST 2084 EOTF, linear BT.2020, before the output matrix and
 // roll-off). The eye centre is the centre of each half of the side-by-side frame; with foveated encoding that is the
 // foveation centre only when CENTER_SHIFT is 0, which the decision-63 full-field frames make irrelevant.
+// Every 1 s, a utility-queue scan also emits HDRSTATS per eye (step=4, decoded max-channel nits).
+// Counts are grid samples, not full-resolution source pixels; see HDRPipeline.frameStats for cost/percentiles.
 // Sink: alvr_log at Info, which ALVR forwards to the streamer ("Client <host>: [Info] [ALVR NATIVE] HDRPROBE ...")
 // when the session's extra.logging.client_log_report_level is Info or lower (default Error), and session_log.txt
 // keeps it with extra.logging.log_to_disk; ALVR's logger also writes it to the device console. Off: nothing per frame.
@@ -31,12 +33,24 @@ final class HDRProbe {
     }
 
     private var clock = HDRProbeClock()
+    private var statsClock = HDRProbeClock(intervalMs: 1000)
+    private let statsQueue = DispatchQueue(label: "ALVR.HDRStats", qos: .utility)
+    private let statsAvailable = DispatchSemaphore(value: 1)
     private var loggedUnavailable = false
     private var loggedEightBit = false
 
     // Render thread, after the frame's planes are bound. Cadence on the monotonic clock; t_ms is wall-clock Unix ms.
     func sample(pixelBuffer: CVPixelBuffer, colour: StreamColourState) {
-        guard clock.shouldSample(nowMs: HDRProbeClock.monotonicMs()) else { return }
+        guard Self.enabled else { return }
+        let monotonicMs = HDRProbeClock.monotonicMs()
+        // Independent of the centre cadence, including when a stats sample is dropped as busy.
+        if colour.hdrPQ, colour.selection.planeBitDepth == 10,
+           HDRPipeline.pqPlaneBitDepth(pixelFormat: CVPixelBufferGetPixelFormatType(pixelBuffer)) == 10,
+           CVPixelBufferGetPlaneCount(pixelBuffer) == 2,
+           statsClock.shouldSample(nowMs: monotonicMs) {
+            scheduleStats(pixelBuffer: pixelBuffer, selection: colour.selection)
+        }
+        guard clock.shouldSample(nowMs: monotonicMs) else { return }
         let nowMs = Int(Date().timeIntervalSince1970 * 1000)
         let selection = colour.selection
         let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
@@ -65,6 +79,33 @@ final class HDRProbe {
             let code = simd_double3(Double(luma) / shift, Double(cb) / shift, Double(cr) / shift)
             emit(HDRPipeline.probeLine(tMs: nowMs, eye: eye, code: code, nits: HDRPipeline.decodeNits(codes: code, selection: selection)))
         }
+    }
+
+    // Only admission/dispatch happens on the render thread. The closure strongly retains the decoded
+    // buffer until the scan completes. One in-flight buffer, no backlog; busy samples are dropped.
+    private func scheduleStats(pixelBuffer: CVPixelBuffer, selection: ColourSelection) {
+        guard statsAvailable.wait(timeout: .now()) == .success else { return }
+        let tMs = Int(Date().timeIntervalSince1970 * 1000)
+        statsQueue.async(execute: DispatchWorkItem { [self, pixelBuffer] in
+            defer { statsAvailable.signal() }
+            guard Self.enabled,
+                  CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly) == kCVReturnSuccess else { return }
+            defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+            guard let yBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0),
+                  let uvBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1) else { return }
+            let height = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+            let chromaHeight = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1)
+            let yStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0) / 2
+            let uvStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1) / 2
+            let luma = UnsafeBufferPointer(start: yBase.assumingMemoryBound(to: UInt16.self), count: yStride * height)
+            let chroma = UnsafeBufferPointer(start: uvBase.assumingMemoryBound(to: UInt16.self), count: uvStride * chromaHeight)
+            let stats = HDRPipeline.frameStats(luma: luma, lumaStride: yStride, chroma: chroma, chromaStride: uvStride,
+                                              width: CVPixelBufferGetWidthOfPlane(pixelBuffer, 0), height: height,
+                                              chromaWidth: CVPixelBufferGetWidthOfPlane(pixelBuffer, 1), chromaHeight: chromaHeight,
+                                              selection: selection)
+            guard Self.enabled else { return }
+            for eye in stats { emit(eye.line(tMs: tMs)) }
+        })
     }
 
     // 8- or 16-bit component at luma coordinates (x, y), scaled to the plane's own size (chroma subsampling).

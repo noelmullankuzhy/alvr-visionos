@@ -148,6 +148,49 @@ enum HDRPipeline {
         return simd_double3(pqEOTF(Double(rgb.x)), pqEOTF(Double(rgb.y)), pqEOTF(Double(rgb.z)))
     }
 
+    // P010 planes (words, including row padding), independent of CVPixelBuffer. The grid has a global
+    // origin (0,0); samples belong to L iff x < width/2. Chroma uses the same co-sited mapping as the
+    // centre probe, supporting 4:2:0, 4:2:2 and 4:4:4. Thresholds and mean use max(R,G,B), not luma.
+    // At step=4: N=ceil(width/4)*ceil(height/4), three PQ EOTFs per sample, O(N log N) time for
+    // exact nearest-rank percentiles and O(N) storage (8*N bytes of samples plus sorting scratch).
+    // No full-plane copy.
+    // This can exceed 2ms on decoded stream sizes: call only on the probe's utility queue.
+    static func frameStats<Y: RandomAccessCollection, UV: RandomAccessCollection>(
+        luma: Y, lumaStride: Int, chroma: UV, chromaStride: Int,
+        width: Int, height: Int, chromaWidth: Int, chromaHeight: Int,
+        selection: ColourSelection, step: Int = 4
+    ) -> [HDRFrameStats] where Y.Element == UInt16, Y.Index == Int, UV.Element == UInt16, UV.Index == Int {
+        guard selection.isPQ, selection.planeBitDepth == 10, step > 0,
+              width > 1, height > 0, chromaWidth > 0, chromaHeight > 0,
+              lumaStride >= width, chromaWidth <= chromaStride / 2,
+              height <= luma.count / lumaStride, chromaHeight <= chroma.count / chromaStride else { return [] }
+        var eyes = [[Double](), [Double]()]
+        for y in stride(from: 0, to: height, by: step) {
+            let cy = y * chromaHeight / height
+            for x in stride(from: 0, to: width, by: step) {
+                let cx = x * chromaWidth / width
+                let yi = luma.startIndex + y * lumaStride + x
+                let ci = chroma.startIndex + cy * chromaStride + 2 * cx
+                let code = simd_double3(Double(luma[yi] >> 6), Double(chroma[ci] >> 6), Double(chroma[ci + 1] >> 6))
+                let rgb = decodeNits(codes: code, selection: selection)
+                eyes[x < width / 2 ? 0 : 1].append(max(rgb.x, max(rgb.y, rgb.z)))
+            }
+        }
+        return eyes.enumerated().compactMap { index, values in
+            guard !values.isEmpty else { return nil }
+            let sorted = values.sorted()
+            func percentile(_ p: Double) -> Double { sorted[Int(ceil(p * Double(sorted.count))) - 1] }
+            let counts = values.reduce(into: (gt100: 0, gt203: 0)) { counts, value in
+                if value > 100 { counts.gt100 += 1 }
+                if value > 203 { counts.gt203 += 1 }
+            }
+            return HDRFrameStats(eye: index == 0 ? "L" : "R", step: step, count: values.count,
+                                 maxNits: sorted.last!, p999: percentile(0.999), p99: percentile(0.99),
+                                 mean: values.reduce(0, +) / Double(values.count),
+                                 gt100: counts.gt100, gt203: counts.gt203)
+        }
+    }
+
     // Oracle log (decision 63): env ALVR_HDR_PROBE=1|true|yes|on, or the UserDefaults bool of the same name
     // (set by the HDR probe UI toggle, or the launch argument `-ALVR_HDR_PROBE YES`).
     static let probeKey = "ALVR_HDR_PROBE"
@@ -162,6 +205,24 @@ enum HDRPipeline {
     static func probeLine(tMs: Int, eye: String, code: simd_double3, nits: simd_double3) -> String {
         "HDRPROBE t_ms=\(tMs) eye=\(eye) code=\(Int(code.x.rounded())),\(Int(code.y.rounded())),\(Int(code.z.rounded()))"
             + String(format: " nits=%.1f,%.1f,%.1f", nits.x, nits.y, nits.z)
+    }
+}
+
+struct HDRFrameStats {
+    let eye: String
+    let step: Int
+    let count: Int
+    let maxNits: Double
+    let p999: Double
+    let p99: Double
+    let mean: Double
+    let gt100: Int
+    let gt203: Int
+
+    func line(tMs: Int) -> String {
+        "HDRSTATS t_ms=\(tMs) eye=\(eye) step=\(step) n=\(count)"
+            + String(format: " max=%.1f p999=%.1f p99=%.1f mean=%.1f gt100=%d gt203=%d",
+                     locale: Locale(identifier: "en_US_POSIX"), maxNits, p999, p99, mean, gt100, gt203)
     }
 }
 
@@ -360,14 +421,19 @@ final class VideoPipelineSlot<Payload, Pipelines> {
 // (monotonicMs); a clock that steps back restarts the cadence instead of stalling it.
 struct HDRProbeClock {
     static let intervalMs = 250
+    private let cadenceMs: Int
     private var lastMs: Int?
+
+    init(intervalMs: Int = HDRProbeClock.intervalMs) {
+        cadenceMs = intervalMs
+    }
 
     static func monotonicMs(uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Int {
         Int(uptime * 1000)
     }
 
     mutating func shouldSample(nowMs: Int) -> Bool {
-        if let last = lastMs, nowMs >= last, nowMs - last < HDRProbeClock.intervalMs { return false }
+        if let last = lastMs, nowMs >= last, nowMs - last < cadenceMs { return false }
         lastMs = nowMs
         return true
     }
