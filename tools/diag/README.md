@@ -380,3 +380,113 @@ a Metal device there: use `SWIFT_SKIP_TESTS=HDRGPUTests sh tools/run-tests.sh`
 for the remaining tests (the runner prints the explicit skip), and run the normal
 suite, noise test, and both loopback suites outside that sandbox. Hardware decode
 acceptance/throughput/format and real PC→AVP network tails remain device-only.
+
+## Repeatable diagnostic report (D8)
+
+```sh
+/usr/bin/python3 tools/diag/diag-report.py /tmp/avp-diag-logs -o /tmp/avp-report.md
+/opt/homebrew/bin/python3 tools/diag/diag-report.py /tmp/avp-diag-logs \
+  --sender-log /tmp/ladder.jsonl -o /tmp/avp-report.md
+/usr/bin/python3 -m unittest tools/diag/test_diag_report.py
+/opt/homebrew/bin/python3 -m unittest tools/diag/test_diag_report.py
+```
+
+Python 3.9+, standard library only. The input directory's `diag-*.log` files
+are read in natural filename order (including rotation suffixes); stdout is the
+default output. Identical inputs produce identical Markdown, with no generation
+time. Every section names `filename:line` sources, retains every emitted field,
+and uses **no data** for absent/nonfinite measurements. Invalid lines are skipped,
+counted and listed by source; unreadable diagnostic files are reported in file
+health. Unknown topics are retained there too. No app/device changes are needed.
+
+For a UDP ladder, enable **Net sink** once (UDP, default port 9944), then run:
+
+```sh
+python3 tools/diag/netprobe-ladder.py HEADSET_IP 9944 50,100,150,200,250,300 8 90 1200 > /tmp/ladder.jsonl
+```
+
+This is the GM's `netladder.py` workflow, now using the sibling
+`netprobe-send.py` wire helpers. It keeps **one UDP socket and continuous sequence
+and frame IDs across all steps**. The sink pins that sender, so do not restart a
+sender for each rate. Keep the entire ladder plus listener setup below the sink's
+60-second limit; the example has 48 seconds of scheduled steps. Stop the sink
+when the ladder finishes, pull the diagnostic logs, and pass the unedited JSONL
+to `--sender-log`. TCP bulk uses a separate TCP sink run and the existing
+`netprobe-send.py --mode tcp`; TCP throughput never qualifies for the UDP knee.
+The ladder sender's `--help` lists its positional arguments and defaults.
+
+The real JSONL format is one metadata record, all timed step records, then a footer:
+
+```json
+{"start_wall":1792589933.8743958,"host":"headset","port":9944,"fps":90,"packet_size":1200}
+{"t_start_s":0.0,"mbps_req":100.0,"sent_mbps":100.5,"late_frames":0,"send_errors":0,"frames":90,"elapsed_s":0.994}
+{"t_start_s":0.994,"mbps_req":200.0,"sent_mbps":201.5,"late_frames":0,"send_errors":0,"frames":90,"elapsed_s":0.992}
+{"total_s":1.986,"packets":31320,"frames":180}
+```
+
+`t_start_s + elapsed_s` defines each step's end; elapsed time is measured, not
+assumed to equal the requested hold. As in the original sender, a step ends after
+sending its last scheduled frame, without an extra final frame-period wait.
+`packets` in the footer counts attempted sequence numbers, including send errors;
+`sent_mbps` counts bytes accepted by the socket and establishes no receipt result.
+Send failures are counted per step without resetting the sequence or socket.
+
+The report expects one UDP sink run for the ladder, with any TCP runs reported
+separately. Multiple UDP runs are ambiguous and disable alignment; retain only
+the intended run's logs when comparing a ladder. Listener `seconds` includes idle
+time before the sender starts. The report instead aligns sink `active_seconds`
+(first-to-last valid receipt) to the first sender step start. Subsequent step bounds
+retain the sender's measured `t_start_s` offsets. No wall-clock alignment or
+absolute one-way latency is inferred. JSON times are rounded to milliseconds;
+a 2 ms comparison tolerance accounts for that rounding, not network delay/drift.
+
+Bytes, loss, reorder, duplicates, stale/invalid/foreign packets, completed frames
+and histogram overflow are cumulative. The report differences adjacent snapshots
+on this receipt timeline, including the final summary; it never adds a summary to
+its intervals. A final snapshot at the same rounded time replaces the earlier
+one, preserving late repairs/counter updates. Each step shows only intervals
+wholly contained in its bounds, their source and baseline lines, and the exact
+`coverage_s`. Received Mb/s is delta bytes × 8 / covered seconds / 1e6.
+`whole_step=false` means this is an interior-window measurement, not a whole-step
+average. Boundary-crossing intervals are listed and never prorated or assigned to
+a single rate. Missing endpoints/counters produce **no data**. Loss deltas can be
+negative when late arrivals repair gaps created in an earlier step.
+
+Jitter is run-state EWMA and p99 is a cumulative percentile; neither can be
+subtracted to obtain a later step's metric. Per-step jitter is **no data**.
+Completion p99 is **no data** for later steps; for a fully covered first step,
+the cumulative prefix has the correct scope and can be reported. The footer has
+only the total packet count, so multi-step loss percentages are **no data** too.
+Raw cumulative jitter/percentiles and every sender field remain in separate tables.
+These limits usually leave the continuous ladder's **knee: no data**. Additional
+step-specific packet counters and distributions would be needed to measure it.
+
+When all required measurements are available (for example a fully covered,
+single-step ladder), the knee rule remains the highest requested rate with
+observed loss ≤0.1% **and** completion p99 ≤1000/fps ms. Loss percent is
+`100 * loss delta / matching sender packets`; trailing loss remains unknown.
+A pass also requires a sender footer, final sink summary, zero send errors,
+completed frames and no histogram overflow. Incomplete/malformed sender logs
+cannot establish a knee. Malformed lines are skipped and counted, and disable
+sender alignment so missing records never shift steps. The tests include the
+actual GM sample, one continuous run with cumulative counter differences,
+boundary-straddling intervals, and independent loss/deadline threshold cases.
+
+Decode fps/Mpix/s aggregate sessions; per-session achieved fps is `fps / sessions`.
+The 90/96/100 Hz flags require enough per-session throughput, zero drops,
+`hw=true`, and `err=0`. Highest passing per coded size ranks source fps × sessions
+among trials meeting their source cadence. These checks establish throughput,
+not sustained backlog stability or unlogged latency tails. Codec hardware queries
+and session checks keep separate source references. EDR threshold hold times use
+the most recent matching step in that session and name that source; they are
+configured holds, not a measured time between the step and mark.
+
+Current M6 logs contain interval p50/p95/max, without interval samples/counts or
+window durations. The report therefore gives the median target cadence estimate
+(`1000 / target_interval_p50_ms`), and explicitly marks the histogram and achieved
+Hz **no data**. Actual photon presentation remains unavailable. M9 GPU and decode
+latency logs have p50/p95, not p99; p95 is preserved and never relabelled p99.
+RQ sweep GPU p99 is logged and reported. M9 footprint is bytes; RQ `footprint_mb`
+is MiB. Corner radii/shape/exponents/area come from the recorded summary, with
+16 radii expanded in logged spoke order; missing marks are never filled in.
+These reports cannot manufacture measurements the headset did not record.

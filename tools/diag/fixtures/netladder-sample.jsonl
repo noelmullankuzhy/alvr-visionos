@@ -1,0 +1,5 @@
+{"start_wall": 1792589933.8743958, "host": "127.0.0.1", "port": 9, "fps": 90, "packet_size": 1200}
+{"t_start_s": 0.0, "mbps_req": 100.0, "sent_mbps": 100.5, "late_frames": 0, "send_errors": 10, "frames": 90, "elapsed_s": 0.994}
+{"t_start_s": 0.994, "mbps_req": 200.0, "sent_mbps": 201.5, "late_frames": 0, "send_errors": 10, "frames": 90, "elapsed_s": 0.992}
+{"t_start_s": 1.986, "mbps_req": 300.0, "sent_mbps": 301.8, "late_frames": 0, "send_errors": 10, "frames": 90, "elapsed_s": 0.994}
+{"total_s": 2.98, "packets": 62640, "frames": 270}
