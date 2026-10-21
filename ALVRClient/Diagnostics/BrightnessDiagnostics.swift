@@ -64,6 +64,7 @@ struct PQImmersiveView: View {
     var body: some View {
         if Diag.isOn {
             RealityView { content in
+                DiagEye.unsupported()
                 let screen = Entity()
                 screen.components.set(VideoPlayerComponent(avPlayer: PQDiagnostic.shared.player))
                 screen.position = [0, 1.4, -2]

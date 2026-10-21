@@ -111,3 +111,15 @@ class GlobalSettingsStore: ObservableObject {
         try data.write(to: outfile)
     }
 }
+
+// Value captured once for a frame/build. Shader variants never reread settings or mutable Renderer fields.
+struct ChromaKeySnapshot: Equatable {
+    let enabled: Bool
+    let colour: SIMD3<Float>
+    let range: SIMD2<Float>
+    init(settings: GlobalSettings) {
+        enabled = settings.chromaKeyEnabled
+        colour = SIMD3(settings.chromaKeyColorR, settings.chromaKeyColorG, settings.chromaKeyColorB)
+        range = SIMD2(settings.chromaKeyDistRangeMin, settings.chromaKeyDistRangeMax)
+    }
+}

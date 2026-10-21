@@ -129,7 +129,18 @@ final class DiagRenderProbe {
     private struct MapSnap {
         let drawable, map: Int
         let screen: MTLSize
-        let physical: [MTLSize]
+        let physical: MTLSize
+        let layer, layerCount: Int
+    }
+
+    private let snapshots = DiagDoubleBuffer(DiagDrawableSnapshot<ViewSnap, MapSnap>(), DiagDrawableSnapshot<ViewSnap, MapSnap>())
+    struct Timing {
+        let deadline, target: UInt64
+        let offset: Int64
+    }
+    static func timing(for drawable: LayerRenderer.Drawable) -> Timing {
+        Timing(deadline: ns(drawable.frameTiming.renderingDeadline), target: ns(drawable.frameTiming.presentationTime),
+               offset: Int64(ns(LayerRenderer.Clock().now)) - Int64(CACurrentMediaTime() * Double(NSEC_PER_SEC)))
     }
 
     let cadence = DiagCadence()
@@ -144,39 +155,40 @@ final class DiagRenderProbe {
 
     // Render thread, after the frame's drawables are encoded. sourceId: timestamp of the video frame encoded into
     // them, nil when no video was drawn (idle, or the frame was rejected).
-    func frame(layerRenderer: LayerRenderer, drawables: [LayerRenderer.Drawable], predicted: LayerRenderer.Frame.Timing, sourceId: UInt64?) {
+    func frame(layerRenderer: LayerRenderer, drawables: [LayerRenderer.Drawable], predicted: LayerRenderer.Frame.Timing, sourceId: UInt64?, timing: Timing) {
         guard let main = drawables.first else { return }
-        let offset = Int64(Self.ns(LayerRenderer.Clock().now)) - Int64(CACurrentMediaTime() * Double(NSEC_PER_SEC))
         cadence.frame(targetNs: Self.ns(main.frameTiming.presentationTime), predictedNs: Self.ns(predicted.presentationTime),
-                      sourceId: sourceId, clockOffsetNs: offset)
+                      sourceId: sourceId, clockOffsetNs: timing.offset)
         let now = Diag.monotonicMs()
-        if m6.due(nowMs: now) {
-            let raw = cadence.take()
+        if m6.due(nowMs: now), let raw = cadence.take() {
             let hz = Double(refreshRate)
-            Diag.background { Diag.log("m6", DiagCadence.fields(DiagCadence.window(raw, requestedHz: hz))) }
+            Diag.background { [self] in
+                defer { cadence.recycle(raw) }
+                Diag.log("m6", DiagCadence.fields(DiagCadence.window(raw, requestedHz: hz)))
+            }
         }
         if m5.due(nowMs: now) {
             snapshotDrawables(layerRenderer, drawables)
         }
-        if m9.due(nowMs: now) {
-            let gpu = cadence.takeGpu()
+        if m9.due(nowMs: now), let gpu = cadence.takeGpu() {
             let device = device
-            Diag.background {
-                let summary = DiagStats.summary(gpu)
+            Diag.background { [self] in
+                defer { cadence.recycleGpu(gpu) }
+                let summary = DiagStats.summary(gpu.values)
                 Diag.log("m9", ["thermal": Diag.thermalName(ProcessInfo.processInfo.thermalState),
                                 "available_memory": os_proc_available_memory(), "phys_footprint": DiagProbes.physFootprint().map { "\($0)" } ?? "unavailable",
                                 "metal_allocated": device.currentAllocatedSize, "metal_recommended_working_set": device.recommendedMaxWorkingSetSize,
                                 "gpu_p50_ms": summary.map { $0.p50 as Any } ?? "unavailable", "gpu_p95_ms": summary.map { $0.p95 as Any } ?? "unavailable",
-                                "gpu_samples": gpu.count])
+                                "gpu_samples": gpu.values.count])
             }
         }
     }
 
     // Command buffer completion: host-clock GPU times and callback time against the frame's layer-clock deadline/target.
-    func completed(_ commandBuffer: MTLCommandBuffer, renderingDeadline: LayerRenderer.Clock.Instant, targetNs: UInt64, callbackHostNs: UInt64) {
+    func completed(_ commandBuffer: MTLCommandBuffer, timing: Timing, callbackHostNs: UInt64) {
         cadence.completed(gpuStartHostNs: UInt64(max(commandBuffer.gpuStartTime, 0) * Double(NSEC_PER_SEC)),
                           gpuEndHostNs: UInt64(max(commandBuffer.gpuEndTime, 0) * Double(NSEC_PER_SEC)),
-                          renderingDeadlineNs: Self.ns(renderingDeadline), targetNs: targetNs, callbackHostNs: callbackHostNs)
+                          renderingDeadlineNs: timing.deadline, targetNs: timing.target, callbackHostNs: callbackHostNs, clockOffsetNs: timing.offset)
     }
 
     private func snapshotDrawables(_ layerRenderer: LayerRenderer, _ drawables: [LayerRenderer.Drawable]) {
@@ -189,26 +201,29 @@ final class DiagRenderProbe {
         }
 #endif
         let foveation = layerRenderer.configuration.isFoveationEnabled
-        var views: [ViewSnap] = []
-        var maps: [MapSnap] = []
+        guard let snapshot = snapshots.take() else { return }
         for (d, drawable) in drawables.enumerated() {
             for (v, view) in drawable.views.enumerated() {
                 let map = view.textureMap
                 let texture = Int(map.textureIndex) < drawable.colorTextures.count ? drawable.colorTextures[Int(map.textureIndex)] : nil
-                views.append(ViewSnap(drawable: d, view: v, texture: Int(map.textureIndex), slice: Int(map.sliceIndex),
+                guard snapshot.views.count < 32 else { continue }
+                snapshot.views.append(ViewSnap(drawable: d, view: v, texture: Int(map.textureIndex), slice: Int(map.sliceIndex),
                                       width: texture?.width ?? 0, height: texture?.height ?? 0, arrayLength: texture?.arrayLength ?? 0,
                                       format: texture?.pixelFormat, viewport: map.viewport, tangents: drawable.gimmeTangents(viewIndex: v)))
             }
             for (m, rateMap) in drawable.rasterizationRateMaps.enumerated() {
-                maps.append(MapSnap(drawable: d, map: m, screen: rateMap.screenSize,
-                                    physical: (0..<rateMap.layerCount).map { rateMap.physicalSize(layer: $0) }))
+                for layer in 0..<rateMap.layerCount where snapshot.maps.count < 64 {
+                    snapshot.maps.append(MapSnap(drawable: d, map: m, screen: rateMap.screenSize,
+                                                 physical: rateMap.physicalSize(layer: layer), layer: layer, layerCount: rateMap.layerCount))
+                }
             }
         }
         let drawableCount = drawables.count
-        Diag.background {
+        Diag.background { [self] in
+            defer { snapshots.recycle(snapshot) { $0.reset() } }
             func q(_ x: Float?) -> Any { x.map { Double($0) as Any } ?? "unavailable" }
             Diag.log("m5", ["drawables": drawableCount, "render_quality": q(quality), "max_render_quality": q(maxQuality), "foveation": foveation])
-            for s in views {
+            for s in snapshot.views {
                 let vp = s.viewport
                 let t = s.tangents
                 Diag.log("m5_view", ["drawable": s.drawable, "view": s.view, "texture": s.texture, "slice": s.slice,
@@ -217,12 +232,12 @@ final class DiagRenderProbe {
                                      "viewport": String(format: "%.0f,%.0f,%.0f,%.0f", vp.originX, vp.originY, vp.width, vp.height),
                                      "tangents": String(format: "%.4f,%.4f,%.4f,%.4f", t.x, t.y, t.z, t.w)])
             }
-            for d in 0..<drawableCount where !maps.contains(where: { $0.drawable == d }) {
+            for d in 0..<drawableCount where !snapshot.maps.contains(where: { $0.drawable == d }) {
                 Diag.log("m5_vrr", ["drawable": d, "map": "none"])
             }
-            for s in maps {
+            for s in snapshot.maps where s.layer == 0 {
                 Diag.log("m5_vrr", ["drawable": s.drawable, "map": s.map, "screen": "\(s.screen.width)x\(s.screen.height)",
-                                    "layers": s.physical.count, "physical": s.physical.map { "\($0.width)x\($0.height)" }.joined(separator: ";")])
+                                    "layers": s.layerCount, "physical": snapshot.maps.filter { $0.drawable == s.drawable && $0.map == s.map }.map { "\($0.physical.width)x\($0.physical.height)" }.joined(separator: ";")])
             }
         }
     }

@@ -170,6 +170,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     private var rqSweep: RQRenderer?
     // Corner chart (decision 65): Metal renderer, no stream; nil unless Diagnostics is on and the setting picks a mode.
     let cornerChart: CornerChartRenderer?
+    let diagEye: DiagEyeRenderer?
     var hdrEnabled = false
     var currentRenderColorFormat = renderColorFormatSDR
     var currentDrawableRenderColorFormat = renderColorFormatDrawableSDR
@@ -177,6 +178,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     //
     // Chroma keying shader vars
     //
+    var frameChromaKey: ChromaKeySnapshot?
     var chromaKeyEnabled = false
     var chromaKeyColor = simd_float3(0.0, 1.0, 0.0); // green
     
@@ -216,6 +218,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         self.commandQueue = self.device.makeCommandQueue()!
         self.diagProbe = layerRenderer != nil && Diag.isOn ? DiagRenderProbe(device: self.device) : nil
         self.cornerChart = layerRenderer.flatMap { CornerChartRenderer.make(device: $0.device, layerRenderer: $0) }
+        self.diagEye = layerRenderer != nil && Diag.isOn ? DiagEyeRenderer(layerRenderer!) : nil
+        if layerRenderer == nil && Diag.isOn { DiagEye.unsupported() }
 
         let uniformBufferSize = alignedUniformsSize * maxBuffersInFlight
         self.dynamicUniformBuffer = self.device.makeBuffer(length:uniformBufferSize,
@@ -297,7 +301,12 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         EventHandler.shared.renderStarted = true
     }
     
-    func rebuildRenderPipelines() {
+    func rebuildRenderPipelines(chromaKey snapshot: ChromaKeySnapshot? = nil) {
+        let chromaKey = snapshot ?? ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings)
+        chromaKeyEnabled = chromaKey.enabled
+        if #unavailable(visionOS 2.0) { chromaKeyEnabled = chromaKeyEnabled && isRealityKit }
+        chromaKeyColor = chromaKey.colour
+        chromaKeyLerpDistRange = chromaKey.range
         print("rebuildRenderPipelines")
 
         hdrEnabled = EventHandler.shared.enableHdr
@@ -332,7 +341,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         // A build that finishes after the stream stopped or restarted is discarded by publish. None is requested
         // until the first frame (its bind requests one).
         if let inputs = videoFramePipelines.buildInputs() {
-            buildVideoFramePipelines(colour: inputs.colour, foveationVars: inputs.payload)
+            buildVideoFramePipelines(colour: inputs.colour, foveationVars: inputs.payload, chromaKey: chromaKey)
         }
 
         do {
@@ -357,7 +366,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     }
 
     // Both video variants from one generation's snapshot (rebuildRenderPipelines), published together with it.
-    private func buildVideoFramePipelines(colour: StreamColourState, foveationVars: FoveationVars?) {
+    private func buildVideoFramePipelines(colour: StreamColourState, foveationVars: FoveationVars?, chromaKey: ChromaKeySnapshot) {
         guard let foveationVars else {
             print("rebuildRenderPipelines: stream \(colour.stream.generation) started without settings, no video pipelines")
             return
@@ -369,6 +378,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                             viewCount: layerRenderer?.properties.viewCount ?? renderViewCount,
                             foveationVars: foveationVars,
                             colour: colour,
+                            chromaKey: chromaKey,
                             variantName: "YpCbCrBiPlanar"
         )
         let secret = try! buildRenderPipelineForVideoFrameWithDevice(
@@ -378,6 +388,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                             viewCount: layerRenderer?.properties.viewCount ?? renderViewCount,
                             foveationVars: foveationVars,
                             colour: colour,
+                            chromaKey: chromaKey,
                             variantName: "SecretYpCbCrFormats"
         )
         if !videoFramePipelines.publish((biplanar, secret), builtFor: colour) {
@@ -479,23 +490,18 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
 
         let library = device.makeDefaultLibrary()
         
+        let chromaKey = frameChromaKey ?? ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings)
         let fragmentConstants = MTLFunctionConstantValues()
-        let settings = ALVRClientApp.gStore.settings
-        if #available(visionOS 2.0, *) {
-            chromaKeyEnabled = settings.chromaKeyEnabled
-        }
-        else {
-            chromaKeyEnabled = settings.chromaKeyEnabled && isRealityKit
-        }
-        chromaKeyColor = simd_float3(settings.chromaKeyColorR, settings.chromaKeyColorG, settings.chromaKeyColorB)
-        chromaKeyLerpDistRange = simd_float2(settings.chromaKeyDistRangeMin, settings.chromaKeyDistRangeMax)
+        var enabled = chromaKey.enabled
+        if #unavailable(visionOS 2.0) { enabled = enabled && isRealityKit }
+        var colourLinear = NonlinearToLinearRGB(chromaKey.colour)
+        var range = chromaKey.range
 
         var mutVrrScreenSize = simd_float2(Float(vrrScreenSize?.width ?? 1), Float(vrrScreenSize?.height ?? 1))
         var mutVrrPhysSize = simd_float2(Float(vrrPhysSize?.width ?? 1), Float(vrrPhysSize?.height ?? 1))
-        var chromaKeyColorLinear = NonlinearToLinearRGB(chromaKeyColor)
-        fragmentConstants.setConstantValue(&chromaKeyEnabled, type: .bool, index: ALVRFunctionConstant.chromaKeyEnabled.rawValue)
-        fragmentConstants.setConstantValue(&chromaKeyColorLinear, type: .float3, index: ALVRFunctionConstant.chromaKeyColor.rawValue)
-        fragmentConstants.setConstantValue(&chromaKeyLerpDistRange, type: .float2, index: ALVRFunctionConstant.chromaKeyLerpDistRange.rawValue)
+        fragmentConstants.setConstantValue(&enabled, type: .bool, index: ALVRFunctionConstant.chromaKeyEnabled.rawValue)
+        fragmentConstants.setConstantValue(&colourLinear, type: .float3, index: ALVRFunctionConstant.chromaKeyColor.rawValue)
+        fragmentConstants.setConstantValue(&range, type: .float2, index: ALVRFunctionConstant.chromaKeyLerpDistRange.rawValue)
         fragmentConstants.setConstantValue(&isRealityKit, type: .bool, index: ALVRFunctionConstant.realityKitEnabled.rawValue)
         fragmentConstants.setConstantValue(&mutVrrScreenSize, type: .float2, index: ALVRFunctionConstant.vrrScreenSize.rawValue)
         fragmentConstants.setConstantValue(&mutVrrPhysSize, type: .float2, index: ALVRFunctionConstant.vrrPhysSize.rawValue)
@@ -562,6 +568,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                                                           viewCount: Int,
                                                           foveationVars: FoveationVars,
                                                           colour: StreamColourState,
+                                                          chromaKey: ChromaKeySnapshot,
                                                           variantName: String) throws -> MTLRenderPipelineState {
         
 
@@ -569,20 +576,14 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         let vertexFunction = library?.makeFunction(name: "videoFrameVertexShader")
         let fragmentConstants = FFR.makeFunctionConstants(foveationVars)
         
-        let settings = ALVRClientApp.gStore.settings
-        if #available(visionOS 2.0, *) {
-            chromaKeyEnabled = settings.chromaKeyEnabled
-        }
-        else {
-            chromaKeyEnabled = settings.chromaKeyEnabled && isRealityKit
-        }
-        chromaKeyColor = simd_float3(settings.chromaKeyColorR, settings.chromaKeyColorG, settings.chromaKeyColorB)
-        chromaKeyLerpDistRange = simd_float2(settings.chromaKeyDistRangeMin, settings.chromaKeyDistRangeMax)
+        var enabled = chromaKey.enabled
+        if #unavailable(visionOS 2.0) { enabled = enabled && isRealityKit }
+        var colourLinear = NonlinearToLinearRGB(chromaKey.colour)
+        var range = chromaKey.range
 
-        var chromaKeyColorLinear = NonlinearToLinearRGB(chromaKeyColor)
-        fragmentConstants.setConstantValue(&chromaKeyEnabled, type: .bool, index: ALVRFunctionConstant.chromaKeyEnabled.rawValue)
-        fragmentConstants.setConstantValue(&chromaKeyColorLinear, type: .float3, index: ALVRFunctionConstant.chromaKeyColor.rawValue)
-        fragmentConstants.setConstantValue(&chromaKeyLerpDistRange, type: .float2, index: ALVRFunctionConstant.chromaKeyLerpDistRange.rawValue)
+        fragmentConstants.setConstantValue(&enabled, type: .bool, index: ALVRFunctionConstant.chromaKeyEnabled.rawValue)
+        fragmentConstants.setConstantValue(&colourLinear, type: .float3, index: ALVRFunctionConstant.chromaKeyColor.rawValue)
+        fragmentConstants.setConstantValue(&range, type: .float2, index: ALVRFunctionConstant.chromaKeyLerpDistRange.rawValue)
         fragmentConstants.setConstantValue(&isRealityKit, type: .bool, index: ALVRFunctionConstant.realityKitEnabled.rawValue)
         var encodingGamma = colour.encodingGamma
         fragmentConstants.setConstantValue(&encodingGamma, type: .float, index: ALVRFunctionConstant.encodingGamma.rawValue)
@@ -734,6 +735,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
 
     // Render the frame, only used in MetalClientSystem renderer.
     func renderFrame() {
+        let chromaKey = ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings)
+        frameChromaKey = chromaKey
         /// Per frame updates hare
         EventHandler.shared.framesRendered += 1
         EventHandler.shared.totalFramesRendered += 1
@@ -916,7 +919,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                     lastReconfigureTime = CACurrentMediaTime()
                     
                     let rebuildThread = Thread {
-                        self.rebuildRenderPipelines()
+                        self.rebuildRenderPipelines(chromaKey: chromaKey)
                     }
                     rebuildThread.name = "Rebuild Render Pipelines Thread"
                     rebuildThread.start()
@@ -958,7 +961,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             // Encoding gamma travels with the stream's colour state (a new stream is a new state, so it rebuilds below).
             var needsPipelineRebuild = false
 
-            if CACurrentMediaTime() - lastReconfigureTime > 1.0 && (settings.chromaKeyEnabled != chromaKeyEnabled || settings.chromaKeyColorR != chromaKeyColor.x || settings.chromaKeyColorG != chromaKeyColor.y || settings.chromaKeyColorB != chromaKeyColor.z || settings.chromaKeyDistRangeMin != chromaKeyLerpDistRange.x || settings.chromaKeyDistRangeMax != chromaKeyLerpDistRange.y) {
+            if CACurrentMediaTime() - lastReconfigureTime > 1.0 && (chromaKey.enabled != chromaKeyEnabled || chromaKey.colour != chromaKeyColor || chromaKey.range != chromaKeyLerpDistRange) {
+                chromaKeyEnabled = chromaKey.enabled
+                chromaKeyColor = chromaKey.colour
+                chromaKeyLerpDistRange = chromaKey.range
                 lastReconfigureTime = CACurrentMediaTime()
                 needsPipelineRebuild = true
             }
@@ -972,7 +978,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             if needsPipelineRebuild {
                 lastReconfigureTime = CACurrentMediaTime()
                 let rebuildThread = Thread {
-                    self.rebuildRenderPipelines()
+                    self.rebuildRenderPipelines(chromaKey: chromaKey)
                 }
                 rebuildThread.name = "Rebuild Render Pipelines Thread"
                 rebuildThread.start()
@@ -1046,10 +1052,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         
         let gpuTimes = self.gpuTimes
         let diagProbe = self.diagProbe
-        let diagRenderingDeadline = mainDrawable.frameTiming.renderingDeadline
+        let diagTiming = Diag.capture(enabled: diagProbe != nil, DiagRenderProbe.timing(for: mainDrawable))
         commandBuffer.addCompletedHandler { (_ commandBuffer)-> Swift.Void in
             let completionNs = UInt64(CACurrentMediaTime() * Double(NSEC_PER_SEC))
-            diagProbe?.completed(commandBuffer, renderingDeadline: diagRenderingDeadline, targetNs: vsyncTimeNs, callbackHostNs: completionNs)
+            if let diagTiming { diagProbe?.completed(commandBuffer, timing: diagTiming, callbackHostNs: completionNs) }
             if commandBuffer.gpuEndTime > commandBuffer.gpuStartTime {
                 gpuTimes.add(ns: UInt64((commandBuffer.gpuEndTime - commandBuffer.gpuStartTime) * Double(NSEC_PER_SEC)))
             }
@@ -1167,7 +1173,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             if renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil {
                 //print("render")
                 if let encoder = beginRenderStreamingFrame(0, commandBuffer: commandBuffer, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor, drawable: drawable) {
-                    diagSourceId = queuedFrame?.timestamp
+                    diagSourceId = Diag.capture(enabled: diagProbe != nil, queuedFrame?.timestamp) ?? nil
                     renderStreamingFrame(0, commandBuffer: commandBuffer, renderEncoder: encoder, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
                     endRenderStreamingFrame(renderEncoder: encoder)
                 }
@@ -1195,8 +1201,12 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         if let rqSweep, !EventHandler.shared.streamingActive {
             rqSweep.encode(layer: layerRenderer!, drawables: drawables, buffer: commandBuffer)
         }
-        for drawable in drawables { drawable.encodePresent(commandBuffer: commandBuffer) }
-        diagProbe?.frame(layerRenderer: layerRenderer!, drawables: drawables, predicted: timing, sourceId: diagSourceId)
+        for drawable in drawables {
+            diagEye?.encode(buffer: commandBuffer, drawable: drawable, mode: diagSourceId == nil ? "idle" : "streaming",
+                            generation: EventHandler.videoStreams.currentStream?.generation)
+            drawable.encodePresent(commandBuffer: commandBuffer)
+        }
+        if let diagTiming { diagProbe?.frame(layerRenderer: layerRenderer!, drawables: drawables, predicted: timing, sourceId: diagSourceId, timing: diagTiming) }
 
         coolPulsingColorsTime += 0.005
         if coolPulsingColorsTime > 4.0 {
@@ -1314,7 +1324,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderPassDescriptor.colorAttachments[0].texture = renderTargetColor
         renderPassDescriptor.colorAttachments[0].loadAction = .load
         renderPassDescriptor.colorAttachments[0].storeAction = .dontCare
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: chromaKeyEnabled ? 0.0 : 1.0)
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: (frameChromaKey?.enabled ?? chromaKeyEnabled) ? 0.0 : 1.0)
         renderPassDescriptor.depthAttachment.texture = renderTargetDepth
         renderPassDescriptor.depthAttachment.loadAction = .clear
         renderPassDescriptor.depthAttachment.storeAction = .store
@@ -1847,7 +1857,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderPassDescriptor.colorAttachments[0].texture = renderTargetColor
         renderPassDescriptor.colorAttachments[0].loadAction = whichIdx == 0 ? (isRealityKit ? .dontCare : .clear) : .load
         renderPassDescriptor.colorAttachments[0].storeAction = .store
-        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: chromaKeyEnabled ? 0.0 : 1.0)
+        renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: (frameChromaKey?.enabled ?? chromaKeyEnabled) ? 0.0 : 1.0)
         renderPassDescriptor.rasterizationRateMap = rasterizationRateMap
         
         renderPassDescriptor.renderTargetArrayLength = viewports.count
@@ -1878,8 +1888,9 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         }
         guard let pipelines = videoFramePipelines.pipelines(for: colour) else {
             if videoPipelinesNeedBuild(for: colour) {
+                let chromaKey = frameChromaKey ?? ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings)
                 let rebuildThread = Thread {
-                    self.rebuildRenderPipelines()
+                    self.rebuildRenderPipelines(chromaKey: chromaKey)
                 }
                 rebuildThread.name = "Rebuild Render Pipelines Thread"
                 rebuildThread.start()

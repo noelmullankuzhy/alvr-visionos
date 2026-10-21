@@ -23,6 +23,10 @@ enum Diag {
     private static var sink: DiagSink?
     static var isOn: Bool { sink != nil }
 
+    static func capture<T>(enabled: Bool, _ value: @autoclosure () -> T) -> T? {
+        enabled ? value() : nil
+    }
+
     static func enabled(environment: [String: String], setting: Bool) -> Bool {
         setting || ["1", "true", "yes", "on"].contains(environment[envKey]?.lowercased() ?? "")
     }
@@ -254,7 +258,7 @@ struct DiagSchedule {
 // exposed by CompositorServices and is logged as unavailable. Command buffer times are host times, moved to the layer
 // clock with the offset sampled on the render thread (layer now - host now).
 final class DiagCadence {
-    struct Raw {
+    final class Raw {
         var targetIntervalsMs: [Double]
         var targetMinusPredictedMs: [Double]
         var frames = 0, fresh = 0, repeated = 0, blank = 0, missedRenderDeadline = 0, callbackAfterTarget = 0, overflow = 0
@@ -276,68 +280,60 @@ final class DiagCadence {
     }
 
     private let capacity: Int
-    private let lock = NSLock()
-    private var raw: Raw
-    private var gpuMs: [Double] = []
+    private let windows: DiagDoubleBuffer<Raw>
+    private let gpu: DiagDoubleBuffer<DiagSamples>
     private var lastTargetNs: UInt64?
     private var lastSourceId: UInt64?
-    private var clockOffsetNs: Int64 = 0
 
     init(capacity: Int = 1024) {
         self.capacity = max(capacity, 1)
-        raw = Raw(capacity: self.capacity)
-        gpuMs.reserveCapacity(self.capacity)
+        windows = DiagDoubleBuffer(Raw(capacity: self.capacity), Raw(capacity: self.capacity))
+        gpu = DiagDoubleBuffer(DiagSamples(capacity: self.capacity), DiagSamples(capacity: self.capacity))
     }
 
     // sourceId: the video frame actually encoded into this frame's drawables; nil when none was (idle, or rejected).
     func frame(targetNs: UInt64, predictedNs: UInt64, sourceId: UInt64?, clockOffsetNs offset: Int64) {
-        lock.lock()
-        defer { lock.unlock() }
-        if let last = lastTargetNs, targetNs > last {
-            if !Self.append(&raw.targetIntervalsMs, Double(targetNs - last) / 1e6, capacity) { raw.overflow += 1 }
+        windows.withActive { raw in
+            if let last = lastTargetNs, targetNs > last {
+                if !Self.append(&raw.targetIntervalsMs, Double(targetNs - last) / 1e6, capacity) { raw.overflow += 1 }
+            }
+            lastTargetNs = targetNs
+            if !Self.append(&raw.targetMinusPredictedMs, (Double(targetNs) - Double(predictedNs)) / 1e6, capacity) { raw.overflow += 1 }
+            raw.frames += 1
+            if let sourceId {
+                if sourceId == lastSourceId { raw.repeated += 1 } else { raw.fresh += 1 }
+                lastSourceId = sourceId
+            } else {
+                raw.blank += 1
+            }
+            raw.clockOffsetMs = Double(offset) / 1e6
         }
-        lastTargetNs = targetNs
-        if !Self.append(&raw.targetMinusPredictedMs, (Double(targetNs) - Double(predictedNs)) / 1e6, capacity) { raw.overflow += 1 }
-        raw.frames += 1
-        if let sourceId {
-            if sourceId == lastSourceId { raw.repeated += 1 } else { raw.fresh += 1 }
-            lastSourceId = sourceId
-        } else {
-            raw.blank += 1
-        }
-        clockOffsetNs = offset
-        raw.clockOffsetMs = Double(offset) / 1e6
     }
 
-    // Host-clock GPU start/end and callback time; layer-clock deadline and target of the frame.
-    func completed(gpuStartHostNs: UInt64, gpuEndHostNs: UInt64, renderingDeadlineNs: UInt64, targetNs: UInt64, callbackHostNs: UInt64) {
-        lock.lock()
-        defer { lock.unlock() }
+    // Offset belongs to this submission, even if another frame updates the layer/host clock mapping.
+    func completed(gpuStartHostNs: UInt64, gpuEndHostNs: UInt64, renderingDeadlineNs: UInt64, targetNs: UInt64, callbackHostNs: UInt64, clockOffsetNs: Int64) {
         let offset = Double(clockOffsetNs)
-        if gpuEndHostNs > gpuStartHostNs && gpuStartHostNs > 0 {
-            if Double(gpuEndHostNs) + offset > Double(renderingDeadlineNs) { raw.missedRenderDeadline += 1 }
-            if gpuMs.count < capacity { gpuMs.append(Double(gpuEndHostNs - gpuStartHostNs) / 1e6) }
+        windows.withActive { raw in
+            if gpuEndHostNs > gpuStartHostNs && gpuStartHostNs > 0 {
+                if Double(gpuEndHostNs) + offset > Double(renderingDeadlineNs) { raw.missedRenderDeadline += 1 }
+                gpu.withActive { _ = Self.append(&$0.values, Double(gpuEndHostNs - gpuStartHostNs) / 1e6, capacity) }
+            }
+            if Double(callbackHostNs) + offset > Double(targetNs) { raw.callbackAfterTarget += 1 }
         }
-        if Double(callbackHostNs) + offset > Double(targetNs) { raw.callbackAfterTarget += 1 }
     }
 
-    // The window so far, replaced by empty buffers (one allocation per window, no sorting).
-    func take() -> Raw {
-        lock.lock()
-        defer { lock.unlock() }
-        let taken = raw
-        raw = Raw(capacity: capacity)
-        return taken
+    // A slow consumer retains its buffer; skip the swap until it returns rather than allocating on render.
+    func take() -> Raw? { windows.take() }
+    func takeGpu() -> DiagSamples? { gpu.take() }
+    func recycle(_ raw: Raw) {
+        windows.recycle(raw) {
+            $0.targetIntervalsMs.removeAll(keepingCapacity: true)
+            $0.targetMinusPredictedMs.removeAll(keepingCapacity: true)
+            $0.frames = 0; $0.fresh = 0; $0.repeated = 0; $0.blank = 0
+            $0.missedRenderDeadline = 0; $0.callbackAfterTarget = 0; $0.overflow = 0; $0.clockOffsetMs = nil
+        }
     }
-
-    func takeGpu() -> [Double] {
-        lock.lock()
-        defer { lock.unlock() }
-        let taken = gpuMs
-        gpuMs = []
-        gpuMs.reserveCapacity(capacity)
-        return taken
-    }
+    func recycleGpu(_ samples: DiagSamples) { gpu.recycle(samples) { $0.values.removeAll(keepingCapacity: true) } }
 
     private static func append(_ buffer: inout [Double], _ value: Double, _ capacity: Int) -> Bool {
         guard buffer.count < capacity else { return false }
@@ -364,4 +360,38 @@ final class DiagCadence {
                 "missed_render_deadline": w.missedRenderDeadline, "callback_after_target": w.callbackAfterTarget,
                 "clock_offset_ms": v(w.clockOffsetMs), "overflow": w.overflow]
     }
+}
+
+// Two owned, preallocated snapshots. Only the producer mutates active; a consumer returns its lease after logging.
+// The reset happens on the consumer, and no collection is copied during a swap (avoids Array copy-on-write).
+final class DiagDoubleBuffer<Value> {
+    private let lock = NSLock()
+    private var active: Value
+    private var spare: Value?
+    init(_ first: Value, _ second: Value) { active = first; spare = second }
+    func withActive(_ body: (Value) -> Void) { lock.lock(); defer { lock.unlock() }; body(active) }
+    func take() -> Value? {
+        lock.lock(); defer { lock.unlock() }
+        guard let next = spare else { return nil }
+        let result = active; active = next; spare = nil
+        return result
+    }
+    func recycle(_ value: Value, reset: (Value) -> Void) {
+        reset(value)
+        lock.lock(); defer { lock.unlock() }
+        spare = value
+    }
+}
+
+final class DiagSamples {
+    var values: [Double] = []
+    init(capacity: Int) { values.reserveCapacity(capacity) }
+}
+
+// Bounded compositor view/map snapshots: storage is shared with the Foundation-only allocation regression test.
+final class DiagDrawableSnapshot<View, Map> {
+    var views: [View] = []
+    var maps: [Map] = []
+    init() { views.reserveCapacity(32); maps.reserveCapacity(64) }
+    func reset() { views.removeAll(keepingCapacity: true); maps.removeAll(keepingCapacity: true) }
 }

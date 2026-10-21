@@ -241,12 +241,12 @@ private func testCadenceWindow() {
         cadence.frame(targetNs: target, predictedNs: target - (i == 10 ? 5 : 1) * ms, sourceId: sources[i - 1], clockOffsetNs: 0)
     }
     // GPU done 5 ms before the rendering deadline but the callback arrives after the target: not a missed deadline.
-    cadence.completed(gpuStartHostNs: 100 * ms, gpuEndHostNs: 104 * ms, renderingDeadlineNs: 109 * ms, targetNs: 112 * ms, callbackHostNs: 113 * ms)
+    cadence.completed(gpuStartHostNs: 100 * ms, gpuEndHostNs: 104 * ms, renderingDeadlineNs: 109 * ms, targetNs: 112 * ms, callbackHostNs: 113 * ms, clockOffsetNs: 0)
     // GPU ends 1 ms after the rendering deadline, callback before the target: missed.
-    cadence.completed(gpuStartHostNs: 200 * ms, gpuEndHostNs: 206 * ms, renderingDeadlineNs: 205 * ms, targetNs: 210 * ms, callbackHostNs: 207 * ms)
+    cadence.completed(gpuStartHostNs: 200 * ms, gpuEndHostNs: 206 * ms, renderingDeadlineNs: 205 * ms, targetNs: 210 * ms, callbackHostNs: 207 * ms, clockOffsetNs: 0)
     // No GPU timestamps: neither missed nor a GPU sample.
-    cadence.completed(gpuStartHostNs: 0, gpuEndHostNs: 0, renderingDeadlineNs: 1, targetNs: 2, callbackHostNs: 1)
-    let raw = cadence.take()
+    cadence.completed(gpuStartHostNs: 0, gpuEndHostNs: 0, renderingDeadlineNs: 1, targetNs: 2, callbackHostNs: 1, clockOffsetNs: 0)
+    let raw = cadence.take()!
     let w = DiagCadence.window(raw, requestedHz: 90)
     expectEqual(w.frames, 10, "frames")
     expectEqual(w.fresh, 4, "encoded frames with a source ID not shown before (1, 2, 3, 4)")
@@ -261,35 +261,42 @@ private func testCadenceWindow() {
                 "DIAG m6 t_ms=1000 requested_interval_ms=11.111 target_interval_p50_ms=11.000 target_interval_p95_ms=22.000 target_interval_max_ms=22.000 target_minus_predicted_p50_ms=1.000 target_minus_predicted_p95_ms=5.000 target_minus_predicted_max_ms=5.000 actual_presentation=unavailable frames=10 fresh=4 repeated=3 blank=3 missed_render_deadline=1 callback_after_target=1 clock_offset_ms=0.000 overflow=0",
                 "m6 line: drawable targets, not actual presentation")
 
+    cadence.recycle(raw)
     // take() empties the window; the interval continues across the boundary and the last source ID is remembered.
     cadence.frame(targetNs: target + 11 * ms, predictedNs: target + 11 * ms, sourceId: 4, clockOffsetNs: 0)
-    let w2 = DiagCadence.window(cadence.take(), requestedHz: 0)
+    let raw2 = cadence.take()!
+    let w2 = DiagCadence.window(raw2, requestedHz: 0)
+    cadence.recycle(raw2)
     expect(w2.frames == 1 && w2.targetInterval?.max == 11 && w2.missedRenderDeadline == 0, "second window: one frame, interval across the boundary")
     expectEqual(w2.repeated, 1, "source 4 again after the boundary is a repeat")
     expect(w2.requestedMs == nil, "no requested rate: nil")
     expect(Diag.line(topic: "m6", tMs: 0, fields: DiagCadence.fields(w2)).contains("requested_interval_ms=unavailable"), "unavailable requested rate")
-    let empty = DiagCadence.window(cadence.take(), requestedHz: 90)
+    let empty = DiagCadence.window(cadence.take()!, requestedHz: 90)
     expect(empty.frames == 0 && empty.targetInterval == nil, "nothing since the last take")
 
     // GPU times over the 5 s M9 window, independent of the 1 s cadence windows.
-    let gpu = DiagStats.summary(cadence.takeGpu())
+    let gpuRaw = cadence.takeGpu()!
+    let gpu = DiagStats.summary(gpuRaw.values)
+    cadence.recycleGpu(gpuRaw)
     expect(gpu?.p50 == 4 && gpu?.p95 == 6, "gpu ms p50/p95 \(String(describing: gpu))")
-    expect(cadence.takeGpu().isEmpty, "gpu window taken")
+    expect(cadence.takeGpu()!.values.isEmpty, "gpu window taken")
 }
 
 private func testCadenceClockOffset() {
     // Host (command buffer) times move to the layer clock with the offset sampled on the render thread.
     let cadence = DiagCadence()
     cadence.frame(targetNs: 200 * ms, predictedNs: 200 * ms, sourceId: 1, clockOffsetNs: Int64(100 * ms))
-    cadence.completed(gpuStartHostNs: 40 * ms, gpuEndHostNs: 50 * ms, renderingDeadlineNs: 120 * ms, targetNs: 200 * ms, callbackHostNs: 60 * ms)
-    let w = DiagCadence.window(cadence.take(), requestedHz: 90)
+    // A later submission changes the current offset before the first completes.
+    cadence.frame(targetNs: 210 * ms, predictedNs: 210 * ms, sourceId: 2, clockOffsetNs: -Int64(100 * ms))
+    cadence.completed(gpuStartHostNs: 40 * ms, gpuEndHostNs: 50 * ms, renderingDeadlineNs: 120 * ms, targetNs: 200 * ms, callbackHostNs: 60 * ms, clockOffsetNs: Int64(100 * ms))
+    let w = DiagCadence.window(cadence.take()!, requestedHz: 90)
     expectEqual(w.missedRenderDeadline, 1, "host 50 ms + offset 100 ms is past the 120 ms deadline")
     expectEqual(w.callbackAfterTarget, 0, "host 60 ms + 100 ms is before the 200 ms target")
-    expectEqual(w.clockOffsetMs, 100, "offset logged")
+    expectEqual(w.clockOffsetMs, -100, "latest submission offset logged, completion retains its own")
     let negative = DiagCadence()
     negative.frame(targetNs: 10 * ms, predictedNs: 10 * ms, sourceId: nil, clockOffsetNs: -Int64(100 * ms))
-    negative.completed(gpuStartHostNs: 140 * ms, gpuEndHostNs: 150 * ms, renderingDeadlineNs: 60 * ms, targetNs: 70 * ms, callbackHostNs: 160 * ms)
-    let wn = DiagCadence.window(negative.take(), requestedHz: 90)
+    negative.completed(gpuStartHostNs: 140 * ms, gpuEndHostNs: 150 * ms, renderingDeadlineNs: 60 * ms, targetNs: 70 * ms, callbackHostNs: 160 * ms, clockOffsetNs: -Int64(100 * ms))
+    let wn = DiagCadence.window(negative.take()!, requestedHz: 90)
     expect(wn.missedRenderDeadline == 0 && wn.callbackAfterTarget == 0, "negative offset: 50 ms and 60 ms on the layer clock are in time")
 }
 
@@ -298,15 +305,61 @@ private func testCadenceBounded() {
     let cadence = DiagCadence(capacity: 4)
     for i in 1...10 {
         cadence.frame(targetNs: UInt64(i) * 11 * ms, predictedNs: UInt64(i) * 11 * ms, sourceId: UInt64(i), clockOffsetNs: 0)
-        cadence.completed(gpuStartHostNs: 1, gpuEndHostNs: 2 + UInt64(i), renderingDeadlineNs: UInt64.max, targetNs: UInt64.max, callbackHostNs: 1)
+        cadence.completed(gpuStartHostNs: 1, gpuEndHostNs: 2 + UInt64(i), renderingDeadlineNs: UInt64.max, targetNs: UInt64.max, callbackHostNs: 1, clockOffsetNs: 0)
     }
-    let raw = cadence.take()
+    let raw = cadence.take()!
     expect(raw.targetIntervalsMs.count == 4 && raw.targetMinusPredictedMs.count == 4, "sample buffers stop at capacity")
     expect(raw.targetIntervalsMs.capacity >= 4, "buffers are preallocated")
     expectEqual(raw.frames, 10, "counts stay exact")
     expectEqual(raw.fresh, 10, "fresh stays exact")
     expectEqual(raw.overflow, (9 - 4) + (10 - 4), "dropped samples counted")
-    expectEqual(cadence.takeGpu().count, 4, "gpu buffer bounded too")
+    expectEqual(cadence.takeGpu()!.values.count, 4, "gpu buffer bounded too")
+}
+
+
+private func testBufferReuse() {
+    let cadence = DiagCadence(capacity: 4)
+    var addresses = Set<UInt>()
+    var gpuAddresses = Set<UInt>()
+    var capacities = Set<Int>()
+    for i in 0..<1000 {
+        cadence.frame(targetNs: UInt64(i + 1) * ms, predictedNs: UInt64(i) * ms, sourceId: nil, clockOffsetNs: 0)
+        cadence.completed(gpuStartHostNs: 1, gpuEndHostNs: 2, renderingDeadlineNs: 3, targetNs: 4, callbackHostNs: 3, clockOffsetNs: 0)
+        let raw = cadence.take()!, gpu = cadence.takeGpu()!
+        _ = raw.targetMinusPredictedMs.withUnsafeBufferPointer { addresses.insert(UInt(bitPattern: $0.baseAddress!)) }
+        _ = gpu.values.withUnsafeBufferPointer { gpuAddresses.insert(UInt(bitPattern: $0.baseAddress!)) }
+        capacities.insert(raw.targetMinusPredictedMs.capacity)
+        expect(cadence.take() == nil && cadence.takeGpu() == nil, "busy consumer never allocates replacement storage")
+        cadence.recycle(raw); cadence.recycleGpu(gpu)
+    }
+    expectEqual(addresses.count, 2, "exactly two preallocated cadence buffers over 1000 periods")
+    expectEqual(gpuAddresses.count, 2, "exactly two preallocated GPU buffers over 1000 periods")
+    expectEqual(capacities.count, 1, "no capacity changes")
+    var reads = 0
+    func read() -> Int { reads += 1; return 42 }
+    expect(Diag.capture(enabled: false, read()) == nil, "off deadline/source capture is nil")
+    expectEqual(reads, 0, "off path calls neither diagnostic reader")
+    expectEqual(Diag.capture(enabled: true, read()), 42, "on path captures input")
+    expectEqual(reads, 1, "on path reads once")
+}
+
+private func testDrawableSnapshotReuse() {
+    let snapshots = DiagDoubleBuffer(DiagDrawableSnapshot<Int, Int>(), DiagDrawableSnapshot<Int, Int>())
+    var viewAddresses = Set<UInt>(), mapAddresses = Set<UInt>(), capacities = Set<Int>()
+    for _ in 0..<1000 {
+        let snapshot = snapshots.take()!
+        expect(snapshot.views.isEmpty && snapshot.maps.isEmpty, "returned drawable snapshot is reset")
+        for i in 0..<32 { snapshot.views.append(i) }
+        for i in 0..<64 { snapshot.maps.append(i) }
+        _ = snapshot.views.withUnsafeBufferPointer { viewAddresses.insert(UInt(bitPattern: $0.baseAddress!)) }
+        _ = snapshot.maps.withUnsafeBufferPointer { mapAddresses.insert(UInt(bitPattern: $0.baseAddress!)) }
+        capacities.insert(snapshot.views.capacity)
+        expect(snapshots.take() == nil, "busy drawable consumer does not allocate a replacement")
+        snapshots.recycle(snapshot) { $0.reset() }
+    }
+    expectEqual(viewAddresses.count, 2, "exactly two preallocated view buffers")
+    expectEqual(mapAddresses.count, 2, "exactly two preallocated map buffers")
+    expectEqual(capacities.count, 1, "drawable snapshot capacity never changes")
 }
 
 private func testThermalNames() {
@@ -332,6 +385,8 @@ enum DiagTests {
         testCadenceWindow()
         testCadenceClockOffset()
         testCadenceBounded()
+        testBufferReuse()
+        testDrawableSnapshotReuse()
         testThermalNames()
         finishTests("Diag")
     }
