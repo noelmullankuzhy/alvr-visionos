@@ -21,7 +21,7 @@ func testPathId(_ path: String) -> UInt64 {
 }
 
 func makeGate(_ rec: Recorder, onAnnounce: ((ControllerInputProfile) -> Void)? = nil,
-              beforeLock: ((String) -> Void)? = nil) -> ControllerInputGate {
+              beforeLock: ((String) -> Void)? = nil, inLock: ((String) -> Void)? = nil) -> ControllerInputGate {
     var names: [UInt64: String] = [:]
     for path in ControllerInputGate.knownPaths {
         names[testPathId(path)] = path
@@ -38,8 +38,88 @@ func makeGate(_ rec: Recorder, onAnnounce: ((ControllerInputProfile) -> Void)? =
             onAnnounce?(profile)
         },
         log: { rec.logs.append($0) },
-        beforeLock: beforeLock)
+        beforeLock: beforeLock,
+        inLock: inLock)
 }
+
+/// Forces one lock order between two gate calls on two threads, with the gate's test seams and semaphores (no sleeps):
+/// the holder takes the gate lock at `holderEntry` and stays in the critical section until the waiter has reached
+/// the lock at `waiterEntry`, so the waiter's call runs strictly after the holder's.
+final class LockOrder {
+    private let mutex = NSLock()
+    private var holderEntry: String?
+    private var waiterEntry: String?
+    private let holderIn = DispatchSemaphore(value: 0)
+    private let waiterEntered = DispatchSemaphore(value: 0)
+    private var waiterWasWaiting = false
+
+    func beforeLock(_ entry: String) {
+        mutex.lock()
+        let hit = entry == waiterEntry
+        if hit { waiterEntry = nil }
+        mutex.unlock()
+        if hit { waiterEntered.signal() }
+    }
+
+    func inLock(_ entry: String) {
+        mutex.lock()
+        let hit = entry == holderEntry
+        if hit { holderEntry = nil }
+        mutex.unlock()
+        guard hit else { return }
+        holderIn.signal()
+        waiterWasWaiting = waiterEntered.wait(timeout: .now() + 10) == .success
+    }
+
+    /// True when both calls finished and the waiter reached the lock while the holder held it.
+    func run(holderEntry: String, _ holder: @escaping () -> Void, waiterEntry: String, _ waiter: @escaping () -> Void) -> Bool {
+        mutex.lock()
+        self.holderEntry = holderEntry
+        self.waiterEntry = waiterEntry
+        waiterWasWaiting = false
+        mutex.unlock()
+        let done = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { holder(); done.signal() }
+        guard holderIn.wait(timeout: .now() + 10) == .success else { return false }
+        Thread.detachNewThread { waiter(); done.signal() }
+        let finished = done.wait(timeout: .now() + 10) == .success && done.wait(timeout: .now() + 10) == .success
+        return finished && waiterWasWaiting
+    }
+}
+
+/// Options-held frames from the right Sense controller, sent through the production mapper; records each frame's profile.
+final class Frames {
+    var mappedWith: [ControllerInputProfile] = []
+    var sent: [Bool] = []
+}
+
+func optionsFrame(_ gate: ControllerInputGate, _ frames: Frames) -> () -> Void {
+    {
+        let ok = gate.send { profile in
+            frames.mappedWith.append(profile)
+            return PSVR2SenseInputs.inputs(isLeft: false, elements: optionsHeld(), profile: profile,
+                                           homeButtonReachesApp: false, includeTrigger: true)
+        }
+        frames.sent.append(ok)
+    }
+}
+
+func racingGate() -> (Recorder, LockOrder, ControllerInputGate) {
+    let rec = Recorder()
+    let order = LockOrder()
+    let gate = makeGate(rec, beforeLock: { order.beforeLock($0) }, inLock: { order.inLock($0) })
+    return (rec, order, gate)
+}
+
+func indexOf(_ rec: Recorder, _ event: String, from: Int = 0) -> Int? {
+    rec.events.indices.first { $0 >= from && rec.events[$0] == event }
+}
+
+func deliveriesFrom(_ rec: Recorder, _ from: Int) -> [Int] {
+    rec.events.indices.filter { $0 >= from && rec.events[$0].hasPrefix("deliver") }
+}
+
+let noSenseLog = "PSVR2Sense mode without Sense controllers detected"
 
 // Options (right Button Menu) held: PSVR2 maps it to menu only, Quest Touch also to system.
 func optionsHeld() -> PSVR2SenseElements {
@@ -330,6 +410,162 @@ enum ControllerInputGateTests {
         expectEqual(deliveredValue(rec2, "/user/hand/right/input/menu/click"), .binary(true), "PSVR2 frame: Options -> menu")
     }
 
+    // GM 61(d): the stream's profile is a pure function of the emulation mode; Sense detection only logs, once per stream.
+    static func profileFromEmulationMode() {
+        let rec = Recorder()
+        let gate = makeGate(rec)
+        let s1 = gate.streamStarted(emulationMode: "PSVR2Sense", senseDetected: false)
+        expectEqual(s1.profile, .psvr2Sense, "PSVR2Sense without Sense controllers: still PSVR2")
+        expectEqual(rec.events, ["announce psvr2Sense"], "PSVR2 declared without Sense controllers")
+        expectEqual(rec.logs.filter { $0.contains(noSenseLog) }.count, 1, "no-Sense start logged")
+        gate.controllersDetected(emulationMode: "PSVR2Sense", senseDetected: false)
+        expectEqual(rec.logs.filter { $0.contains(noSenseLog) }.count, 1, "no-Sense logged once per stream")
+        gate.controllersDetected(emulationMode: "PSVR2Sense", senseDetected: true)
+        expectEqual(gate.currentStream, s1, "Sense attach keeps the stream's profile and generation")
+        expectEqual(rec.events, ["announce psvr2Sense"], "Sense attach declares nothing")
+
+        let s2 = gate.streamStarted(emulationMode: "PSVR2Sense", senseDetected: true)
+        expectEqual(s2.profile, .psvr2Sense, "PSVR2Sense with Sense: PSVR2")
+        gate.controllersDetected(emulationMode: "PSVR2Sense", senseDetected: false)
+        expectEqual(rec.logs.filter { $0.contains(noSenseLog) }.count, 2, "Sense detached mid-stream: logged once for that stream")
+        gate.controllersDetected(emulationMode: "PSVR2Sense", senseDetected: false)
+        expectEqual(rec.logs.filter { $0.contains(noSenseLog) }.count, 2, "and only once")
+        expectEqual(gate.currentStream, s2, "Sense detach keeps the stream's profile")
+
+        expectEqual(gate.streamStarted(emulationMode: "Quest2Touch", senseDetected: true).profile, .questTouch, "Quest2Touch with Sense: Quest")
+        expectEqual(gate.streamStarted(emulationMode: "ValveIndex", senseDetected: false).profile, .questTouch, "other modes: Quest")
+        expectEqual(rec.logs.filter { $0.contains(noSenseLog) }.count, 2, "no-Sense is only logged under PSVR2Sense")
+    }
+
+    // Concurrent STOPPED vs a frame, both lock orders.
+    static func concurrentStoppedVsSend() {
+        // STOPPED holds the lock, the frame waits: the frame is dropped unmapped.
+        do {
+            let (rec, order, gate) = racingGate()
+            let frames = Frames()
+            gate.streamStarted(emulationMode: "PSVR2Sense", senseDetected: true)
+            expect(order.run(holderEntry: "streamStopped", { gate.streamStopped() }, waiterEntry: "send", optionsFrame(gate, frames)),
+                   "STOPPED then send: forced order")
+            expectEqual(frames.sent, [false], "STOPPED then send: frame refused")
+            expect(frames.mappedWith.isEmpty, "STOPPED then send: frame not even mapped")
+            expect(rec.delivered.isEmpty, "STOPPED then send: nothing delivered")
+        }
+        // The frame holds the lock, STOPPED waits: the whole frame goes out under the open stream, then the gate shuts.
+        do {
+            let (rec, order, gate) = racingGate()
+            let frames = Frames()
+            gate.streamStarted(emulationMode: "PSVR2Sense", senseDetected: true)
+            expect(order.run(holderEntry: "send", optionsFrame(gate, frames), waiterEntry: "streamStopped", { gate.streamStopped() }),
+                   "send then STOPPED: forced order")
+            expectEqual(frames.sent, [true], "send then STOPPED: frame delivered")
+            expectEqual(frames.mappedWith, [.psvr2Sense], "send then STOPPED: mapped with the open stream's profile")
+            expectEqual(deliveredValue(rec, "/user/hand/right/input/menu/click"), .binary(true), "send then STOPPED: Options -> menu")
+            expectEqual(deliveredValue(rec, "/user/hand/right/input/system/click"), .binary(false), "send then STOPPED: Options is not PS")
+            expect(gate.currentStream == nil, "send then STOPPED: gate shut afterwards")
+        }
+    }
+
+    // Concurrent STARTED vs a frame after STOPPED, both lock orders.
+    static func concurrentStartedVsSend() {
+        // STARTED holds the lock, the frame waits: the frame is mapped with the new stream's profile, after its declaration.
+        do {
+            let (rec, order, gate) = racingGate()
+            let frames = Frames()
+            gate.streamStarted(emulationMode: "Quest2Touch", senseDetected: true)
+            gate.streamStopped()
+            let mark = rec.events.count
+            expect(order.run(holderEntry: "streamStarted", { gate.streamStarted(emulationMode: "PSVR2Sense", senseDetected: true) },
+                             waiterEntry: "send", optionsFrame(gate, frames)), "STARTED then send: forced order")
+            expectEqual(frames.sent, [true], "STARTED then send: frame delivered")
+            expectEqual(frames.mappedWith, [.psvr2Sense], "STARTED then send: mapped with the new profile")
+            let announce = indexOf(rec, "announce psvr2Sense", from: mark) ?? Int.max
+            expect(deliveriesFrom(rec, mark).allSatisfy { $0 > announce }, "STARTED then send: declaration precedes every delivery")
+            expectEqual(deliveredValue(rec, "/user/hand/right/input/system/click"), .binary(false), "STARTED then send: Options is not PS")
+        }
+        // The frame holds the lock, STARTED waits: the gate is still shut, the frame is dropped unmapped.
+        do {
+            let (rec, order, gate) = racingGate()
+            let frames = Frames()
+            gate.streamStarted(emulationMode: "Quest2Touch", senseDetected: true)
+            gate.streamStopped()
+            let mark = rec.events.count
+            expect(order.run(holderEntry: "send", optionsFrame(gate, frames),
+                             waiterEntry: "streamStarted", { gate.streamStarted(emulationMode: "PSVR2Sense", senseDetected: true) }),
+                   "send then STARTED: forced order")
+            expectEqual(frames.sent, [false], "send then STARTED: frame refused")
+            expect(frames.mappedWith.isEmpty, "send then STARTED: frame not mapped")
+            expect(deliveriesFrom(rec, mark).isEmpty, "send then STARTED: nothing delivered")
+            expectEqual(gate.declaredProfile, .psvr2Sense, "send then STARTED: PSVR2 declared afterwards")
+        }
+    }
+
+    // Concurrent STARTED with no preceding STOPPED (STOPPED stalled) vs a frame, both lock orders.
+    static func concurrentStartedWithoutStoppedVsSend() {
+        // STARTED holds the lock, the frame waits: mapped with the new stream's profile, after its declaration.
+        do {
+            let (rec, order, gate) = racingGate()
+            let frames = Frames()
+            let old = gate.streamStarted(emulationMode: "Quest2Touch", senseDetected: true)
+            let mark = rec.events.count
+            expect(order.run(holderEntry: "streamStarted", { gate.streamStarted(emulationMode: "PSVR2Sense", senseDetected: true) },
+                             waiterEntry: "send", optionsFrame(gate, frames)), "STARTED (no STOPPED) then send: forced order")
+            expectEqual(gate.currentStream?.generation, old.generation + 1, "STARTED over an open stream: new generation")
+            expectEqual(frames.mappedWith, [.psvr2Sense], "STARTED (no STOPPED) then send: mapped with the new profile")
+            let announce = indexOf(rec, "announce psvr2Sense", from: mark) ?? Int.max
+            expect(!deliveriesFrom(rec, mark).isEmpty && deliveriesFrom(rec, mark).allSatisfy { $0 > announce },
+                   "STARTED (no STOPPED) then send: declaration precedes every delivery")
+            expectEqual(deliveredValue(rec, "/user/hand/right/input/system/click"), .binary(false), "STARTED (no STOPPED) then send: Options is not PS")
+        }
+        // The frame holds the lock, STARTED waits: the whole frame goes out under the old stream, before the new declaration.
+        do {
+            let (rec, order, gate) = racingGate()
+            let frames = Frames()
+            gate.streamStarted(emulationMode: "Quest2Touch", senseDetected: true)
+            let mark = rec.events.count
+            expect(order.run(holderEntry: "send", optionsFrame(gate, frames),
+                             waiterEntry: "streamStarted", { gate.streamStarted(emulationMode: "PSVR2Sense", senseDetected: true) }),
+                   "send then STARTED (no STOPPED): forced order")
+            expectEqual(frames.mappedWith, [.questTouch], "send then STARTED (no STOPPED): mapped with the old stream's profile")
+            let announce = indexOf(rec, "announce psvr2Sense", from: mark) ?? -1
+            expect(!deliveriesFrom(rec, mark).isEmpty && deliveriesFrom(rec, mark).allSatisfy { $0 < announce },
+                   "send then STARTED (no STOPPED): every delivery precedes the new declaration")
+            expect(rec.delivered.allSatisfy { ControllerInputProfile.questTouch.buttonSet.contains($0.0) },
+                   "send then STARTED (no STOPPED): the old frame stays in the old set")
+            expectEqual(gate.declaredProfile, .psvr2Sense, "send then STARTED (no STOPPED): PSVR2 declared afterwards")
+        }
+    }
+
+    // Review 3 blocker, same mode throughout: PSVR2Sense, the stream starts with no Sense detected, Sense is attached,
+    // then the stream reconnects while Options is held, every reconnect step racing a frame in both lock orders.
+    // No input is ever mapped with the Quest profile and Options never produces system.
+    static func sameModeSenseAttachReconnect() {
+        let (rec, order, gate) = racingGate()
+        let frames = Frames()
+        let frame = optionsFrame(gate, frames)
+        let mode = "PSVR2Sense"
+        func start() { gate.streamStarted(emulationMode: mode, senseDetected: true) }
+
+        gate.streamStarted(emulationMode: mode, senseDetected: false)
+        frame()
+        gate.controllersDetected(emulationMode: mode, senseDetected: true)
+        frame()
+        expect(order.run(holderEntry: "streamStopped", { gate.streamStopped() }, waiterEntry: "send", frame), "attach: STOPPED then send")
+        expect(order.run(holderEntry: "streamStarted", start, waiterEntry: "send", frame), "attach: STARTED then send")
+        expect(order.run(holderEntry: "send", frame, waiterEntry: "streamStopped", { gate.streamStopped() }), "attach: send then STOPPED")
+        expect(order.run(holderEntry: "send", frame, waiterEntry: "streamStarted", start), "attach: send then STARTED")
+        expect(order.run(holderEntry: "streamStarted", start, waiterEntry: "send", frame), "attach: STARTED (no STOPPED) then send")
+        expect(order.run(holderEntry: "send", frame, waiterEntry: "streamStarted", start), "attach: send then STARTED (no STOPPED)")
+        frame()
+
+        expectEqual(frames.sent, [true, true, false, true, true, false, true, true, true], "attach: frames refused only while shut")
+        expect(!frames.mappedWith.isEmpty && frames.mappedWith.allSatisfy { $0 == .psvr2Sense }, "attach: no frame ever mapped with Quest")
+        expect(rec.events.filter { $0.hasPrefix("announce") }.allSatisfy { $0 == "announce psvr2Sense" }, "attach: only PSVR2 ever declared")
+        expect(!rec.delivered.contains { $0.0.hasSuffix("/system/click") && $0.1 == .binary(true) }, "attach: Options never produces system/click")
+        expect(!rec.delivered.contains { $0.0.hasSuffix("/system/touch") && $0.1 == .binary(true) }, "attach: Options never produces system/touch")
+        expect(rec.delivered.contains { $0.0 == "/user/hand/right/input/menu/click" && $0.1 == .binary(true) }, "attach: Options -> menu")
+        expectEqual(rec.logs.filter { $0.contains(noSenseLog) }.count, 1, "attach: the no-Sense start logged once")
+    }
+
     // Every alvr_send_button call in the app goes through the gate's delivery (one choke point).
     static func singleChokePoint() {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -354,6 +590,11 @@ enum ControllerInputGateTests {
         genericGamepad()
         reconnectInterleaving()
         frameNeverCrossesProfiles()
+        profileFromEmulationMode()
+        concurrentStoppedVsSend()
+        concurrentStartedVsSend()
+        concurrentStartedWithoutStoppedVsSend()
+        sameModeSenseAttachReconnect()
         singleChokePoint()
         finishTests("ControllerInputGateTests")
     }

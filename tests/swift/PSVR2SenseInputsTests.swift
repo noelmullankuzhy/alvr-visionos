@@ -48,11 +48,12 @@ enum PSVR2SenseInputsTests {
         expectEqual(ControllerInputProfile.psvr2Sense.buttonSet.count, 36, "PSVR2 button_set size")
         expectEqual(ControllerInputProfile.questTouch.buttonSet.count, 26, "Quest Touch button_set size")
 
-        // Active profile: PSVR2 only when the emulation mode asks for it and a Sense controller is connected.
-        expectEqual(ControllerInputProfile.active(emulationMode: "PSVR2Sense", psvr2Connected: true), .psvr2Sense, "PSVR2Sense + Sense")
-        expectEqual(ControllerInputProfile.active(emulationMode: "PSVR2Sense", psvr2Connected: false), .questTouch, "PSVR2Sense, no Sense")
-        expectEqual(ControllerInputProfile.active(emulationMode: "Quest2Touch", psvr2Connected: true), .questTouch, "Quest2Touch + Sense")
-        expectEqual(ControllerInputProfile.active(emulationMode: "ValveIndex", psvr2Connected: true), .questTouch, "other modes: server default source")
+        // Active profile (GM 61d): a pure function of the emulation mode, the same as the server's default source set.
+        // Controller detection never selects it.
+        expectEqual(ControllerInputProfile.active(emulationMode: "PSVR2Sense"), .psvr2Sense, "PSVR2Sense -> PSVR2, with or without Sense")
+        expectEqual(ControllerInputProfile.active(emulationMode: "Quest2Touch"), .questTouch, "Quest2Touch -> Quest")
+        expectEqual(ControllerInputProfile.active(emulationMode: "ValveIndex"), .questTouch, "other modes: server default source")
+        expectEqual(ControllerInputProfile.active(emulationMode: ""), .questTouch, "no settings: Quest")
 
         let idle = PSVR2SenseElements()
         let psvr = ControllerInputProfile.psvr2Sense
