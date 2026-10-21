@@ -212,6 +212,248 @@ class RoundTrip(Base):
         self.assertNotEqual(code, 0)
 
 
+def flip_png(src, dst):
+    w, h, pix = fo.vc.read_png(src)
+    out = bytearray()
+    for y in range(h):
+        row = pix[y * w * 4:(y + 1) * w * 4]
+        out += b''.join(row[i * 4:i * 4 + 4] for i in range(w - 1, -1, -1))
+    fo.vc.write_png(dst, w, h, bytes(out))
+
+
+def blur_png(src, dst, width):
+    """Box blur of `width` px along both axes (stands in for a soft decode/resample)."""
+    w, h, pix = fo.vc.read_png(src)
+
+    def blur_line(vals):
+        n, half = len(vals), width // 2
+        acc = [0]
+        for v in vals:
+            acc.append(acc[-1] + v)
+        return [(acc[min(n, i + half + 1)] - acc[max(0, i - half)]) / (min(n, i + half + 1) - max(0, i - half)) for i in range(n)]
+
+    out = bytearray(w * h * 4)
+    for c in range(3):
+        rows = [blur_line(list(pix[(y * w) * 4 + c:(y + 1) * w * 4:4])) for y in range(h)]
+        for x in range(w):
+            col = blur_line([rows[y][x] for y in range(h)])
+            for y in range(h):
+                out[(y * w + x) * 4 + c] = int(round(col[y]))
+    out[3::4] = b'\xff' * (w * h)
+    fo.vc.write_png(dst, w, h, bytes(out))
+
+
+class ReviewFixes(Base):
+    RENDER = ['--render', '1824x1456']
+    SMALL = ['--render', '912x728']
+    PAD = ['--foveation', '0.55,0.45,3,3,0.4,-0.2']
+
+    def synth(self, kind, extra, name=None):
+        png = self.dir / ((name or kind) + '.png')
+        self.assertEqual(self.run_main(['synth', '--kind', kind, '--out-png', png] + list(extra)), 0)
+        return png
+
+    def reasons(self, j):
+        return ' | '.join(j['summary']['verdict_reasons'])
+
+    # 1. right eye encoded mapping mirrors per ALVR
+    def test_right_eye_is_flipped_left_eye(self):
+        left = self.synth('encoded', self.RENDER + self.PAD + ['--eye', 'L'], 'encL')
+        coded = fo.fov_axis(0.55, 0.4, 3, 1824)
+        self.assertGreater(coded['coded'], coded['opt'] + 1)   # padding present, as on the 1:1 preset
+        right = self.dir / 'encR.png'
+        flip_png(left, right)
+        code, j = self.measure('encoded', right, self.RENDER + self.PAD + ['--eye', 'R'])
+        self.assertEqual(code, 0, self.reasons(j))
+        self.assertLessEqual(j['summary']['median_abs_residual_deg'], 0.05)
+        code, j = self.measure('encoded', right, self.RENDER + self.PAD + ['--eye', 'L'], 'wrongeye')
+        self.assertEqual(j['summary']['verdict'], 'FAIL')
+
+    def test_right_eye_synth_round_trip(self):
+        png = self.synth('encoded', self.RENDER + self.PAD + ['--eye', 'R'])
+        code, j = self.measure('encoded', png, self.RENDER + self.PAD + ['--eye', 'R'])
+        self.assertEqual(code, 0, self.reasons(j))
+
+    def test_right_eye_band_is_mirrored(self):
+        fv = fo.fov_axis(0.5, 0.4, 3, 1824)
+        left = fo.make_axis('h', 'encoded', -1.7, 1.0, 1824, fov=fv)
+        right = fo.make_axis('h', 'encoded', -1.0, 1.7, 1824, fov=fv, mirror=True)
+        u0, u1 = fo.band_fractions(fv)
+        self.assertEqual(left.band_t(), (u0, u1))
+        self.assertAlmostEqual(right.band_t()[0], 1 - u1)
+        self.assertAlmostEqual(right.band_t()[1], 1 - u0)
+        for tau in (-0.9, -0.2, 0.3, 1.2):
+            self.assertAlmostEqual(right.tau(right.px(tau)), tau, places=6)
+
+    # 2. edge lines must be verified; contrast threshold is relative
+    def test_blurred_edges_are_unverified(self):
+        extra = self.SMALL + ['--foveation', '0.5,0.45,5,5,0,0']
+        sharp = self.synth('encoded', extra, 'sharp')
+        code, j = self.measure('encoded', sharp, extra, 'sharp')
+        self.assertEqual(code, 0, self.reasons(j))
+        # the squeezed side columns lose their lines (aliased away, or dropped by the pipeline)
+        w, h, pix = fo.vc.read_png(sharp)
+        gone = bytearray(pix)
+        bg = bytes([15, 15, 31, 255])
+        for y in range(h):
+            for x in list(range(int(0.2 * w))) + list(range(int(0.8 * w), w)):
+                gone[(y * w + x) * 4:(y * w + x) * 4 + 4] = bg
+        edgeless = self.dir / 'edgeless.png'
+        fo.vc.write_png(edgeless, w, h, bytes(gone))
+        code, j = self.measure('encoded', edgeless, extra, 'edgeless')
+        self.assertNotEqual(j['summary']['verdict'], 'PASS')
+        self.assertIn('x edge unverified', self.reasons(j))
+        self.assertNotEqual(code, 0)
+
+    def test_contrast_threshold_is_relative_to_background(self):
+        prof = [0.0] * 60
+        for i in (29, 30, 31):
+            prof[i] = 0.08
+        self.assertIsNotNone(fo.find_line(prof, 15, 45))          # clean, faint line: a fixed 0.15 floor lost it
+        noisy = [0.05 * ((i * 7919) % 11 - 5) / 5 + 0.05 for i in range(60)]
+        self.assertIsNone(fo.find_line(noisy, 15, 45))            # same amplitude as the noise: rejected
+
+    # 3. sharpness takes the line's own width out and goes the right way
+    def test_sharpness_drops_with_blur(self):
+        extra = self.SMALL + ['--foveation', '0.5,0.45,3,3,0,0']
+        sharp = self.synth('encoded', extra, 'sharp')
+        code, a = self.measure('encoded', sharp, extra, 'a')
+        soft = self.dir / 'soft.png'
+        blur_png(sharp, soft, 7)
+        code, b = self.measure('encoded', soft, extra, 'b')
+        za, zb = a['summary']['zones']['band'], b['summary']['zones']['band']
+        self.assertAlmostEqual(za['sharpness_px_per_deg'] / za['predicted_px_per_deg'], 1.0, delta=0.2)
+        self.assertLess(zb['sharpness_px_per_deg'], 0.8 * za['sharpness_px_per_deg'])
+        self.assertGreater(zb['psf_deg'], za['psf_deg'] or 0)
+        self.assertLess(zb['resolved_px_per_deg'], zb['predicted_px_per_deg'])
+
+    def test_narrow_lines_are_unresolvable(self):
+        extra = self.SMALL + ['--foveation', '0.5,0.45,5,5,0,0']
+        png = self.synth('encoded', extra)
+        code, j = self.measure('encoded', png, extra)
+        edge = [l for l in j['lines'] if l['zone'] == 'edge']
+        self.assertTrue(edge)
+        narrow = [l for l in edge if l['nominal_width_px'] < 2]
+        self.assertTrue(narrow)
+        self.assertTrue(all(not l['resolvable'] for l in narrow))
+        self.assertTrue(all(l['resolvable'] for l in j['lines'] if l['nominal_width_px'] >= 2 and l['fwhm_px'] is not None))
+
+    # 4. drawable mode carries the page prediction
+    def test_drawable_uses_page_prediction(self):
+        extra = ['--render', '3648x2912', '--fov-scale', '0.65', '--phys', '1216x1184', '--foveation', '0.5,0.45,3,3,0,0']
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + extra), 0)
+        out = self.dir / 'd.json'
+        self.run_main(['drawable', '--capture-dir', d, '--out-json', out] + extra)
+        j = json.loads(out.read_text())
+        m = fo.page_model(dict(STD, s=0.65))
+        for l in j['lines']:
+            fn = fo.detail_h if l['kind'] == 'vertical' else fo.detail_v
+            want = fn(m, l['angle_deg'])
+            self.assertAlmostEqual(l['predicted_px_per_deg'], want, delta=want * 0.01, msg=str(l))
+        self.assertIsNotNone(j['summary']['zones']['band']['predicted_px_per_deg'])
+
+    # 5. verdict per axis
+    def test_flipped_shift_sign_fails_on_x(self):
+        extra = self.RENDER + ['--foveation', '0.5,0.45,3,3,0.3,0']
+        png = self.synth('encoded', extra)
+        code, j = self.measure('encoded', png, self.RENDER + ['--foveation', '0.5,0.45,3,3,-0.3,0'])
+        self.assertEqual(j['summary']['verdict'], 'FAIL')
+        r = j['summary']['verdict_reasons']
+        self.assertTrue(any(x.startswith('x ') for x in r), r)
+        self.assertFalse(any(x.startswith('y ') for x in r), r)
+
+    def test_one_axis_error_is_not_hidden_by_the_other(self):
+        extra = self.RENDER + ['--foveation', '0.5,0.45,3,3,0,0.2']
+        png = self.synth('encoded', extra)
+        code, j = self.measure('encoded', png, self.RENDER + ['--foveation', '0.5,0.45,3,3,0,0'])
+        self.assertEqual(j['summary']['verdict'], 'FAIL')
+        r = j['summary']['verdict_reasons']
+        self.assertTrue(any(x.startswith('y ') and 'median' in x for x in r), r)
+        self.assertFalse(any(x.startswith('x ') for x in r), r)
+        self.assertGreater(j['summary']['axes']['y']['median_abs_residual_deg'], 0.1)
+        self.assertLess(j['summary']['axes']['x']['median_abs_residual_deg'], 0.05)
+
+    def test_right_eye_wrong_shift_fails(self):
+        png = self.synth('encoded', self.RENDER + self.PAD + ['--eye', 'R'])
+        code, j = self.measure('encoded', png, self.RENDER + ['--foveation', '0.55,0.45,3,3,-0.4,-0.2', '--eye', 'R'])
+        self.assertEqual(j['summary']['verdict'], 'FAIL')
+        self.assertTrue(any(x.startswith('x ') for x in j['summary']['verdict_reasons']))
+
+    # 7. NITs
+    def test_foveation_off_has_no_padding_and_shift_not_clamped(self):
+        off = fo.fov_axis(1, 0, 1, 1830)
+        self.assertEqual(off['coded'], 1830)
+        self.assertGreater(fo.fov_axis(0.5, 1.4, 3, 3648)['s'], 1.0)
+
+    def test_float32_parameters(self):
+        a = fo.fov_axis(0.449999988, 0, 3, 2912)
+        self.assertEqual(a['coded'], 1856)
+        self.assertEqual(round(a['opt']), 1844)
+
+
+class MetaOption(Base):
+    def meta(self, extra=None):
+        m = {'tangents': [[-1.0, 1.0, -0.5625, 0.5625], [-1.0, 1.0, -0.5625, 0.5625]], 'renderEyeSize': [912, 728],
+             'foveation': True, 'centerSize': [0.5, 0.449999988], 'centerShift': [0.25, -0.1], 'edgeRatio': [3, 3],
+             'codedSize': [1216, 480]}
+        m.update(extra or {})
+        p = self.dir / 'meta.json'
+        p.write_text(json.dumps(m))
+        return p
+
+    def test_render_with_meta(self):
+        meta = self.meta()
+        png = self.dir / 'r.png'
+        self.assertEqual(fo.main(['synth', '--kind', 'render', '--render', '912x728', '--tangents', '1,1,0.5625,0.5625', '--eye', 'R', '--out-png', str(png)]), 0)
+        code, j = self.measure('render', png, ['--meta', meta, '--eye', 'R'])
+        self.assertEqual(code, 0)
+        self.assertEqual(j['summary']['params']['render'], [912, 728])
+        self.assertEqual(j['summary']['params']['fov_scale'], 1.0)
+
+    def test_encoded_packed_both_eyes(self):
+        args = ['--render', '912x728', '--tangents', '1,1,0.5625,0.5625', '--foveation', '0.5,0.449999988,3,3,0.25,-0.1']
+        files = {}
+        for eye in 'LR':
+            files[eye] = self.dir / (eye + '.png')
+            self.assertEqual(fo.main(['synth', '--kind', 'encoded', '--eye', eye, '--out-png', str(files[eye])] + args), 0)
+        wl, hl, pl = fo.vc.read_png(files['L'])
+        wr, hr, pr = fo.vc.read_png(files['R'])
+        self.assertEqual((wl, hl), (wr, hr))
+        packed = bytearray()
+        for y in range(hl):
+            packed += pl[y * wl * 4:(y + 1) * wl * 4] + pr[y * wl * 4:(y + 1) * wl * 4]
+        pk = self.dir / 'encoder-input.png'
+        fo.vc.write_png(pk, 2 * wl, hl, bytes(packed))
+        meta = self.meta({'codedSize': [2 * wl, hl]})
+        for eye in 'LR':
+            code, j = self.measure('encoded', pk, ['--meta', meta, '--eye', eye], 'p' + eye)
+            self.assertEqual(code, 0, j['summary']['verdict_reasons'])
+            self.assertEqual(j['summary']['params']['region'], [0 if eye == 'L' else wl, 0, wl, hl])
+
+    def test_meta_foveation_off(self):
+        meta = self.meta({'foveation': False, 'codedSize': [1824, 728]})
+        png = self.dir / 'r.png'
+        self.assertEqual(fo.main(['synth', '--kind', 'render', '--render', '912x728', '--tangents', '1,1,0.5625,0.5625', '--out-png', str(png)]), 0)
+        code, j = self.measure('encoded', png, ['--meta', meta])
+        self.assertEqual(code, 0)
+        self.assertEqual(j['summary']['params']['foveation'], 'off')
+
+
+REAL = Path('/Users/noel/Projects/Management/goals/rdr2-vr/evidence/chart-matrix-20261022/m1/f100-asrun/dump')
+
+
+@unittest.skipUnless((REAL / 'meta.json').exists(), 'real sample not present')
+class RealSample(Base):
+    def test_render_and_encoded_both_eyes_pass(self):
+        for eye in 'LR':
+            code, j = self.measure('render', REAL / ('chart-%s.png' % eye), ['--meta', REAL / 'meta.json', '--eye', eye], 'r' + eye)
+            self.assertEqual(code, 0, (eye, j['summary']['verdict_reasons']))
+            code, j = self.measure('encoded', REAL / 'encoder-input.png', ['--meta', REAL / 'meta.json', '--eye', eye], 'e' + eye)
+            self.assertEqual(code, 0, (eye, j['summary']['verdict_reasons']))
+            self.assertLessEqual(j['summary']['median_abs_residual_deg'], 0.05)
+
+
 class Spec(unittest.TestCase):
     def test_pattern_widths_and_colours(self):
         img = fo.synth_render(1824, 1456, (1.7321, 1.0, 1.1918, 1.0), 1.0, 'L')

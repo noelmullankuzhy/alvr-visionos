@@ -43,8 +43,9 @@ VN = {'UT': 3, 'UN': 2, 'LN': 1.5, 'LT': 4}
 
 BG = {'L': (0.06, 0.06, 0.12), 'R': (0.12, 0.06, 0.06)}
 GREEN, MAGENTA, WHITE = (0, 1, 0), (1, 0, 1), (1, 1, 1)
-MIN_CONTRAST = 0.15
+MIN_CONTRAST, NOISE_SIGMAS = 0.03, 6.0      # a line must stand 6 sigma of its window's background above it
 PASS_MEDIAN_DEG, PASS_MAX_DEG, PASS_EXTENT_DEG, PASS_FOUND = 0.1, 0.5, 0.5, 0.5
+MIN_RESOLVABLE_PX = 2.0                      # lines narrower than this in the image cannot show sharpness
 
 
 # ---- page maths (frustum-pixel-map.html, section 7) --------------------------------------------------------------
@@ -85,17 +86,25 @@ def v_stats(g=600):
     return {'area': a / (WT * HT)}
 
 
+def f32(x):
+    return struct.unpack('f', struct.pack('f', x))[0]
+
+
 def fov_axis(c, s, r, n):
     """ALVR foveation per axis (FFR.cpp CalculateFoveationVars): c centre size, s shift, r edge ratio, n render px."""
     if c >= 0.999 or r <= 1.0001:
-        return {'c': 1.0, 's': 0.0, 'r': 1.0, 'f': 1.0, 'opt': float(n), 'coded': int(math.ceil(n / 32) * 32)}
-    edge = n - c * n
-    ca = 1 - math.ceil(edge / (r * 2)) * (r * 2) / n
-    ea = n - ca * n
-    sa = math.ceil(s * ea / (r * 2)) * (r * 2) / ea if ea else 0.0
-    f = ca + (1 - ca) / r
-    opt = f * n
-    return {'c': ca, 's': max(-1.0, min(1.0, sa)), 'r': r, 'f': f, 'opt': opt, 'coded': int(math.ceil(opt / 32) * 32)}
+        # foveation off: ALVR passes the composition texture through, no 32 px padding
+        return {'c': 1.0, 's': 0.0, 'r': 1.0, 'f': 1.0, 'opt': float(n), 'coded': int(n)}
+    # float32 as in FFR.cpp: settings and results are floats, the 1. / 2. literals promote to double
+    c, s, r, n = f32(c), f32(s), f32(r), f32(n)
+    edge = f32(n - f32(c * n))
+    ca = f32(1. - math.ceil(edge / (r * 2.)) * (r * 2.) / n)
+    ea = f32(n - f32(ca * n))
+    sa = f32(math.ceil(f32(s * ea) / (r * 2.)) * (r * 2.) / ea) if ea else 0.0
+    f = f32(ca + (1. - ca) / r)
+    opt = f32(f * n)
+    coded = int(math.ceil(f32(opt / 32.)) * 32)
+    return {'c': ca, 's': sa, 'r': r, 'f': f, 'opt': opt, 'coded': coded}
 
 
 def u_of_c(C, a):
@@ -194,15 +203,18 @@ def detail_v(m, ph):
 class Axis:
     mode = ''
 
-    def __init__(self, lo, hi, n_render, limit, length):
+    mirror = False                         # right-eye columns: ALVR foveates the mirrored eye image
+    fov = None                             # foveation of this axis (page prediction, zones); None = off
+
+    def __init__(self, lo, hi, n_render, valid, length):
         self.lo, self.hi = lo, hi          # stream (render FOV) tangent range
         self.n_render = n_render
-        self.limit = limit                 # pixels beyond this hold no stream (padding)
+        self.valid = valid                 # pixel range [a, b] holding the stream (the rest is padding)
         self.length = length               # image length in px
 
     def cell(self, i):
         """(fraction of pixel i inside the stream, tau range of that part)."""
-        pa, pb = float(i), min(i + 1.0, self.limit)
+        pa, pb = max(float(i), self.valid[0]), min(i + 1.0, self.valid[1])
         if pb <= pa:
             return 0.0, 0.0, 0.0
         ta, tb = self.tau(pa), self.tau(pb)
@@ -216,15 +228,32 @@ class Axis:
 
     def span(self):
         """Pixel range [a, b] holding the whole stream."""
-        return self.px(self.lo), self.px(self.hi)
+        a, b = self.px(self.lo), self.px(self.hi)
+        return min(a, b), max(a, b)
+
+    def fov_or_off(self):
+        return self.fov or fov_axis(1, 0, 1, self.n_render)
+
+    def band_t(self):
+        """Span of the 1:1 band in stream fractions t (render image, left to right)."""
+        u0, u1 = band_fractions(self.fov_or_off())
+        return (1 - u1, 1 - u0) if self.mirror else (u0, u1)
+
+    def page_px_per_deg(self, tau):
+        """The page's delivered detail (render px/deg over the squeeze) at tangent tau on this axis."""
+        fv = self.fov_or_off()
+        t = self.t_of(tau)
+        q = squeeze(c_of_u(1 - t if self.mirror else t, fv), fv)
+        return self.n_render / (self.hi - self.lo) / q * (1 + tau * tau) * D
 
 
 class RenderAxis(Axis):
     mode = 'render'
 
-    def __init__(self, lo, hi, n, shift=0):
-        Axis.__init__(self, lo, hi, n, n, n)
+    def __init__(self, lo, hi, n, shift=0, fov=None, mirror=False):
+        Axis.__init__(self, lo, hi, n, (0.0, n), n)
         self.shift = shift                 # source-image offset of the render image (--region)
+        self.fov, self.mirror = fov, mirror
 
     def px(self, tau):
         return self.t_of(tau) * self.n_render + self.shift
@@ -236,24 +265,35 @@ class RenderAxis(Axis):
 class EncodedAxis(Axis):
     mode = 'encoded'
 
-    def __init__(self, lo, hi, n, fov, shift=0):
-        Axis.__init__(self, lo, hi, n, fov['opt'], fov['coded'])
-        self.fov = fov
-        self.shift = shift
+    def __init__(self, lo, hi, n, fov, shift=0, mirror=False):
+        coded, opt = fov['coded'], fov['opt']
+        # mirrored (right eye): the stream sits against the right end of the half, padding on the left
+        Axis.__init__(self, lo, hi, n, (coded - opt, float(coded)) if mirror else (0.0, opt), coded)
+        self.fov, self.shift, self.mirror = fov, shift, mirror
 
     def px(self, tau):
-        return self.fov['opt'] * c_of_u(min(1.0, max(0.0, self.t_of(tau))), self.fov) + self.shift
+        t = min(1.0, max(0.0, self.t_of(tau)))
+        opt = self.fov['opt']
+        if self.mirror:
+            return self.fov['coded'] - opt * c_of_u(1 - t, self.fov) + self.shift
+        return opt * c_of_u(t, self.fov) + self.shift
 
     def tau(self, px):
-        return self.lo + u_of_c(min(1.0, max(0.0, (px - self.shift) / self.fov['opt'])), self.fov) * (self.hi - self.lo)
+        rel, opt = px - self.shift, self.fov['opt']
+        if self.mirror:
+            t = 1 - u_of_c(min(1.0, max(0.0, (self.fov['coded'] - rel) / opt)), self.fov)
+        else:
+            t = u_of_c(min(1.0, max(0.0, rel / opt)), self.fov)
+        return self.lo + t * (self.hi - self.lo)
 
 
 class DrawableAxis(Axis):
     mode = 'drawable'
 
-    def __init__(self, lo, hi, n_render, view_lo, view_hi, origin, extent, table):
-        Axis.__init__(self, lo, hi, n_render, table[-1], int(math.ceil(table[-1])))
+    def __init__(self, lo, hi, n_render, view_lo, view_hi, origin, extent, table, fov=None, mirror=False):
+        Axis.__init__(self, lo, hi, n_render, (0.0, table[-1]), int(math.ceil(table[-1])))
         self.view_lo, self.view_hi, self.origin, self.extent, self.table = view_lo, view_hi, origin, extent, table
+        self.fov, self.mirror = fov, mirror
 
     def px(self, tau):
         return vc.interpolate(self.table, self.origin + self.extent * (tau - self.view_lo) / (self.view_hi - self.view_lo))
@@ -263,12 +303,14 @@ class DrawableAxis(Axis):
         return self.view_lo + (logical - self.origin) / self.extent * (self.view_hi - self.view_lo)
 
 
-def make_axis(kind, mode, lo, hi, n_render, fov=None, drawable=None, shift=0):
+def make_axis(kind, mode, lo, hi, n_render, fov=None, drawable=None, shift=0, mirror=False):
+    """fov: this axis's foveation (geometry in encoded mode; zones and the page prediction in the others).
+    mirror: right-eye columns."""
     if mode == 'render':
-        return RenderAxis(lo, hi, n_render, shift)
+        return RenderAxis(lo, hi, n_render, shift, fov, mirror)
     if mode == 'encoded':
-        return EncodedAxis(lo, hi, n_render, fov or fov_axis(1, 0, 1, n_render), shift)
-    return DrawableAxis(lo, hi, n_render, *drawable)
+        return EncodedAxis(lo, hi, n_render, fov or fov_axis(1, 0, 1, n_render), shift, mirror)
+    return DrawableAxis(lo, hi, n_render, *drawable, fov=fov, mirror=mirror)
 
 
 def chart_lines(kind, lo, hi, n_render):
@@ -349,7 +391,7 @@ def synth_render(w, h, tangents, s, eye):
 
 def synth_encoded(w, h, tangents, s, eye, fov):
     left, right, down, up = tangents
-    x = make_axis('h', 'encoded', -s * left, s * right, w, fov=fov[0])
+    x = make_axis('h', 'encoded', -s * left, s * right, w, fov=fov[0], mirror=eye == 'R')
     y = make_axis('v', 'encoded', -s * up, s * down, h, fov=fov[1])
     return synth_image(x, y, eye), x.length, y.length
 
@@ -439,9 +481,13 @@ def find_line(prof, lo_win, hi_win):
     seg = prof[i0:i1]
     peak = max(seg)
     ip = seg.index(peak)
-    base = sorted(seg)[len(seg) // 4]
+    srt = sorted(seg)
+    base = srt[len(seg) // 4]
+    low = srt[:max(3, 3 * len(seg) // 4)]               # the window without its line
+    med = low[len(low) // 2]
+    noise = 1.4826 * sorted(abs(v - med) for v in low)[len(low) // 2]
     contrast = peak - base
-    if contrast < MIN_CONTRAST:
+    if contrast < max(MIN_CONTRAST, NOISE_SIGMAS * noise):
         return None
     thr = base + 0.2 * contrast
     ia = ip
@@ -501,22 +547,20 @@ def local_scale(axis, tau_of_deg, a_deg, h=0.25):
     return abs(axis.px(tau_of_deg(a_deg + h)) - axis.px(tau_of_deg(a_deg - h))) / (2 * h)
 
 
-def analyse(mode, pix, width, height, region, xaxis, yaxis, eye, fov, tangents_note, band_fov):
+def analyse(pix, width, region, xaxis, yaxis):
     x0, y0, w, h = region
-    xspan = xaxis.span()
-    yspan = yaxis.span()
+    xspan, yspan = xaxis.span(), yaxis.span()
     rel_x = (max(0.0, xspan[0] - x0) + 2, min(w, xspan[1] - x0) - 2)
     rel_y = (max(0.0, yspan[0] - y0) + 2, min(h, yspan[1] - y0) - 2)
     lines = []
-    page_scale = mode in ('render', 'encoded')
-    for kind, name, axis, off, other, n_axis, fv in (('v', 'vertical', xaxis, x0, rel_y, w, fov[0]),
-                                                      ('h', 'horizontal', yaxis, y0, rel_x, h, fov[1])):
+    for kind, name, axname, axis, off, other, n_axis in (('v', 'vertical', 'x', xaxis, x0, rel_y, w),
+                                                         ('h', 'horizontal', 'y', yaxis, y0, rel_x, h)):
         axkind = 'h' if kind == 'v' else 'v'
         specs = chart_lines(axkind, axis.lo, axis.hi, axis.n_render)
-        preds = [(s, axis.px(s[1]) - off) for s in specs]
-        preds = sorted(((s, p) for s, p in preds if 0 <= p < n_axis), key=lambda sp: sp[1])
+        preds = sorted(((s, axis.px(s[1]) - off) for s in specs if 0 <= axis.px(s[1]) - off < n_axis), key=lambda sp: sp[1])
         prof, used = profile(pix, width, region, kind, other)
-        u0, u1 = band_fractions(fv)
+        t0, t1 = axis.band_t()
+        tau_of = (lambda a: math.tan(a * D)) if axkind == 'h' else (lambda a: -math.tan(a * D))
         for idx, (spec, p) in enumerate(preds):
             angle, tau, wpx, hw = spec
             prev_p = preds[idx - 1][1] if idx > 0 else None
@@ -525,21 +569,15 @@ def analyse(mode, pix, width, height, region, xaxis, yaxis, eye, fov, tangents_n
             above = (next_p - p) / 2 if next_p is not None else below
             found = find_line(prof, p - below, p + above) if used else None
             t = axis.t_of(tau)
-            zone = 'band' if u0 - 1e-9 <= t <= u1 + 1e-9 else 'edge'
-            tau_of = (lambda a: math.tan(a * D)) if axkind == 'h' else (lambda a: -math.tan(a * D))
+            zone = 'band' if t0 - 1e-9 <= t <= t1 + 1e-9 else 'edge'
             scale = local_scale(axis, tau_of, angle)
-            if page_scale and mode == 'render':
-                page = n_axis_render(axis) / (axis.hi - axis.lo) * (1 + tau * tau) * D
-            elif page_scale:
-                C = c_of_u(t, fv)
-                page = axis.n_render / (axis.hi - axis.lo) / squeeze(C, fv) * (1 + tau * tau) * D
-            else:
-                page = None
+            page = axis.page_px_per_deg(tau)
             nominal = 2 * hw / (1 + tau * tau) / D
-            rec = {'kind': name, 'angle_deg': angle, 'predicted_px': p + off, 'measured_px': None, 'residual_px': None,
-                   'residual_deg': None, 'fwhm_px': None, 'fwhm_deg': None, 'contrast': None, 'zone': zone,
-                   'nominal_width_deg': nominal, 'predicted_px_per_deg': page if page is not None else scale,
-                   'local_px_per_deg': scale}
+            rec = {'kind': name, 'axis': axname, 'angle_deg': angle, 'predicted_px': p + off, 'measured_px': None,
+                   'residual_px': None, 'residual_deg': None, 'fwhm_px': None, 'fwhm_deg': None, 'contrast': None,
+                   'zone': zone, 'nominal_width_deg': nominal, 'nominal_width_px': nominal * scale,
+                   'predicted_px_per_deg': page, 'local_px_per_deg': scale, 'resolvable': False,
+                   'psf_deg': None, 'sharpness_px_per_deg': None}
             if found:
                 rec['measured_px'] = found['centre'] + off
                 rec['residual_px'] = found['centre'] - p
@@ -548,12 +586,13 @@ def analyse(mode, pix, width, height, region, xaxis, yaxis, eye, fov, tangents_n
                 if found['fwhm'] is not None:
                     rec['fwhm_px'] = found['fwhm']
                     rec['fwhm_deg'] = found['fwhm'] / scale
+                    if rec['nominal_width_px'] >= MIN_RESOLVABLE_PX:
+                        # the line's own width comes out in quadrature; what is left is the pipeline's blur
+                        rec['resolvable'] = True
+                        rec['psf_deg'] = math.sqrt(max(0.0, rec['fwhm_deg'] ** 2 - nominal ** 2))
+                        rec['sharpness_px_per_deg'] = page * nominal / rec['fwhm_deg']
             lines.append(rec)
     return lines
-
-
-def n_axis_render(axis):
-    return axis.n_render
 
 
 def extent_report(mode, xaxis, yaxis, edges):
@@ -568,31 +607,62 @@ def extent_report(mode, xaxis, yaxis, edges):
     return out
 
 
-def summarise(lines, extent, params):
+def _median(values):
+    values = list(values)
+    return statistics.median(values) if values else None
+
+
+def zone_stats(zl):
+    rs = [l for l in zl if l['resolvable']]
+    psf = _median(l['psf_deg'] for l in rs)
+    return {
+        'n_predicted': len(zl), 'n_found': sum(1 for l in zl if l['measured_px'] is not None), 'n_resolvable': len(rs),
+        'median_fwhm_deg': _median(l['fwhm_deg'] for l in rs),
+        'median_nominal_deg': _median(l['nominal_width_deg'] for l in rs),
+        'psf_deg': psf,
+        # 1 / PSF: how fine a detail the pipeline still resolves (None when the PSF is below measurement)
+        'resolved_px_per_deg': 1 / psf if psf else None,
+        # page prediction x nominal / FWHM: falls as the lines blur out; equals the prediction when sharp
+        'sharpness_px_per_deg': _median(l['sharpness_px_per_deg'] for l in rs),
+        'predicted_px_per_deg': _median(l['predicted_px_per_deg'] for l in zl)}
+
+
+def summarise(lines, extent, params, foveated):
+    """foveated: {'x': bool, 'y': bool}; the verdict is per axis, and per zone where an axis is foveated."""
     found = [l for l in lines if l['measured_px'] is not None]
     res = [abs(l['residual_deg']) for l in found]
     s = {'n_predicted': len(lines), 'n_found': len(found),
-         'median_abs_residual_deg': statistics.median(res) if res else None,
-         'max_abs_residual_deg': max(res) if res else None,
-         'stream_extent_deg': extent, 'zones': {}}
+         'median_abs_residual_deg': _median(res), 'max_abs_residual_deg': max(res) if res else None,
+         'stream_extent_deg': extent, 'zones': {}, 'axes': {}}
     for zone in ('band', 'edge'):
-        zl = [l for l in lines if l['zone'] == zone]
-        fw = [l for l in zl if l['fwhm_px'] is not None and l['measured_px'] is not None]
-        s['zones'][zone] = {
-            'n_predicted': len(zl), 'n_found': sum(1 for l in zl if l['measured_px'] is not None),
-            'median_fwhm_deg': statistics.median(l['fwhm_deg'] for l in fw) if fw else None,
-            'implied_px_per_deg': statistics.median(l['fwhm_px'] / l['nominal_width_deg'] for l in fw) if fw else None,
-            'predicted_px_per_deg': statistics.median(l['predicted_px_per_deg'] for l in zl) if zl else None}
+        s['zones'][zone] = zone_stats([l for l in lines if l['zone'] == zone])
     reasons = []
-    if not found:
-        reasons.append('no lines found')
-    else:
-        if s['n_found'] < PASS_FOUND * s['n_predicted']:
-            reasons.append('found %d of %d predicted lines' % (s['n_found'], s['n_predicted']))
-        if s['median_abs_residual_deg'] > PASS_MEDIAN_DEG:
-            reasons.append('median residual %.3f deg > %.1f' % (s['median_abs_residual_deg'], PASS_MEDIAN_DEG))
-        if s['max_abs_residual_deg'] > PASS_MAX_DEG:
-            reasons.append('max residual %.3f deg > %.1f' % (s['max_abs_residual_deg'], PASS_MAX_DEG))
+    for ax in ('x', 'y'):
+        al = [l for l in lines if l['axis'] == ax]
+        af = [l for l in al if l['measured_px'] is not None]
+        ar = [abs(l['residual_deg']) for l in af]
+        med, mx = _median(ar), (max(ar) if ar else None)
+        s['axes'][ax] = {'n_predicted': len(al), 'n_found': len(af), 'median_abs_residual_deg': med, 'max_abs_residual_deg': mx}
+        if not al:
+            continue
+        if not af:
+            reasons.append('%s no lines found (of %d predicted)' % (ax, len(al)))
+            continue
+        if len(af) < PASS_FOUND * len(al):
+            reasons.append('%s found %d of %d predicted lines' % (ax, len(af), len(al)))
+        if med > PASS_MEDIAN_DEG:
+            reasons.append('%s median residual %.3f deg > %.1f' % (ax, med, PASS_MEDIAN_DEG))
+        if mx > PASS_MAX_DEG:
+            reasons.append('%s max residual %.3f deg > %.1f' % (ax, mx, PASS_MAX_DEG))
+        if foveated.get(ax):
+            for zone in ('band', 'edge'):
+                zl = [l for l in al if l['zone'] == zone]
+                zf = [l for l in zl if l['measured_px'] is not None]
+                if zl and len(zf) < PASS_FOUND * len(zl):
+                    what = 'edge unverified' if zone == 'edge' else 'band lines missing'
+                    reasons.append('%s %s (found %d of %d %s lines)' % (ax, what, len(zf), len(zl), zone))
+    if not lines:
+        reasons.append('no lines predicted inside the image')
     for side, e in extent.items():
         if e['error_deg'] is not None and abs(e['error_deg']) > PASS_EXTENT_DEG:
             reasons.append('stream extent %s off by %.2f deg' % (side, e['error_deg']))
@@ -642,7 +712,7 @@ class Canvas:
             self.put(int(math.floor(xa + (xb - xa) * t)), int(math.floor(ya + (yb - ya) * t)), c)
 
 
-def draw_overlay(canvas, region, xaxis, yaxis, lines, eye, fov, show_band, show_stream):
+def draw_overlay(canvas, region, xaxis, yaxis, lines, eye, show_band, show_stream):
     x0, y0, w, h = region
     sx = lambda tau: xaxis.px(tau) - x0
     sy = lambda tau: yaxis.px(tau) - y0
@@ -661,8 +731,8 @@ def draw_overlay(canvas, region, xaxis, yaxis, lines, eye, fov, show_band, show_
             elif not vert and 0 <= p < h:
                 canvas.hline(p, ORANGE)
     if show_band:
-        u0, u1 = band_fractions(fov[0])
-        v0, v1 = band_fractions(fov[1])
+        u0, u1 = xaxis.band_t()
+        v0, v1 = yaxis.band_t()
         bx0 = sx(xaxis.lo + u0 * (xaxis.hi - xaxis.lo))
         bx1 = sx(xaxis.lo + u1 * (xaxis.hi - xaxis.lo))
         by0 = sy(yaxis.lo + v0 * (yaxis.hi - yaxis.lo))
@@ -725,6 +795,7 @@ def build_parser():
     p.add_argument('--fov-scale', type=float, default=1.0)
     p.add_argument('--render', help='WxH per eye (default: 3648x2912; render mode: the region size)')
     p.add_argument('--foveation', help='cx,cy,rx,ry,shx,shy or off (default off)')
+    p.add_argument('--meta', type=Path, help='ALVR angle-chart dump meta.json: tangents, render size, foveation, coded size')
     p.add_argument('--out-png')
     p.add_argument('--out-json')
     p.add_argument('--kind', choices=['render', 'encoded', 'drawable'], help='synth: which image to write')
@@ -756,14 +827,29 @@ def do_synth(a):
     return 0
 
 
+def load_meta(path, eye):
+    """ALVR angle-chart dump meta.json -> per-eye tangents (|tan| L,R,D,U), render size, foveation text, coded size."""
+    m = json.loads(Path(path).read_text())
+    t = m['tangents'][0 if eye == 'L' else 1]
+    out = {'tangents': tuple(abs(float(v)) for v in t), 'render': (int(m['renderEyeSize'][0]), int(m['renderEyeSize'][1])),
+           'coded': (int(m['codedSize'][0]), int(m['codedSize'][1]))}
+    if m.get('foveation'):
+        out['foveation'] = ','.join(repr(float(v)) for v in (m['centerSize'][0], m['centerSize'][1], m['edgeRatio'][0],
+                                                              m['edgeRatio'][1], m['centerShift'][0], m['centerShift'][1]))
+    else:
+        out['foveation'] = 'off'
+    return out
+
+
 def run_measure(a):
     mode = a.mode
     s = a.fov_scale
+    meta = load_meta(a.meta, a.eye) if a.meta else None
     if mode == 'drawable':
         if not a.capture_dir:
             raise ValueError('drawable needs --capture-dir')
-        meta = json.loads((a.capture_dir / 'capture.json').read_text())
-        sl = next((x for x in meta['slices'] if x['eye'] == a.eye), None)
+        cap = json.loads((a.capture_dir / 'capture.json').read_text())
+        sl = next((x for x in cap['slices'] if x['eye'] == a.eye), None)
         if sl is None:
             raise ValueError('no %s slice in capture.json' % a.eye)
         width, height, pix = vc.read_png(a.capture_dir / sl['png'])
@@ -774,63 +860,91 @@ def run_measure(a):
         if not a.image:
             raise ValueError('%s needs --image' % mode)
         width, height, pix = vc.read_png(a.image)
-        tangents = device_tangents(a.eye, a.tangents)
-    region = tuple(int(v) for v in pair(a.region, float, 4, '--region')) if a.region else (0, 0, width, height)
+        tangents = tuple(pair(a.tangents, float, 4, '--tangents')) if a.tangents else (meta['tangents'] if meta else device_tangents(a.eye, None))
+    foveation = a.foveation if a.foveation is not None else (meta['foveation'] if meta else None)
+    if a.region:
+        region = tuple(int(v) for v in pair(a.region, float, 4, '--region'))
+    elif meta and mode == 'encoded' and width == meta['coded'][0] and width % 2 == 0:
+        per = width // 2                      # packed frame: left eye left half, right eye right half
+        region = (0 if a.eye == 'L' else per, 0, per, height)
+    else:
+        region = (0, 0, width, height)
     x0, y0, w, h = region
     if w <= 0 or h <= 0 or x0 < 0 or y0 < 0 or x0 + w > width or y0 + h > height:
         raise ValueError('--region outside the image')
     if a.render:
         render = size_arg(a.render, '--render')
+    elif meta:
+        render = meta['render']
     else:
         render = (w, h) if mode == 'render' else REN
     left, right, down, up = tangents
     lo_x, hi_x, lo_y, hi_y = -s * left, s * right, -s * up, s * down
-    fov = parse_foveation(a.foveation, render)
+    fov = parse_foveation(foveation, render)
+    mirror = a.eye == 'R'
     if mode == 'render':
-        xaxis = make_axis('h', 'render', lo_x, hi_x, render[0], shift=x0)
-        yaxis = make_axis('v', 'render', lo_y, hi_y, render[1], shift=y0)
+        xaxis = make_axis('h', 'render', lo_x, hi_x, render[0], fov=fov[0], shift=x0, mirror=mirror)
+        yaxis = make_axis('v', 'render', lo_y, hi_y, render[1], fov=fov[1], shift=y0)
     elif mode == 'encoded':
-        xaxis = make_axis('h', 'encoded', lo_x, hi_x, render[0], fov=fov[0], shift=x0)
+        xaxis = make_axis('h', 'encoded', lo_x, hi_x, render[0], fov=fov[0], shift=x0, mirror=mirror)
         yaxis = make_axis('v', 'encoded', lo_y, hi_y, render[1], fov=fov[1], shift=y0)
     else:
         xt, yt = vc.tables(sl)
         vx, vy, vw, vh = sl['viewport']
-        xaxis = make_axis('h', 'drawable', lo_x, hi_x, render[0], drawable=(-left, right, vx, vw, xt))
-        yaxis = make_axis('v', 'drawable', lo_y, hi_y, render[1], drawable=(-up, down, vy, vh, yt))
+        xaxis = make_axis('h', 'drawable', lo_x, hi_x, render[0], fov=fov[0], mirror=mirror, drawable=(-left, right, vx, vw, xt))
+        yaxis = make_axis('v', 'drawable', lo_y, hi_y, render[1], fov=fov[1], drawable=(-up, down, vy, vh, yt))
     params = {'mode': mode, 'eye': a.eye, 'fov_scale': s, 'tangents_LRDU': list(tangents), 'render': list(render),
-              'foveation': a.foveation or 'off', 'region': [x0, y0, w, h], 'image_size': [width, height]}
+              'foveation': foveation or 'off', 'region': [x0, y0, w, h], 'image_size': [width, height]}
+    notes = []
     if mode == 'encoded':
-        params['coded_size_predicted'] = [fov[0]['coded'], fov[1]['coded']]
-        if (w, h) != (fov[0]['coded'], fov[1]['coded']):
+        coded = (fov[0]['coded'], fov[1]['coded'])
+        params['coded_size_predicted'] = list(coded)
+        if (w, h) != coded:
             params['coded_size_note'] = 'region differs from predicted coded size'
-    lines = analyse(mode, pix, width, height, region, xaxis, yaxis, a.eye, fov, None, None)
+        if meta and coded != (meta['coded'][0] // 2, meta['coded'][1]):
+            notes.append('coded size predicted %dx%d per eye, meta says %dx%d for both' % (coded[0], coded[1], meta['coded'][0], meta['coded'][1]))
+    lines = analyse(pix, width, region, xaxis, yaxis)
     edges = None
     if mode == 'drawable':
         xa, xb = stream_edges(pix, width, region, 'h', None)
         ya, yb = stream_edges(pix, width, region, 'v', None)
         edges = {'left': xa, 'right': xb, 'up': ya, 'down': yb}
     extent = extent_report(mode, xaxis, yaxis, edges)
-    summary = summarise(lines, extent, params)
+    summary = summarise(lines, extent, params, {'x': fov[0]['f'] < 0.9999, 'y': fov[1]['f'] < 0.9999})
+    if notes:
+        summary['verdict_reasons'].extend(notes)
+        summary['verdict'] = 'FAIL'
     if a.out_png:
         canvas = Canvas(pix, width, region)
-        draw_overlay(canvas, region, xaxis, yaxis, lines, a.eye, fov, a.foveation not in (None, 'off'), True)
+        draw_overlay(canvas, region, xaxis, yaxis, lines, a.eye, foveation not in (None, 'off'), True)
         vc.write_png(a.out_png, w, h, bytes(canvas.buf))
     if a.out_json:
         Path(a.out_json).write_text(json.dumps({'summary': summary, 'lines': lines}, indent=1))
-    z = summary['zones']
+    print_summary(summary, mode, a.eye, s)
+    return 0 if summary['verdict'] == 'PASS' else 1
+
+
+def print_summary(summary, mode, eye, s):
+    def f(v, fmt='%.3f'):
+        return 'n/a' if v is None else fmt % v
     print('{} eye={} fov_scale={}: found {}/{} lines, median |residual| {} deg, max {} deg'.format(
-        mode, a.eye, s, summary['n_found'], summary['n_predicted'],
-        'n/a' if summary['median_abs_residual_deg'] is None else '%.3f' % summary['median_abs_residual_deg'],
-        'n/a' if summary['max_abs_residual_deg'] is None else '%.3f' % summary['max_abs_residual_deg']))
+        mode, eye, s, summary['n_found'], summary['n_predicted'], f(summary['median_abs_residual_deg']), f(summary['max_abs_residual_deg'])))
+    for ax in ('x', 'y'):
+        e = summary['axes'][ax]
+        if e['n_predicted']:
+            print('  axis {}: found {}/{}, median {} deg, max {} deg'.format(
+                ax, e['n_found'], e['n_predicted'], f(e['median_abs_residual_deg']), f(e['max_abs_residual_deg'])))
     for zone in ('band', 'edge'):
-        if z[zone]['median_fwhm_deg'] is not None:
-            print('  {}: {} lines, median FWHM {:.3f} deg, implied {:.1f} px/deg vs predicted {:.1f}'.format(
-                zone, z[zone]['n_found'], z[zone]['median_fwhm_deg'], z[zone]['implied_px_per_deg'], z[zone]['predicted_px_per_deg']))
-    for side, e in extent.items():
+        z = summary['zones'][zone]
+        if not z['n_predicted']:
+            continue
+        print('  {}: found {}/{}, resolvable {}, sharpness {} px/deg (predicted {}), PSF {} deg, resolved {} px/deg'.format(
+            zone, z['n_found'], z['n_predicted'], z['n_resolvable'], f(z['sharpness_px_per_deg'], '%.1f'),
+            f(z['predicted_px_per_deg'], '%.1f'), f(z['psf_deg'], '%.4f'), f(z['resolved_px_per_deg'], '%.1f')))
+    for side, e in summary['stream_extent_deg'].items():
         if e['measured_deg'] is not None:
             print('  stream {}: measured {:.2f} deg, predicted {:.2f} deg'.format(side, e['measured_deg'], e['predicted_deg']))
     print('{}{}'.format(summary['verdict'], ''.join('; ' + r for r in summary['verdict_reasons'])))
-    return 0 if summary['verdict'] == 'PASS' else 1
 
 
 def main(argv=None):
