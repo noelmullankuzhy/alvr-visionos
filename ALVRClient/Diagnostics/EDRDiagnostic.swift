@@ -104,7 +104,7 @@ func edrVisibleControls(layout: EDRLayout, running: Bool) -> Set<EDRControl> {
     var controls: Set<EDRControl> = layout.gridArea != nil ? [.gridOptions] : [.steps]
     if running {
         if layout.gridArea != nil { controls.insert(.gridHint) }
-        else if layout.isComparison { controls.insert(.answers) }
+        else if layout.isComparison { controls.formUnion([.answers, .navigation]) }
         else { controls.formUnion([.navigation, .mark]) }
     }
     return controls
