@@ -3,6 +3,17 @@ import Foundation
 
 @main enum EDRDiagnosticTests {
     static func main() {
+        for layout in EDRLayout.allCases {
+            for running in [false, true] {
+                var expected: Set<EDRControl> = layout.gridArea != nil ? [.gridOptions] : [.steps]
+                if running {
+                    if layout.gridArea != nil { expected.insert(.gridHint) }
+                    else if layout.isComparison { expected.insert(.answers) }
+                    else { expected.formUnion([.navigation, .mark]) }
+                }
+                expectEqual(edrVisibleControls(layout: layout, running: running), expected, "only relevant EDR controls")
+            }
+        }
         expectEqual(EDRStep.values, [0, 0.25, 0.5, 1, 1.25, 1.5, 1.75, 2, 2.5, 4], "M2 levels")
         for (layout, area) in [(EDRLayout.onePercent, 0.01), (.tenPercent, 0.1), (.full, 1.0)] {
             let rect = layout.patches(value: 4)[0]
@@ -23,9 +34,11 @@ import Foundation
             expect(abs(l.width * l.height * 2 - area) < 1e-12, "total pair area")
             expect(abs(l.width * 1.25 - l.height) < 1e-12, "square in viewport pixels")
             expect(abs(r.x - l.x - 2 * l.width) < 1e-12, "gap equals patch width")
-            expect(abs((l.x + r.x + r.width) / 2 - centre.x) < 1e-12, "pair tangent centre x")
+            expect(abs((l.x + r.x + r.width) / 2 - min(centre.x, 1 - 1.5 * l.width)) < 2e-12, "pair centre fits inward")
             expect(abs(l.y + l.height / 2 - centre.y) < 1e-12, "pair tangent centre y")
         }
+        expectEqual(EDRGridRange.allCases.map(\.rawValue), ["fine", "coarse", "knee"], "grid ranges")
+        expect(!EDRGrid().borders, "seamless by default")
         for range in EDRGridRange.allCases {
             let grid = EDRGrid(range: range, mirror: false)
             let mirrored = EDRGrid(range: range, mirror: true)
@@ -34,7 +47,12 @@ import Foundation
             for i in 0..<25 {
                 let row = i / 5, col = i % 5
                 let snake = row * 5 + (row % 2 == 0 ? col : 4 - col)
-                let expected = range == .fine ? 1 + Double(snake) / 24 : 0.5 + Double(snake) / 10
+                let expected: Double
+                switch range {
+                case .fine: expected = 1 + Double(snake) / 24
+                case .coarse: expected = 0.5 + Double(snake) / 10
+                case .knee: expected = 1.30 + Double(snake) / 60
+                }
                 expect(abs(Double(grid.entries[i].value) - expected) < 1e-6, "snake range")
                 if range == .coarse {
                     expectEqual(grid.entries[i].value, Float(5 + snake) / 10, "coarse values match decimal tenths without accumulation")
@@ -42,13 +60,13 @@ import Foundation
                 expectEqual(mirrored.entries[i].value, grid.entries[24 - i].value, "mirror reverses all 25")
             }
             expectEqual(Diag.line(topic: "edr", tMs: 1, fields: grid.fields(grid.entries[0], layout: .gridTen, immersion: "full")),
-                        "DIAG edr t_ms=1 grid=\"grid 10%\" range=\(range.rawValue) mirror=0 cell=A1 value=\(range == .fine ? "1.000" : "0.500") immersion=full", "grid log")
+                        "DIAG edr t_ms=1 grid=\"grid 10%\" range=\(range.rawValue) mirror=0 borders=0 cell=A1 value=\(range == .fine ? "1.000" : range == .coarse ? "0.500" : "1.300") immersion=full", "grid log")
             for (layout, area) in [(EDRLayout.gridOne, 0.01), (.gridTen, 0.1), (.gridFifty, 0.5)] {
-                let patches = layout.patches(value: 4, centre: centre, aspect: 1.25, grid: grid, pixelHeight: 1000)
+                let patches = layout.patches(value: 4, centre: centre, aspect: 1.25, grid: EDRGrid(range: range, borders: true), pixelHeight: 1000)
                 expect(abs(patches.reduce(0) { $0 + $1.width * $1.height } - area) < 1e-12, "grid total lit area excludes lines")
                 let minX = patches.map(\.x).min()!, maxX = patches.map { $0.x + $0.width }.max()!
                 let minY = patches.map(\.y).min()!, maxY = patches.map { $0.y + $0.height }.max()!
-                expect(abs((minX + maxX) / 2 - centre.x) < 1e-12, "grid tangent centre x")
+                expect(abs((minX + maxX) / 2 - min(centre.x, 1 - (maxX - minX) / 2)) < 2e-12, "grid centre fits inward")
                 expect(abs((minY + maxY) / 2 - centre.y) < 1e-12, "grid tangent centre y")
                 expect(patches.allSatisfy { abs($0.width * 1250 - $0.height * 1000) < 1e-10 }, "physical squares")
                 expect(abs((patches[1].x - patches[0].x - patches[0].width) * 1250 - 2) < 1e-10, "2 physical pixel vertical lines")
@@ -58,6 +76,75 @@ import Foundation
                     expectEqual(label.value, 0.15, "dim label")
                 }
             }
+        }
+        // Seamless rectangles partition the cluster, including non-centred, non-square viewports.
+        for (layout, area) in [(EDRLayout.gridOne, 0.01), (.gridTen, 0.1), (.gridFifty, 0.5)] {
+            for aspect in [0.8, 1.0, 1.25, 1.777] {
+                for origin in [SIMD2(0.5, 0.5), centre] {
+                    let patches = layout.patches(value: 4, centre: origin, aspect: aspect, pixelHeight: 1837)
+                    expectEqual(patches.count, 25, "seamless cell count")
+                    let left = patches[0].x, top = patches[0].y
+                    let right = patches[4].x + patches[4].width
+                    let bottom = patches[20].y + patches[20].height
+                    let total = (right - left) * (bottom - top)
+                    let sum = patches.reduce(0) { $0 + $1.width * $1.height }
+                    expect(abs(total - area) < 1e-12, "seamless cluster area")
+                    expect(abs(sum - total) < 1e-12, "union area equals total area")
+                    expect(abs((left + right) / 2 - min(origin.x, 1 - (right - left) / 2)) < 2e-12, "seamless fitted centre x")
+                    expect(abs((top + bottom) / 2 - min(max(origin.y, (bottom - top) * 0.556), 1 - (bottom - top) / 2)) < 2e-12, "seamless fitted centre y")
+                    for (i, patch) in patches.enumerated() {
+                        expect(patch.width > 0 && patch.height > 0, "positive cell area")
+                        expect(abs(patch.width * aspect - patch.height) < 1e-12, "seamless physical square")
+                        if i % 5 < 4 {
+                            expectEqual(patch.x + patch.width, patches[i + 1].x, "exact shared vertical edge")
+                        }
+                        if i / 5 < 4 {
+                            expectEqual(patch.y + patch.height, patches[i + 5].y, "exact shared horizontal edge")
+                        }
+                        for other in patches.dropFirst(i + 1) {
+                            let w = min(patch.x + patch.width, other.x + other.width) - max(patch.x, other.x)
+                            let h = min(patch.y + patch.height, other.y + other.height) - max(patch.y, other.y)
+                            expect(w <= 0 || h <= 0, "no pair of cells overlaps")
+                        }
+                    }
+                }
+            }
+        }
+        // This headset's tangent origin differs per eye. Keep all comparison patches in view.
+        for leftEye in [true, false] {
+            let eyeCentre = EDRView.centre(left: leftEye ? 1.7321 : 1.0, right: leftEye ? 1.0 : 1.7321,
+                                           top: 1.0, bottom: 1.1918)
+            for layout in EDRLayout.allCases where layout.pairArea != nil || layout.gridArea != nil {
+                for borders in [false, true] {
+                    let frame = EDRFrame(step: EDRStep(startMs: 0, automatic: false), layout: layout,
+                                         grid: EDRGrid(borders: borders))
+                    let aspect = 2.7321 / 2.1918
+                    for requested in [eyeCentre, SIMD2(0.02, 0.98), SIMD2(0.98, 0.02)] {
+                        let patches = frame.patches(centre: requested, aspect: aspect, pixelHeight: 1000)
+                        for patch in patches {
+                            expect(patch.x >= 0 && patch.y >= 0 && patch.x + patch.width <= 1 && patch.y + patch.height <= 1,
+                                   "every pair/grid patch and label fits viewport for both eyes")
+                        }
+                        let fields = frame.shiftFields(centre: requested, aspect: aspect, pixelHeight: 1000,
+                                                       view: leftEye ? 0 : 1, immersion: "full")
+                        if requested != eyeCentre || layout == .pairTwenty {
+                            expect(fields != nil, "clipped cluster reports shift")
+                            if let fields {
+                                let line = Diag.line(topic: "edr", tMs: 1, fields: fields)
+                                expect(line.contains(" shifted=1 ") && line.contains("view=\(leftEye ? 0 : 1)"), "shift log identifies eye view")
+                            }
+                        } else {
+                            expect(fields == nil, "fitting cluster needs no shift log")
+                        }
+                    }
+                }
+            }
+        }
+        let knee = EDRGrid(range: .knee).entries.map(\.value).sorted()
+        expectEqual(knee.first!, Float(1.30), "knee minimum")
+        expectEqual(knee.last!, Float(1.70), "knee maximum")
+        for i in 1..<25 {
+            expect(abs(Double(knee[i] - knee[i - 1]) - 1.0 / 60) < 2e-7, "equal knee increments")
         }
         expectEqual(EDRStep.fineValues, [0.5, 1, 1.25, 1.5, 1.6, 1.7, 1.8, 1.9, 2, 2.2, 2.5, 3, 4], "fine list")
         var fine = EDRStep(startMs: 0, automatic: false, fine: true)
@@ -146,10 +233,19 @@ import Foundation
         _ = session.frame()
         Diag.flush()
         expectEqual(lines.filter { $0.contains(" grid=") }.count, 75, "every toggle logged, even between frames")
+        session.configure(layout: .gridTen, automatic: false, sustained: false, gridRange: .knee, mirror: true, borders: true)
+        expect(session.frame().grid.borders, "borders reaches submitted frame")
+        session.configure(layout: .gridTen, automatic: false, sustained: false, gridRange: .knee, mirror: true, borders: false)
+        expect(!session.frame().grid.borders, "borders can be turned off")
+        Diag.flush()
+        let gridLines = lines.filter { $0.contains(" grid=") }
+        expectEqual(gridLines.count, 125, "range and border changes log every cell")
+        expectEqual(gridLines.filter { $0.contains(" borders=1 ") }.count, 25, "bordered log batch")
+        expectEqual(gridLines.filter { $0.contains(" borders=0 ") }.count, 100, "seamless log batches")
         session.beginRun()
         _ = session.frame()
         Diag.flush()
-        expectEqual(lines.filter { $0.contains(" grid=") }.count, 100, "all grid values on new run")
+        expectEqual(lines.filter { $0.contains(" grid=") }.count, 150, "all grid values on new run")
         expect(lines.allSatisfy { $0.hasSuffix("immersion=full") }, "every EDR session line attributes immersion")
         try? FileManager.default.removeItem(at: logDirectory)
         finishTests("EDRDiagnostic")

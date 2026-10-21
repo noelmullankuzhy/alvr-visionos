@@ -61,17 +61,19 @@ import simd
         // Explicit row-major indices along the snake, independent of EDRGrid.entries.
         let snake = [[0, 1, 2, 3, 4], [9, 8, 7, 6, 5], [10, 11, 12, 13, 14],
                      [19, 18, 17, 16, 15], [20, 21, 22, 23, 24]]
-        // Every layout, plus both ranges and mirror directions for every grid area.
+        // Every layout, plus all ranges, mirror directions and border modes for every grid area.
         var cases = EDRLayout.allCases.map { ($0, EDRGrid()) }
         for layout in [EDRLayout.gridOne, .gridTen, .gridFifty] {
             for range in EDRGridRange.allCases {
-                for mirror in [false, true] where range != .fine || mirror {
-                    cases.append((layout, EDRGrid(range: range, mirror: mirror)))
+                for mirror in [false, true] {
+                    for borders in [false, true] {
+                        cases.append((layout, EDRGrid(range: range, mirror: mirror, borders: borders)))
+                    }
                 }
             }
         }
         for (layout, grid) in cases {
-            let context = "\(layout.rawValue) \(grid.range.rawValue) mirror=\(grid.mirror)"
+            let context = "\(layout.rawValue) \(grid.range.rawValue) mirror=\(grid.mirror) borders=\(grid.borders)"
             render(layout, 4, slice: 1, projection: projection, grid: grid)
             var pixels = [UInt16](repeating: 0, count: width * height * 4)
             let depths = readDepth(slice: 1)
@@ -104,14 +106,18 @@ import simd
                         case .gridOne, .gridTen, .gridFifty:
                             let area = layout == .gridOne ? 0.01 : layout == .gridTen ? 0.10 : 0.50
                             let side = sqrt(area * 200 * 160 / 25)
-                            let pitch = side + 2 // exactly two physical pixels of black between cells
+                            let pitch = side + (grid.borders ? 2 : 0) // seamless or two physical pixels of black
                             let dx = (u - 0.44) * 200, dy = (v - 0.52) * 160
                             for row in 0..<5 {
                                 for column in 0..<5 {
                                     let cellX = Double(column - 2) * pitch, cellY = Double(row - 2) * pitch
                                     if abs(dx - cellX) < side / 2 && abs(dy - cellY) < side / 2 {
                                         let index = grid.mirror ? 24 - snake[row][column] : snake[row][column]
-                                        expected = grid.range == .fine ? Float(1 + Double(index) / 24) : Float(5 + index) / 10
+                                        switch grid.range {
+                                        case .fine: expected = Float(1 + Double(index) / 24)
+                                        case .coarse: expected = Float(5 + index) / 10
+                                        case .knee: expected = Float(1.30 + Double(index) / 60)
+                                        }
                                     }
                                 }
                             }
@@ -145,7 +151,7 @@ import simd
         let infiniteProjection = simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0),
                                                        SIMD4(0, 0, 0, -1), SIMD4(0, 0, 0.05, 0)))
         let levels = Set(EDRStep.values + EDRStep.fineValues + EDRGrid().entries.map(\.value)
-                         + EDRGrid(range: .coarse).entries.map(\.value)).sorted()
+                         + EDRGrid(range: .coarse).entries.map(\.value) + EDRGrid(range: .knee).entries.map(\.value)).sorted()
         for level in levels {
             render(.full, level, slice: 1, projection: infiniteProjection)
             var pixel = [UInt16](repeating: 0, count: 4)
