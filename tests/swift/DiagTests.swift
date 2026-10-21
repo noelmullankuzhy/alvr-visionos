@@ -326,8 +326,8 @@ private func testBufferReuse() {
         cadence.frame(targetNs: UInt64(i + 1) * ms, predictedNs: UInt64(i) * ms, sourceId: nil, clockOffsetNs: 0)
         cadence.completed(gpuStartHostNs: 1, gpuEndHostNs: 2, renderingDeadlineNs: 3, targetNs: 4, callbackHostNs: 3, clockOffsetNs: 0)
         let raw = cadence.take()!, gpu = cadence.takeGpu()!
-        raw.targetMinusPredictedMs.withUnsafeBufferPointer { addresses.insert(UInt(bitPattern: $0.baseAddress!)) }
-        gpu.values.withUnsafeBufferPointer { gpuAddresses.insert(UInt(bitPattern: $0.baseAddress!)) }
+        _ = raw.targetMinusPredictedMs.withUnsafeBufferPointer { addresses.insert(UInt(bitPattern: $0.baseAddress!)) }
+        _ = gpu.values.withUnsafeBufferPointer { gpuAddresses.insert(UInt(bitPattern: $0.baseAddress!)) }
         capacities.insert(raw.targetMinusPredictedMs.capacity)
         expect(cadence.take() == nil && cadence.takeGpu() == nil, "busy consumer never allocates replacement storage")
         cadence.recycle(raw); cadence.recycleGpu(gpu)
@@ -341,6 +341,25 @@ private func testBufferReuse() {
     expectEqual(reads, 0, "off path calls neither diagnostic reader")
     expectEqual(Diag.capture(enabled: true, read()), 42, "on path captures input")
     expectEqual(reads, 1, "on path reads once")
+}
+
+private func testDrawableSnapshotReuse() {
+    let snapshots = DiagDoubleBuffer(DiagDrawableSnapshot<Int, Int>(), DiagDrawableSnapshot<Int, Int>())
+    var viewAddresses = Set<UInt>(), mapAddresses = Set<UInt>(), capacities = Set<Int>()
+    for _ in 0..<1000 {
+        let snapshot = snapshots.take()!
+        expect(snapshot.views.isEmpty && snapshot.maps.isEmpty, "returned drawable snapshot is reset")
+        for i in 0..<32 { snapshot.views.append(i) }
+        for i in 0..<64 { snapshot.maps.append(i) }
+        _ = snapshot.views.withUnsafeBufferPointer { viewAddresses.insert(UInt(bitPattern: $0.baseAddress!)) }
+        _ = snapshot.maps.withUnsafeBufferPointer { mapAddresses.insert(UInt(bitPattern: $0.baseAddress!)) }
+        capacities.insert(snapshot.views.capacity)
+        expect(snapshots.take() == nil, "busy drawable consumer does not allocate a replacement")
+        snapshots.recycle(snapshot) { $0.reset() }
+    }
+    expectEqual(viewAddresses.count, 2, "exactly two preallocated view buffers")
+    expectEqual(mapAddresses.count, 2, "exactly two preallocated map buffers")
+    expectEqual(capacities.count, 1, "drawable snapshot capacity never changes")
 }
 
 private func testThermalNames() {
@@ -367,6 +386,7 @@ enum DiagTests {
         testCadenceClockOffset()
         testCadenceBounded()
         testBufferReuse()
+        testDrawableSnapshotReuse()
         testThermalNames()
         finishTests("Diag")
     }
