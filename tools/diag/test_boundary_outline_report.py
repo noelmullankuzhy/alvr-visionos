@@ -154,5 +154,91 @@ class LensOutlineReportTests(unittest.TestCase):
             self.assertIn(text, output)
 
 
+FIXTURE = Path(__file__).with_name('fixtures') / 'projection-overlay.json'
+L_RAYS = ('0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,'
+          '210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5')
+PROJECTION = ('bbox_deg=41.512,37.500,31.607,32.500 bbox_tan=0.8851,0.7673,0.6154,0.6371 fov_source=a100-axis-C '
+              'foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 '
+              'pxdeg_frustum=26.541 pxdeg_bbox=44.108')
+PROJECTION_LOG = '''DIAG dots_session t_ms=1 event=begin radius_m=10.000 pose=device angles=projected_tangent
+DIAG dots_outline t_ms=2 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {projection}
+DIAG dots_outline t_ms=3 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000
+DIAG dots_session t_ms=4 event=begin radius_m=10.000 pose=device angles=projected_tangent
+DIAG dots_outline t_ms=5 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {projection}
+DIAG dots_outline t_ms=6 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {wrong}
+'''.format(rays=L_RAYS, projection=PROJECTION, wrong=PROJECTION.replace('pxdeg_bbox=44.108', 'pxdeg_bbox=45.000'))
+
+
+class ProjectionReportTests(unittest.TestCase):
+    records = staticmethod(BoundaryOutlineReportTests.records)
+
+    def test_fixture_matches_the_swift_overlay(self):
+        """Same inputs and expected numbers as tests/swift/ProjectionOverlayTests.swift (tan 0.001, px/deg 0.1)."""
+        import json
+        cases = json.loads(FIXTURE.read_text())['cases']
+        self.assertEqual(len(cases), 3)
+        for case in cases:
+            tangents, want = tuple(case['tangents']), case['expect']
+            if case['shape'] == 'lens':
+                rays = report.outline_rays(case['rays'])
+                points = [(r, report.lens_ecc(r, rays)) for r in range(0, 360, 5)]
+            else:
+                points = report.outline_points(case['inset_deg'], tangents)
+            box = report.outline_bbox(points)
+            for got, value in zip(box, want['bbox_tan']):
+                self.assertAlmostEqual(got, value, delta=1e-3, msg=case['name'])
+            rect = report.foveation_rect(case['eye'], tangents, case['foveation'], case['render_px'])
+            for got, value in zip(rect, want['fov_rect_tan']):
+                self.assertAlmostEqual(got, value, delta=1e-3, msg=case['name'])
+            left, right, bottom, top = tangents
+            self.assertAlmostEqual(report.pxdeg_axis(case['render_px'], (left, right, top, bottom)), want['pxdeg_frustum'],
+                                   delta=0.1, msg=case['name'])
+            self.assertAlmostEqual(report.pxdeg_axis(case['render_px'], box), want['pxdeg_bbox'], delta=0.1, msg=case['name'])
+
+    def test_hand_values_a100_axis_c(self):
+        # Hand values as in ProjectionOverlayTests: bbox extremes at rays 195/0/105/270, render 4176x3333.
+        rays = report.outline_rays(L_RAYS)
+        box = report.outline_bbox([(r, report.lens_ecc(r, rays)) for r in range(0, 360, 5)])
+        for got, want in zip(box, (0.885108, 0.767327, 0.615363, 0.637070)):
+            self.assertAlmostEqual(got, want, places=6)
+        self.assertAlmostEqual(report.pxdeg_axis((4176, 3333), (1.7321, 1.0, 1.0, 1.1918)), 26.541, places=3)
+        self.assertAlmostEqual(report.pxdeg_axis((4176, 3333), box), 44.108, places=3)
+        rect = report.foveation_rect('L', LEFT, (0.5, 0.45, 3, 3, 0.536, -0.159), (4176, 3333))
+        for got, want in zip(rect, (0.682047, 0.684003, 0.491013, 0.493423)):
+            self.assertAlmostEqual(got, want, delta=2e-6)
+        self.assertEqual(report.render_size(1.1447), (4176, 3333))
+
+    def test_outline_rows_carry_and_check_the_projection(self):
+        rows = report.dots_outlines(self.records(PROJECTION_LOG))
+        self.assertEqual(len(rows), 4)
+        first = rows[0]
+        self.assertEqual(first['bbox_deg'], (41.512, 37.5, 31.607, 32.5))
+        self.assertEqual(first['fov_rect_deg'], (34.296, 34.372, 26.152, 26.263))
+        self.assertEqual(first['fov_source'], 'a100-axis-C')
+        self.assertEqual(first['render_px'], (4176, 3333))
+        self.assertEqual((first['pxdeg_frustum'], first['pxdeg_bbox']), (26.541, 44.108))
+        self.assertEqual(first['projection_check'], 'ok')
+        self.assertEqual(first['session'], 'diag-outline.log:1')
+        self.assertEqual(rows[1]['projection_check'], 'not logged', 'older lines have no projection fields')
+        self.assertEqual(rows[2]['session'], 'diag-outline.log:4')
+        self.assertEqual(rows[3]['projection_check'], 'mismatch: pxdeg_bbox')
+
+    def test_report_has_projection_columns_and_a_summary_per_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'diag-outline.log').write_text(PROJECTION_LOG)
+            output = report.generate(directory)
+        for text in ['bbox_deg', 'fov_rect_deg', 'pxdeg_frustum', 'pxdeg_bbox', 'projection_check', '41.512,37.5,31.607,32.5']:
+            self.assertIn(text, output)
+        summary = [line for line in output.splitlines() if line.startswith('projection ')]
+        self.assertEqual(summary, [
+            'projection session=diag-outline.log:1 eye=L source=diag-outline.log:2 fov_source=a100-axis-C '
+            'bbox_deg=41.512,37.5,31.607,32.5 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 '
+            'pxdeg_frustum=26.541 pxdeg_bbox=44.108 gain=1.66 check=ok; eye=R no data',
+            'projection session=diag-outline.log:4 eye=L source=diag-outline.log:6 fov_source=a100-axis-C '
+            'bbox_deg=41.512,37.5,31.607,32.5 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 '
+            'pxdeg_frustum=26.541 pxdeg_bbox=45 gain=1.70 check=mismatch: pxdeg_bbox; eye=R no data',
+        ])
+
+
 if __name__ == '__main__':
     unittest.main()
