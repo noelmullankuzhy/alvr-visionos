@@ -1,0 +1,23 @@
+{
+ "source": "evidence/chart-matrix-20261022/avp1/a100-asrun/capture/stage-expanded-L.png (22 Oct device run), crop",
+ "eye": "L",
+ "tangents_LRDU": [
+  -1.73210001,
+  1,
+  -1.1918,
+  1
+ ],
+ "grid": [
+  3648,
+  2912
+ ],
+ "origin": [
+  2288,
+  1228
+ ],
+ "position": "centre",
+ "a_deg": 0,
+ "e0_deg": 0,
+ "mtf50_cpd": 7.39,
+ "mtf50_cyc_px": 0.3172
+}

@@ -9,9 +9,12 @@ import statistics
 import sys
 
 BASE_RENDER = (3648, 2912)  # per-eye render at render_scale 1.0 (the page's standard preset)
+MTF_POSITIONS = ('centre', 'nose', 'temple', 'up', 'down')   # stream_mtf.POSITIONS
 SUMMARY_COLUMNS = ['name', 'verdict', 'median_deg', 'max_deg', 'extent_err_deg', 'centre_px_deg', 'fps',
                    'bitrate_mbps', 'encode_ms', 'verdict_render', 'verdict_encoded', 'notes',
-                   'encode_ms_p95', 'encode_over_budget']
+                   'encode_ms_p95', 'encode_over_budget'] \
+    + ['%s_mtf50_cpd' % p for p in MTF_POSITIONS] + ['display_ceiling_cpd']
+FIELD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'avp-field.json')
 NA = 'n/a'
 DEFAULT_FLAG = 'dump'
 FRAME_BUDGET_MS = 1000.0 / 90   # 90 Hz frame budget, 11.1 ms
@@ -283,6 +286,35 @@ def _centre(summary):
     return '%.1f/%.1f' % tuple(out)
 
 
+def _stream_mtf():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('stream_mtf', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stream_mtf.py'))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def mtf_columns(point_dir):
+    """{column: text}: the stream's edge MTF50 per position (stream_mtf.py, capture expanded stage; n/a without it, or
+    n/a and a 'notes' reason when meta.json's tangents are not the scale the chart was drawn at) and the W33 display
+    ceiling from avp-field.json."""
+    out = {'%s_mtf50_cpd' % p: NA for p in MTF_POSITIONS}
+    try:
+        sm = _stream_mtf()
+        point = sm.measure_point(point_dir)
+        out.update({'%s_mtf50_cpd' % p: sm.combine(point['eyes'], p) for p in MTF_POSITIONS})
+        if point['mismatch']:
+            out['notes'] = 'mtf: ' + point['mismatch']
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        pass
+    try:
+        with open(FIELD_FILE) as f:
+            out['display_ceiling_cpd'] = _num(json.load(f).get('w33_ceiling_cpd'), '%g')
+    except (OSError, ValueError, AttributeError):
+        out['display_ceiling_cpd'] = NA
+    return out
+
+
 def summary_row(name, point_dir):
     ov = os.path.join(point_dir, 'overlay')
     r = dict.fromkeys(SUMMARY_COLUMNS, NA)
@@ -319,6 +351,7 @@ def summary_row(name, point_dir):
     r['encode_ms'] = _num(st.get('encode_ms'), '%.2f')
     r['encode_ms_p95'] = _num(st.get('encode_ms_p95'), '%.2f')
     r['encode_over_budget'] = _num(st.get('encode_over_budget'), '%.3f')
+    r.update(mtf_columns(point_dir))
     try:
         with open(os.path.join(point_dir, 'ERROR')) as f:
             r['verdict'] = 'ERROR'

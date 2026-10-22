@@ -17,6 +17,8 @@
   "centred": {"size": [0.5, 0.45], "edge_ratio": [3, 3], "rule": "band centre on the visible field's centre"},
   "wider": {"edge_ratio": [2.5, 2.5], "rule": "band spans the whole visible field, centred on it"},
   "points": {"render_scale": 1.0, "bitrate_mbps": 100, "fps": 90},
+  "w33_ceiling_cpd": 17,
+  "w33_ceiling_note": "W33 22 Oct: 17 cpd correct everywhere, 20 aliased (client-drawn resolution chart, no stream: the display path's ceiling; fovmatrix.py display_ceiling_cpd)",
   "crop": {
     "inset_deg": 15,
     "margin_deg": 2.5,

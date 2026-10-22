@@ -77,6 +77,73 @@ too; and there is no luma-only metric yet to separate warp sampling from the chr
 `dominant:` is the stage that adds the most. A missing stage prints `not captured` (for example, the simulator draws one
 view, so the R drawable is absent). `--out-json` keeps the rows, the per-stage lines and `resample_chain`.
 
+## Stream MTF50 vs display ceiling
+
+The fov-matrix row (`fovmatrix.py row`) carries two sharpness numbers. They measure different paths and respond to
+different settings, so they cannot be compared one for one.
+
+| | stream MTF50 (`centre/nose/temple/up/down_mtf50_cpd`) | display ceiling (`display_ceiling_cpd`) |
+|---|---|---|
+| source | the server's angle chart, rendered, encoded, decoded and FFR-expanded: the capture's `stage-expanded-<eye>.png` | the W33 resolution chart, drawn by the client itself (no stream) |
+| measured by | `tools/fov-matrix/stream_mtf.py`, every captured point | W33 by eye (22 Oct: 17 cpd correct everywhere, 20 aliased); a constant in `avp-field.json` |
+| responds to | server fov scale and render size (px/deg), foveation (band size, edge ratio), bitrate and encoder settings, 4:2:0 chroma, decoder, FFR expand | client render quality, drawable size, rate map, compositor and panel |
+| does not see | the warp, the drawable, the compositor, the panel | anything on the server, the encoder or the decoder |
+
+What the stream number is:
+- MTF50 in cycles/deg of the expanded stage, the render grid, where px/deg comes from `meta.json` tangents.
+- It is an edge method on the chart's axis-aligned green vertical lines.
+  - Centre: the 0 deg line, 7 px.
+  - Nose / temple: the ±15 deg lines, 5 px.
+  - Up / down: the 0 deg line at e = ±15 deg.
+  - Edges run across x and are averaged down ±4 deg of rows, skipping the crossings.
+- The signal is linear luminance. The magenta horizontals carry almost no luma contrast, so only horizontal MTF is
+  measured.
+- Each edge's ESF difference is its LSF; |DTFT| gives the MTF; the two edges of a line are averaged.
+- The chart has no slant and no bars. So there is no ISO 12233 oversampling, and the 20 deg / 3-px lines cannot be used
+  (their edges overlap). The 15 deg lines stand in for 20 deg.
+- The number includes the pixel aperture: the server's pixel-exact chart reads 1.0 to Nyquist (`>N`).
+- `<x` marks an edge whose line never reaches the chart's line level (green, 0.7152 linear luminance). The blur is then
+  wider than the line, and x is an upper bound.
+
+How to read it against the ceiling:
+- The stream number is the limit of what reaches the client.
+- The ceiling is the limit of what the client can show.
+- The eye sees roughly the lower of the two, further reduced by the warp.
+
+22 Oct device run (avp1, 100 Mbps), mean of L and R:
+
+| point | centre | nose | temple | up | down | ceiling |
+|---|---|---|---|---|---|---|
+| a100-asrun | 6.6 | 7.1 | 7.1 | 6.6 | 6.7 | 17 |
+| a100-centred | 6.7 | 7.1 | 7.1 | 6.7 | 6.7 | 17 |
+| a100-wider | 6.6 | 7.1 | 7.2 | 6.6 | 6.6 | 17 |
+| a085-asrun | 7.9 | 8.4 | 8.4 | 7.9 | 7.9 | 17 |
+| a085-centred | n/a* | n/a* | n/a* | n/a* | n/a* | 17 |
+| a085-wider | 7.1 | 7.6 | 7.7 | 7.1 | 7.1 | 17 |
+| a070-asrun | 9.6 | <6.1 | 10.2 | 9.6 | 9.6 | 17 |
+| a070-centred | 9.6 | 10.3 | 10.2 | 9.6 | 9.6 | 17 |
+
+\* a085-centred's `dump/meta.json` holds the 1.0 tangents, but its chart was drawn at 0.85, so the 15 deg line is not at
+the 1.0 column.
+- `stream_mtf.scale_mismatch` checks for this on every eye. It requires both ±15 deg lines within 2 px of where the meta
+  tangents put them.
+- The 0 deg column does not move with scale, so without that check the row reads a plausible but wrong 6.7.
+- On a mismatch, every MTF column is n/a and notes reads `mtf: meta scale mismatch`.
+- On the right grid, its centre would read about 7.9, like a085-asrun.
+
+Each point's result is cached in `capture/mtf.json`, keyed by the size and mtime of capture.json, meta.json and the
+expanded PNGs. A summary rerun therefore skips the ~35 s decode.
+
+Findings:
+- In cycles/px, every edge reads about 0.25 or 0.32. Those are a two-pixel and a one-pixel transition.
+- The value depends on the line's sub-pixel phase in the FFR expand: L and R differ by up to 1.5 cpd at the same point.
+- So the cpd figure is mostly the render px/deg (fov scale) times about 0.29 cycles/px, roughly 40% of the 17 cpd
+  ceiling.
+- The a070-asrun nose edge (0.17 cycles/px, both eyes) is the only real blur seen. It sits outside that point's
+  foveation band:
+  - L frustum tan −1.212..0.7, centerSize 0.5, so the band is tan −0.73..0.22; the nose is at tan 0.27.
+  - The centred point moves the band over it (10.3).
+
 ## GM commands
 
 The GM runs the build, the simulator and the PC. From the clone root, on `feature/sharpness-chain`:
