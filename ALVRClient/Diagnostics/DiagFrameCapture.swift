@@ -14,6 +14,9 @@ enum DiagFrameCapture {
         let rateMap: MTLRasterizationRateMap?
         let drawableIndex: Int
         var textureIndex: Int = 0
+        // Sharpness-chain stage (DiagStreamStages.record): written as stage-<stage>-<eye>.png into capture.json "stages",
+        // never "slices" (the drawable tools take the first slice of an eye). nil for drawables.
+        var stage: [String: Any]? = nil
     }
     private struct Readback {
         let target: Target
@@ -124,7 +127,7 @@ enum DiagFrameCapture {
             }
             // Sample while this drawable owns its frame map. Retaining the map until the
             // asynchronous writer runs would risk observing compositor-recycled parameters.
-            let tables = (0..<slices).map { rateTables(map: target.rateMap, layer: $0, width: texture.width, height: texture.height) }
+            let tables = target.stage != nil ? [] : (0..<slices).map { rateTables(map: target.rateMap, layer: $0, width: texture.width, height: texture.height) }
             reads.append(Readback(target: target, buffer: shared, rowBytes: row, imageBytes: image, slices: slices, rateTables: tables))
         }
         guard let blit = buffer.makeBlitCommandEncoder() else { completion(false); return }
@@ -150,16 +153,25 @@ enum DiagFrameCapture {
                 do {
                     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                     var slices: [[String: Any]] = []
+                    var stages: [[String: Any]] = []
                     var bytes = 0
                     for read in reads {
                         let target = read.target, texture = target.texture
                         for slice in 0..<read.slices {
                             let pointer = read.buffer.contents().advanced(by: slice * read.imageBytes)
                             let rgba = rgbaBytes(from: pointer, rowBytes: read.rowBytes, width: texture.width, height: texture.height, format: texture.pixelFormat)
-                            let name = "drawable-\(target.drawableIndex)-texture-\(target.textureIndex)-slice-\(slice).png"
+                            let name = target.stage.map { DiagStreamStages.pngName(stage: $0["stage"] as? String ?? "stage", eye: $0["eye"] as? String ?? "unknown") }
+                                ?? "drawable-\(target.drawableIndex)-texture-\(target.textureIndex)-slice-\(slice).png"
                             let url = directory.appendingPathComponent(name)
                             try writePNG(url: url, width: texture.width, height: texture.height, rgba: rgba)
                             bytes += (try url.resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0
+                            if var entry = target.stage {
+                                entry["png"] = name; entry["width"] = texture.width; entry["height"] = texture.height
+                                entry["pixel_format"] = formatName(texture.pixelFormat)
+                                entry["pixel_format_raw"] = texture.pixelFormat.rawValue
+                                stages.append(entry)
+                                continue
+                            }
                             let matching = target.views.filter { ($0["slice"] as? Int) == slice }
                             // Preserve every view assignment, including shared slices.
                             for view in matching.isEmpty ? [["slice": slice, "view": -1, "eye": "unknown"]] : matching {
@@ -177,6 +189,10 @@ enum DiagFrameCapture {
                     var json = metadata
                     json["utc"] = utc; json["t_ms"] = tMs; json["slices"] = slices
                     json["ms_encode_blit"] = encodedMs
+                    if !stages.isEmpty {
+                        json["stages"] = stages
+                        json["resample_chain"] = DiagStreamStages.resampleChain
+                    }
                     let sourceFormat = formatName(reads[0].target.texture.pixelFormat)
                     if let pose {
                         DiagCapturePose.annotate(&json, sourcePixelFormat: sourceFormat, render: pose.render, display: pose.display, renderT: pose.renderT, displayT: pose.displayT, simYawDitherRad: pose.simYawDitherRad)
@@ -186,7 +202,7 @@ enum DiagFrameCapture {
                     let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
                     try data.write(to: directory.appendingPathComponent("capture.json"), options: .atomic)
                     bytes += data.count
-                    Diag.log("capture", tMs: tMs, [ "dir": directory.lastPathComponent, "reason": reason, "slices": slices.count, "bytes": bytes,
+                    Diag.log("capture", tMs: tMs, [ "dir": directory.lastPathComponent, "reason": reason, "slices": slices.count, "stages": stages.count, "bytes": bytes,
                                          "ms_encode_blit": encodedMs, "ms_gpu_done": gpuDoneMs, "ms_to_write": (ProcessInfo.processInfo.systemUptime - start) * 1000])
                     Diag.log("capture_trigger", ["step": "written", "reason": reason, "dir": directory.lastPathComponent])
                     completion(true)
@@ -197,6 +213,65 @@ enum DiagFrameCapture {
             }
         }
     }
+}
+
+// Sharpness chain (docs/lumen/sharpness-chain.md): the client's resample stages before the drawable, drawn on a capture
+// frame by the stream's own fragment shader (same planes, sampler and colour constants) into one texture per eye and stage:
+// decoded = FFR off, the eye's half of the decoded frame at 1:1 (texel centres, so only the chroma upsample resamples);
+// expanded = the stream's FFR decompress at the stream view size, no warp. The drawable is the warp's output.
+// Pure Foundation/simd (unit tested: tests/swift/DiagStreamStagesTests.swift); Renderer draws the plans.
+enum DiagStreamStages {
+    // Shaders.metal videoFrameFragmentShader_* colorSampler: mip_filter::none, mag/min linear; address and coord are
+    // Metal's defaults (clamp_to_edge, normalized).
+    static let sampler: [String: Any] = ["min_filter": "linear", "mag_filter": "linear", "mip_filter": "none",
+                                         "address": "clamp_to_edge", "coord": "normalized"]
+
+    struct Plan: Equatable {
+        let stage: String           // "decoded" | "expanded"
+        let eye: String             // "L" | "R"
+        let width: Int
+        let height: Int
+        let uvRect: SIMD4<Float>    // x, y, w, h of the eye in the decoded frame's normalised coordinates
+        let ffr: Bool
+    }
+
+    // decodedWidth/Height: the decoded frame (both eyes side by side); viewWidth/Height: the stream view (FFR target).
+    static func plans(decodedWidth: Int, decodedHeight: Int, viewWidth: Int, viewHeight: Int, ffr: Bool) -> [Plan] {
+        ["L", "R"].enumerated().flatMap { index, eye -> [Plan] in
+            let rect = SIMD4<Float>(Float(index) * 0.5, 0, 0.5, 1)
+            return [Plan(stage: "decoded", eye: eye, width: decodedWidth / 2, height: decodedHeight, uvRect: rect, ffr: false),
+                    Plan(stage: "expanded", eye: eye, width: ffr ? viewWidth : decodedWidth / 2, height: ffr ? viewHeight : decodedHeight,
+                         uvRect: rect, ffr: ffr)]
+        }
+    }
+
+    static func pngName(stage: String, eye: String) -> String { "stage-\(stage)-\(eye).png" }
+
+    // capture.json "stages" entry (DiagFrameCapture.submit adds png, width, height and pixel_format).
+    static func record(_ plan: Plan, planes: [(format: String, width: Int, height: Int)], shader: String, decoderPixelFormat: String) -> [String: Any] {
+        let chroma: String
+        if planes.count < 2 {
+            chroma = "in driver sampler (private YCbCr format)"
+        } else {
+            let (luma, cbcr) = (planes[0], planes[1])
+            chroma = cbcr.width * 2 == luma.width && cbcr.height * 2 == luma.height ? "4:2:0"
+                : cbcr.width * 2 == luma.width && cbcr.height == luma.height ? "4:2:2" : "\(cbcr.width)x\(cbcr.height) of \(luma.width)x\(luma.height)"
+        }
+        return ["stage": plan.stage, "eye": plan.eye, "encoding": "srgb", "sampler": sampler,
+                "source": ["ffr": plan.ffr, "uv_rect": [plan.uvRect.x, plan.uvRect.y, plan.uvRect.z, plan.uvRect.w].map(Double.init),
+                           "planes": planes.map { ["format": $0.format, "width": $0.width, "height": $0.height] as [String: Any] },
+                           "chroma_subsampling": chroma, "shader": shader, "vertex": "diagStageVertexShader",
+                           "decoder_pixel_format": decoderPixelFormat] as [String: Any]]
+    }
+
+    // Every resample between the decoder and the display, in order (capture.json "resample_chain").
+    static let resampleChain: [[String: Any]] = [
+        ["step": "decode_chroma", "sampler": sampler,
+         "what": "chroma plane (4:2:0: half size both ways) bilinearly upsampled at the luma coordinate in the stream fragment shader; private YCbCr formats do it in the driver's sampler"],
+        ["step": "ffr_expand_and_warp", "sampler": sampler,
+         "what": "one bilinear sample per drawable pixel: decompressAxisAlignedCoord (FFR) then the view projection, no mipmaps (minification aliases)"],
+        ["step": "compositor", "sampler": NSNull(),
+         "what": "visionOS compositor: rate-mapped drawable to the display panel; not readable from the app"]]
 }
 
 #if os(visionOS)
@@ -235,8 +310,10 @@ final class DiagFrameCaptureSession {
 
     // `streamFrame`: stream content was composited into these drawables this frame (captures them as presented).
     // `pose`: render/display head pose of the stream frame being presented (DiagCapturePose); nil when idle.
+    // `stages`: draws the sharpness-chain stage textures into `buffer` (DiagStreamStages); called only when a request is
+    // taken on a stream frame.
     func encode(buffer: MTLCommandBuffer, drawables: [LayerRenderer.Drawable], idle: Bool, streamFrame: Bool = false,
-                pose: DiagFrameCapture.PoseRecord? = nil, chart: CornerChartRenderer?) {
+                pose: DiagFrameCapture.PoseRecord? = nil, chart: CornerChartRenderer?, stages: (() -> [DiagFrameCapture.Target])? = nil) {
         DiagCaptureRequests.shared.setAcceptsMarks(idle)
         let request: DiagCaptureRequests.Request
         switch gate.next(nowMs: Diag.monotonicMs(), idle: idle, streamFrame: streamFrame) {
@@ -264,6 +341,7 @@ final class DiagFrameCaptureSession {
                 return DiagFrameCapture.Target(texture: texture, views: views, rateMap: maps.indices.contains(textureIndex) ? maps[textureIndex] : maps.first, drawableIndex: index, textureIndex: textureIndex)
             }
         }
+        let stageTargets = streamFrame ? stages?() ?? [] : []   // after the drawables: submit takes its encoding from the first target
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("diag/captures/\(stamp)-\(request.number)")
@@ -277,13 +355,14 @@ final class DiagFrameCaptureSession {
         if let debugEyes = EventHandler.shared.debugEyeTangentsRecord {
             metadata["debug_eye_tangents"] = debugEyes   // the per-eye FOV the server got; slices keep the drawable's own
         }
-        DiagFrameCapture.submit(buffer: buffer, targets: targets, directory: directory,
+        DiagFrameCapture.submit(buffer: buffer, targets: targets + stageTargets, directory: directory,
                                 metadata: metadata,
                                 pose: streamFrame ? pose : nil) { [gate] ok in
             if !ok { Diag.log("capture_trigger", ["step": "skipped", "reason": request.reason, "why": "capture_failed_see_capture_error"]) }
             gate.finished()
         }
-        Diag.log("capture_trigger", ["step": "submitted", "reason": request.reason, "dir": directory.lastPathComponent, "targets": targets.count])
+        Diag.log("capture_trigger", ["step": "submitted", "reason": request.reason, "dir": directory.lastPathComponent, "targets": targets.count,
+                                     "stages": stageTargets.count])
     }
 }
 #endif

@@ -56,7 +56,8 @@ idle `start_timer` capture (e.g. taken while the simulator's stream dropped) is 
 ## Simulator bitrate
 
 The simulator shows grey frames above about 120 Mbps, so for simulator runs use `points-chart-sim.tsv`: the same 10 points as
-`points-chart.tsv` with bitrate 100 Mbps (`points-chart.tsv` keeps 500 Mbps for a real headset).
+`points-chart.tsv` with bitrate 100 Mbps (`points-chart.tsv` keeps 500 Mbps for a real headset). `points-chain-sim.tsv` holds
+three of them (f060-asrun, f070-centred, f100-asrun) for the sharpness chain (`docs/lumen/sharpness-chain.md`).
 
 ## Encoder stress
 
