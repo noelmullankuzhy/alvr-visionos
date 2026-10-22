@@ -33,6 +33,7 @@ BUILD=${BUILD:-1ce896631ea1}
 BID=${BID:-}
 PROFILE=${PROFILE:-$HOLD_DIR/local/profiles/noquad-profile.json}
 PCW=${PCW:-/mnt/c/Users/noelm/claude-tmp/fov-matrix}   # override only in the stub test
+TOOL=run-matrix
 TUNNEL_PORT=18082
 API_WAIT=20    # s the dashboard API (127.0.0.1:8082 on the PC) gets to answer after SteamVR launched
 STOP_WAIT=10   # s SteamVR gets to quit gracefully before the leftovers are killed
@@ -87,44 +88,11 @@ if [ -z "$BID" ]; then
 fi
 
 # ---------------------------------------------------------------- helpers
-log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$OUT/run.log" >&2; }
-plan() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$OUT/plan.txt"; }
-x() {   # run, or print in a dry run
-  if [ "$DRY" = 1 ]; then plan "+ $*"; return 0; fi
-  "$@"
-}
-xo() {  # xo LOGFILE cmd...  : stdout+stderr to LOGFILE
-  f=$1; shift
-  if [ "$DRY" = 1 ]; then plan "+ $* > $f 2>&1"; return 0; fi
-  "$@" > "$f" 2>&1
-}
-
 # Owner tag of this run's PC backup (pc-session.py checks it before any restore). Empty for --restore: restores whatever is there.
 NONCE=; [ "$RESTORE_ONLY" = 1 ] || NONCE="$$-$(date +%s)"
-TP=; PP=; APP_PID=; HOLD_REPORT=; BACKED_UP=0; STARTED=0; SESSION_SHA=; FAILED=0; DATA=
+TP=; PP=; APP_PID=; HOLD_REPORT=; BACKED_UP=0; STARTED=0; SESSION_SHA=; FAILED=0; DATA=; RESTORE_RC=0
 [ "$DRY" = 1 ] && : > "$OUT/plan.txt"
-
-mk_pc() {  # mk_pc OUTFILE action args... : a POSIX sh script for `ssh WIN wsl -e sh -s` (no nested quoting)
-  o=$1; shift
-  {
-    if [ -n "${PC_SETS:-}" ]; then
-      echo "mkdir -p $PCW"; echo "cat > $PCW/sets.txt <<'SETS'"; cat "$PC_SETS"; echo 'SETS'
-    fi
-    echo "FOVMATRIX_NONCE=$NONCE python3 - $* <<'PY'"; cat "$HERE/pc-session.py"; echo 'PY'
-  } > "$o"
-}
-pcrun() {  # pcrun SCRIPT LOG
-  if [ "$DRY" = 1 ]; then plan "+ ssh -o ConnectTimeout=10 $WIN wsl -e sh -s < $1 > $2 2>&1"; return 0; fi
-  ssh -o ConnectTimeout=10 "$WIN" wsl -e sh -s < "$1" > "$2" 2>&1
-}
-pc_action() {  # pc_action DIR NAME action args... ; script+log DIR/pc-NAME.{sh,log}
-  d=$1; n=$2; shift 2
-  mk_pc "$d/pc-$n.sh" "$@"
-  pcrun "$d/pc-$n.sh" "$d/pc-$n.log"
-}
-
-fail_soft() { printf '%s\n' "$*" >> "$PD/ERROR"; log "[$NAME] PROBLEM $*"; }
-fail_hard() { fail_soft "$@"; return 1; }
+. "$HERE/lib-pc.sh"   # log plan x xo, the PC exec path, backup/apply/restore, start_server, stop_steamvr (shared with run-ladder.sh)
 
 wait_stream() {  # until the client log shows decoded frames
   if [ "$DRY" = 1 ]; then plan "+ wait <= ${STREAM_TIMEOUT}s for ALVRSTATS frames_decoded>0 in $1"; return 0; fi
@@ -160,12 +128,6 @@ overlay() {  # overlay MODE OUTBASE args... ; JSON must exist afterwards
   return 0
 }
 
-pcps_sub() {  # pcps_sub SRC.ps1 SECONDS LOG : run a PC PowerShell script (its __SECONDS__ filled in) through pcps.sh
-  s=$OUT/$(basename "$1")
-  sed "s/__SECONDS__/$2/g" "$HERE/$1" > "$s"
-  xo "$3" sh "$PCPS" "$s"
-}
-
 stop_all() {  # terminate our app, finish the hold, stop SteamVR/ALVR (graceful first, as the header explains)
   xo /dev/null xcrun simctl terminate "$SIM" "$BID"
   if [ -n "$HOLD_REPORT" ]; then
@@ -175,11 +137,7 @@ stop_all() {  # terminate our app, finish the hold, stop SteamVR/ALVR (graceful 
     fi
     HOLD_REPORT=
   fi
-  # Graceful first (ALVR dashboard shutdown request + closing the vrmonitor window), wait up to STOP_WAIT s, kill only what is left.
-  pcps_sub pc-steamvr-stop.ps1 "$STOP_WAIT" "$OUT/steamvr-stop.log" || log "note: graceful SteamVR stop failed, see $OUT/steamvr-stop.log"
-  if [ "$DRY" = 1 ]; then plan "+ $PYTHON $HARNESS/alvr-run2.py stop > $OUT/stop.log 2>&1   # kills only what the graceful stop left"; else
-    $PYTHON "$HARNESS/alvr-run2.py" stop > "$OUT/stop.log" 2>&1 || log "note: alvr-run2 stop rc!=0 (normal when nothing was started), see $OUT/stop.log"
-  fi
+  stop_steamvr
 }
 
 CLEANED=0
@@ -195,20 +153,7 @@ cleanup() {
   [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
   if [ "$STARTED" = 1 ] || [ "$RESTORE_ONLY" = 1 ]; then stop_all; [ "$DRY" = 1 ] || sleep 4; fi
   if [ "$BACKED_UP" = 1 ] || [ "$RESTORE_ONLY" = 1 ]; then
-    PC_SETS= pc_action "$OUT" restore restore "$BUILD"
-    if [ "$DRY" = 1 ]; then :; elif grep -q '^restore OK' "$OUT/pc-restore.log" 2>/dev/null; then
-      got=$(sed -n 's/^restore OK sha=//p' "$OUT/pc-restore.log" | head -1)
-      if [ -n "$SESSION_SHA" ] && [ "$got" != "$SESSION_SHA" ]; then
-        echo "run-matrix: SESSION HASH MISMATCH after restore: backed up $SESSION_SHA, restored $got" >&2; rc=5
-      else log "PC session restored and verified ($got)"; fi
-    elif grep -q '^restore SKIP FOREIGN' "$OUT/pc-restore.log" 2>/dev/null; then
-      echo "run-matrix: a backup from another run is on the PC and was left untouched (not restored): $(grep '^restore SKIP FOREIGN' "$OUT/pc-restore.log" | head -1). Check $PCW, then run --restore." >&2
-    elif grep -q '^restore SKIP' "$OUT/pc-restore.log" 2>/dev/null; then
-      log "PC session: nothing to restore"
-    else
-      echo "run-matrix: PC SESSION NOT RESTORED. Output: $OUT/pc-restore.log. Backup stays at $PCW/session.orig.json on the PC; fix and rerun with --restore" >&2
-      cat "$OUT/pc-restore.log" >&2 2>/dev/null; rc=5
-    fi
+    restore_pc_session; [ "$RESTORE_RC" = 0 ] || rc=$RESTORE_RC
   fi
   exit $rc
 }
@@ -236,10 +181,7 @@ run_point() {
   STARTED=1
 
   # 2. PC session: settings from the backup (never from the previous point), then the chart flag
-  PC_SETS=$PD/sets.txt pc_action "$PD" apply apply "$PCW/sets.txt" "$BUILD"
-  if [ "$DRY" != 1 ] && ! grep -q '^written' "$PD/pc-apply.log"; then
-    fail_hard "pc settings: apply failed: $(tail -1 "$PD/pc-apply.log")"; return 1
-  fi
+  pc_apply "$PD/sets.txt" || return 1
   if [ "$MODE" = chart ]; then fm=$($FM flag "$POINTS" "$NAME") || { fail_hard "flag: cannot map point"; return 1; }; else fm=off; fi
   WANT_DUMP=1; [ "$MODE" = chart ] && [ "${fm#*dump}" = "$fm" ] && WANT_DUMP=0   # chart flag without dump: statistics only
   PC_SETS= pc_action "$PD" flag flag "$fm" "$BUILD"
@@ -247,27 +189,8 @@ run_point() {
     fail_hard "pc flag: failed: $(tail -1 "$PD/pc-flag.log")"; return 1
   fi
 
-  # 2b. clear SteamVR's safe-mode block of the ALVR driver (a stopped run leaves it set; every later launch would skip the driver)
-  PC_SETS= pc_action "$PD" safemode safemode-clear $VRS_ARG
-  if [ "$DRY" != 1 ]; then
-    grep -q '^{"cleared"' "$PD/pc-safemode.log" || { fail_hard "safemode-clear: $(tail -1 "$PD/pc-safemode.log")"; return 1; }
-    log "[$NAME] safemode-clear: $(grep '^{"cleared"' "$PD/pc-safemode.log" | head -1)"
-  fi
-
-  # 3. ALVR dashboard (starts SteamVR), then fail fast on a dead server, manual client IP
-  xo "$PD/dash.log" $PYTHON "$HARNESS/alvr-run2.py" dashboard "$BUILD" || { fail_hard "dashboard: alvr-run2 dashboard failed: $(tail -2 "$PD/dash.log" | tr '\n' ' ')"; return 1; }
-  pcps_sub pc-dashboard-wait.ps1 "$API_WAIT" "$PD/api-wait.log"   # polls 127.0.0.1:8082 on the PC, <= API_WAIT s
-  PC_SETS= pc_action "$PD" driver driver-check $VRLOG_ARG
-  if [ "$DRY" != 1 ]; then
-    if grep -q '"not_loaded": true' "$PD/pc-driver.log"; then
-      fail_hard "driver blocked by safe mode: vrserver.txt says 'Not loading driver alvr_server' (SteamVR launched without the ALVR driver; see $PD/pc-driver.log)"; return 1
-    fi
-    grep -q '^api ok' "$PD/api-wait.log" 2>/dev/null || { fail_hard "dashboard API not listening: 127.0.0.1:8082 on the PC did not answer in ${API_WAIT}s ($(tail -1 "$PD/api-wait.log" 2>/dev/null))"; return 1; }
-  fi
-  xo "$PD/manualip.log" sh "$PCPS" "$HARNESS/pc-alvr-manualip.ps1"
-  if [ "$DRY" != 1 ] && grep -q 'Unable to connect' "$PD/manualip.log"; then
-    fail_hard "dashboard API not listening: manual-IP step: $(grep 'Unable to connect' "$PD/manualip.log" | head -1)"; return 1
-  fi
+  # 2b + 3. clear SteamVR's safe-mode block of the ALVR driver, start the dashboard (SteamVR), fail fast on a dead server, manual client IP
+  start_server || return 1
 
   # 4. client settings + launch
   if [ "$DRY" = 1 ]; then
@@ -400,17 +323,9 @@ run_point() {
 if [ "$RESTORE_ONLY" = 1 ]; then log "restore only (build $BUILD)"; exit 0; fi
 
 log "matrix $MODE: $(wc -l < "$POINTS" | tr -d ' ') lines in $POINTS, build $BUILD, out $OUT"
-[ "$DRY" = 1 ] && plan "### backup PC session (hash recorded; refuses if a stale backup exists)"
 # Armed BEFORE the backup runs: a signal during the backup must still restore (restore is a no-op without a backup file).
 BACKED_UP=1   # restore checks the run nonce on the PC: a refused/foreign (stale) backup is never restored by this run
-PC_SETS= pc_action "$OUT" backup backup "$BUILD"
-if [ "$DRY" != 1 ]; then
-  grep -q '^backup sha=' "$OUT/pc-backup.log" || {
-    echo "run-matrix: PC session backup failed (nothing changed): $(tail -2 "$OUT/pc-backup.log")" >&2; exit 4; }
-  SESSION_SHA=$(sed -n 's/^backup sha=\([0-9a-f]*\).*/\1/p' "$OUT/pc-backup.log" | head -1)
-  echo "$SESSION_SHA" > "$OUT/session.sha256"
-  log "PC session backed up, sha256 $SESSION_SHA"
-fi
+pc_backup || exit 4
 
 for n in $($FM names "$POINTS"); do
   run_point "$n" || { FAILED=$((FAILED + 1)); [ "$STOP_ON_ERROR" = 1 ] && { log "stopping on first error"; break; }; }

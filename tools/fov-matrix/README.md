@@ -58,8 +58,8 @@ idle captures have no render pose and carry no `pose` key.
 Files per point: `sets.txt pc-*.sh/.log console.log events.jsonl stats.json screenshot.png capture/ dump/ overlay/ ERROR`.
 
 `summary.tsv`: name, verdict, median_deg, max_deg, extent_err_deg, centre_px_deg (measured/predicted), fps, bitrate_mbps,
-encode_ms, verdict_render, verdict_encoded, notes, encode_ms_p95, encode_over_budget, centre_mtf50_cpd, nose_mtf50_cpd,
-temple_mtf50_cpd, up_mtf50_cpd, down_mtf50_cpd, display_ceiling_cpd. rdr2 mode skips the overlay unless `--overlay` (no chart in the image).
+encode_ms, verdict_render, verdict_encoded, notes, encode_ms_p95, encode_over_budget, encode_nvenc_ms, encode_nvenc_p95, centre_mtf50_cpd, nose_mtf50_cpd,
+temple_mtf50_cpd, up_mtf50_cpd, down_mtf50_cpd, display_ceiling_cpd (`encode_nvenc_*` from StatisticsSummary.encode_nvenc_ms, `n/a` when the server does not send it). rdr2 mode skips the overlay unless `--overlay` (no chart in the image).
 
 The `*_mtf50_cpd` columns are the stream's own sharpness: `stream_mtf.py` measures edge MTF50 on the angle chart's lines in
 the capture's expanded stage image (mean of the two eyes; `n/a` without a capture, `<x` an upper bound, `>x` above
@@ -165,3 +165,9 @@ sh tools/fov-matrix/test-runner-stubs.sh      # runner with stub ssh/xcrun: happ
    `bitrate.mode.ConstantMbps`); `pc-session.py apply` is strict and aborts on an unknown path.
 6. Bundle id: `--bundle-id`, else `/Users/noel/.claude/jobs/3ccce3d1/tmp/simint/bundle-id` (sim-int-prep.sh). The app must be
    installed. Client IP comes from the e4 `pc-alvr-manualip.ps1` (192.168.1.14).
+
+## Headset ladder
+
+`run-ladder.sh` runs the six-rung bitrate/preset ladder on the real headset (crop-C / crop-T at 100 / 300 / 500 Mbps, P1) with
+the device statistics pulled by devicectl: `docs/lumen/device-ladder.md`. It shares the PC exec path, session backup/restore,
+dead-server guard and graceful stop with `run-matrix.sh` through `lib-pc.sh`. Tests: `test_ladder.py`, `test-ladder-stubs.sh`.
