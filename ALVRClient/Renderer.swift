@@ -1335,7 +1335,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         frame.endSubmission()
         
         if !renderOwnership.offlineDiagnostics {
-            EventHandler.shared.lastQueued.set((queuedFrame, framePreviouslyPredictedPose))
+            EventHandler.shared.lastQueued.set(queuedFrame, pose: framePreviouslyPredictedPose)
         }
     }
     

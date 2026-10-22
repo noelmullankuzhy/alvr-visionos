@@ -133,8 +133,11 @@ class EventHandler: ObservableObject {
     var renderStarted = false
     
     var inputRunning = false
-    var vtDecompressionSession:VTDecompressionSession? = nil
-    var videoFormat:CMFormatDescription? = nil
+    // stop() tears the decoder down on the event thread while handleNals copies it on the decode thread: one lock, and
+    // the decode thread takes the session and its format in one snapshot.
+    let decoder = DecoderSlot<VTDecompressionSession, CMFormatDescription>()
+    var vtDecompressionSession: VTDecompressionSession? { decoder.session }
+    var videoFormat: CMFormatDescription? { decoder.format }
     var currentCodec: Int = -1
     var av1InstantiatedForReal = false
     var frameQueueLock = NSObject()
@@ -146,16 +149,22 @@ class EventHandler: ObservableObject {
     var frameQueueLastImageBuffer: CVImageBuffer? = nil
     // The last submitted frame and its pose: render threads set them, stop() clears them on the event thread, so every
     // access goes through this one lock (an unlocked assign racing stop() crashed in CVPixelBuffer finalize).
-    let lastQueued = LockedBox<(frame: QueuedFrame?, pose: simd_float4x4?)>((nil, nil))
+    let lastQueued = LastQueuedFrameSlot<QueuedFrame>()
     var lastQueuedFrame: QueuedFrame? {
-        get { lastQueued.get().frame }
-        set { lastQueued.update { $0.frame = newValue } }
+        get { lastQueued.frame }
+        set { lastQueued.frame = newValue }
     }
     var lastRequestedTimestamp: UInt64 = 0
     var lastSubmittedTimestamp: UInt64 = 0
     var lastIpd: Float = -1
     var viewTransforms: [simd_float4x4] = [matrix_identity_float4x4, matrix_identity_float4x4]
-    var viewFovs: [AlvrFov] = [AlvrFov(left: -1.0471973, right: 0.7853982, up: 0.7853982, down: -0.8726632), AlvrFov(left: -0.7853982, right: 1.0471973, up: 0.7853982, down: -0.8726632)]
+    // One lock for every reader and writer: Renderer/RealityKit replace it, the decode callback (under frameQueueLock)
+    // and the keepalive (under viewParamsLock) read it. A leaf lock, so nesting it under either takes no other lock.
+    private let viewFovsBox = LockedBox<[AlvrFov]>([AlvrFov(left: -1.0471973, right: 0.7853982, up: 0.7853982, down: -0.8726632), AlvrFov(left: -0.7853982, right: 1.0471973, up: 0.7853982, down: -0.8726632)])
+    var viewFovs: [AlvrFov] {
+        get { viewFovsBox.get() }
+        set { viewFovsBox.set(newValue) }
+    }
     var sentViewTangents: [simd_float4] = [simd_float4(1.73205, 1.0, 1.0, 1.19175), simd_float4(1.0, 1.73205, 1.0, 1.19175)]
     var realViewTangents: [simd_float4] = [simd_float4(1.73205, 1.0, 1.0, 1.19175), simd_float4(1.0, 1.73205, 1.0, 1.19175)]
     /// capture.json debug_eye_tangents while -ALVRDebugEyeTangents is active (DebugEyeTangents); nil otherwise.
@@ -271,16 +280,15 @@ class EventHandler: ObservableObject {
         StreamTelemetry.shared.streamingStopped()
         EyeDecodeWindows.shared.stop()
         streamingActive = false
-        finishAsyncDecode(vtDecompressionSession)
-        vtDecompressionSession = nil
-        videoFormat = nil
+        // Cleared under the decoder lock first, then the old session drains outside it.
+        finishAsyncDecode(decoder.replace(session: nil, format: nil))
         lastRequestedTimestamp = 0
         lastSubmittedTimestamp = 0
         framesRendered = 0
         framesSinceLastIDR = 0
         framesSinceLastDecode = 0
         lastIpd = -1
-        lastQueued.set((nil, nil))
+        lastQueued.clear()
         withStreamBootstrap { $0.streamStopped() }
         objc_sync_enter(viewParamsLock)
         poseKeepalive.reset()
@@ -304,7 +312,7 @@ class EventHandler: ObservableObject {
         framesSinceLastDecode = 0
         lastRequestedTimestamp = 0
         lastSubmittedTimestamp = 0
-        lastQueued.set((nil, nil))
+        lastQueued.clear()
         withStreamBootstrap { $0.reentered() }
     }
 
@@ -648,17 +656,16 @@ class EventHandler: ObservableObject {
             print("Creating AV1 codec for real now.")
             let (attemptVtDecompressionSession, attemptVideoFormat) = VideoHandler.createVideoDecoder(initialNals: nal, codec: currentCodec)
             if attemptVtDecompressionSession != nil && attemptVideoFormat != nil {
-                finishAsyncDecode(vtDecompressionSession)
-                vtDecompressionSession = attemptVtDecompressionSession
-                videoFormat = attemptVideoFormat
+                finishAsyncDecode(decoder.replace(session: attemptVtDecompressionSession, format: attemptVideoFormat))
                 av1InstantiatedForReal = true
                 VideoHandler.reportVideoFormat(attemptVideoFormat!)
             }
         }
 
-        if let vtDecompressionSession = self.vtDecompressionSession {
+        if let current = decoder.snapshot() {
+            let vtDecompressionSession = current.session
             // The stream this frame was decoded for: its colour state is derived from it, not from a later videoFormat.
-            let frameVideoFormat = self.videoFormat!
+            let frameVideoFormat = current.format
             let frameStream = EventHandler.videoStreams.currentStream
             // -ALVRAsyncDecode: hold a slot (waits while DecodeInFlight.limit frames are in flight) and decode from a copy.
             var slot: (token: UInt64, inFlight: Int)? = nil
@@ -1097,7 +1104,8 @@ class EventHandler: ObservableObject {
                     alvr_get_decoder_config(nalBuffer?.baseAddress)
 
                     av1InstantiatedForReal = false
-                    (vtDecompressionSession, videoFormat) = VideoHandler.createVideoDecoder(initialNals: nalBuffer!, codec: currentCodec)
+                    let (session, videoFormat) = VideoHandler.createVideoDecoder(initialNals: nalBuffer!, codec: currentCodec)
+                    decoder.replace(session: session, format: videoFormat)
                     if let videoFormat {
                         VideoHandler.reportVideoFormat(videoFormat)
                     }
