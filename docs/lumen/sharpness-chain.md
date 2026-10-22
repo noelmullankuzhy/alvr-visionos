@@ -70,6 +70,10 @@ every measured stage. Columns:
 - `PSF deg`: the Gaussian FWHM that widens the box line to the measured FWHM (deconvolved, so exact for a box line; the drawable mode's quadrature figure reads lower);
 - `added PSF deg`: this stage's PSF over the previous measured stage's, in quadrature.
 
+Follow-ups (deferred in review r1): the drawable's `added_psf_deg` is computed against the expanded stage, which the drawable
+is not drawn from (the client expands and warps in one sample from the decoded planes), so read it against the decoded row
+too; and there is no luma-only metric yet to separate warp sampling from the chroma loss.
+
 `dominant:` is the stage that adds the most. A missing stage prints `not captured` (for example, the simulator draws one
 view, so the R drawable is absent). `--out-json` keeps the rows, the per-stage lines and `resample_chain`.
 
