@@ -30,6 +30,21 @@ def flag_has_dump(flag):
     return 'dump' in flag.split(',')
 
 
+def valid_eye_tangents(text):
+    """L:l,r,d,u;R:l,r,d,u, both eyes once, four positive |tan| each (the client's -ALVRDebugEyeTangents)."""
+    eyes = {}
+    for part in text.split(';'):
+        eye, _, vals = part.strip().partition(':')
+        try:
+            v = [float(x) for x in vals.split(',')]
+        except ValueError:
+            return False
+        if eye not in ('L', 'R') or eye in eyes or len(v) != 4 or not all(math.isfinite(x) and x > 0 for x in v):
+            return False
+        eyes[eye] = v
+    return set(eyes) == {'L', 'R'}
+
+
 def parse_points(lines):
     pts, seen = [], set()
     for no, raw in enumerate(lines, 1):
@@ -78,8 +93,15 @@ def parse_points(lines):
             if not valid_flag(flag):
                 raise ValueError('%s: flag %r must be dump, stress or stress,dump' % (where, flag))
             extra.remove(x)
+        eye_tangents = None
+        for x in [x for x in extra if x.startswith('eye_tangents=')]:   # a client launch argument, not a session path
+            eye_tangents = x[len('eye_tangents='):]
+            if not valid_eye_tangents(eye_tangents):
+                raise ValueError('%s: eye_tangents %r must be L:l,r,d,u;R:l,r,d,u (|tan| > 0)' % (where, eye_tangents))
+            extra.remove(x)
         pts.append({'name': name, 'fov_scale': fov, 'render_scale': render, 'foveation': foveation,
-                    'bitrate_mbps': num(4, 'bitrate_mbps'), 'fps': num(5, 'fps'), 'extra': extra, 'flag': flag})
+                    'bitrate_mbps': num(4, 'bitrate_mbps'), 'fps': num(5, 'fps'), 'extra': extra, 'flag': flag,
+                    'eye_tangents': eye_tangents})
     if not pts:
         raise ValueError('no points')
     return pts
@@ -332,7 +354,7 @@ def _one(path, name):
 
 
 def main(argv):
-    usage = ('usage: fovmatrix.py names|check POINTS | sets|flag|client|overlay-args POINTS NAME | merge-client FILE JSON | '
+    usage = ('usage: fovmatrix.py names|check POINTS | sets|flag|eye-tangents|client|overlay-args POINTS NAME | merge-client FILE JSON | '
              'dump-files DIR | stats EVENTS CONSOLE | header | row NAME DIR | json-get FILE a.b')
     try:
         cmd, a = argv[1], argv[2:]
@@ -344,6 +366,8 @@ def main(argv):
             print('\n'.join(session_sets(_one(a[0], a[1]))))
         elif cmd == 'flag':
             print(_one(a[0], a[1])['flag'])
+        elif cmd == 'eye-tangents':
+            print(_one(a[0], a[1])['eye_tangents'] or '')
         elif cmd == 'client':
             print(json.dumps(client_settings(_one(a[0], a[1]))))
         elif cmd == 'overlay-args':

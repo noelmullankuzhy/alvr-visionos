@@ -151,6 +151,8 @@ class EventHandler: ObservableObject {
     var viewFovs: [AlvrFov] = [AlvrFov(left: -1.0471973, right: 0.7853982, up: 0.7853982, down: -0.8726632), AlvrFov(left: -0.7853982, right: 1.0471973, up: 0.7853982, down: -0.8726632)]
     var sentViewTangents: [simd_float4] = [simd_float4(1.73205, 1.0, 1.0, 1.19175), simd_float4(1.0, 1.73205, 1.0, 1.19175)]
     var realViewTangents: [simd_float4] = [simd_float4(1.73205, 1.0, 1.0, 1.19175), simd_float4(1.0, 1.73205, 1.0, 1.19175)]
+    /// capture.json debug_eye_tangents while -ALVRDebugEyeTangents is active (DebugEyeTangents); nil otherwise.
+    var debugEyeTangentsRecord: [String: Any]? = nil
 
     var framesSinceLastIDR:Int = 0
     var framesSinceLastDecode:Int = 0

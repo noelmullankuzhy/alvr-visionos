@@ -958,8 +958,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 let transformLeft = eyeTransforms[0]
                 let transformRight = eyeTransforms[1]
                 // gimmeTangents is (left, right, bottom, top): up comes from .w (docs/lumen/fov-updown.md).
-                let leftAngles = ViewLayout.fovAngles(tangents: tangentsLeft, scale: settings.fovRenderScale)
-                let rightAngles = mainDrawable.views.count > 1 ? ViewLayout.fovAngles(tangents: tangentsRight, scale: settings.fovRenderScale) : leftAngles
+                // -ALVRDebugEyeTangents (off unless given): pack those per-eye tangents instead; realViewTangents stays the drawable's.
+                let debugEyes = DebugEyeTangents.current
+                let leftAngles = ViewLayout.fovAngles(tangents: debugEyes?.tangents[0] ?? tangentsLeft, scale: settings.fovRenderScale)
+                let rightAngles = debugEyes.map { ViewLayout.fovAngles(tangents: $0.tangents[1], scale: settings.fovRenderScale) }
+                    ?? (mainDrawable.views.count > 1 ? ViewLayout.fovAngles(tangents: tangentsRight, scale: settings.fovRenderScale) : leftAngles)
                 let leftFov = AlvrFov(left: leftAngles.left, right: leftAngles.right, up: leftAngles.up, down: leftAngles.down)
                 let rightFov = AlvrFov(left: rightAngles.left, right: rightAngles.right, up: rightAngles.up, down: rightAngles.down)
 
@@ -970,6 +973,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 }
 
                 EventHandler.shared.viewFovs = [leftFovCorrected, rightFovCorrected]
+                if let debugEyes {
+                    EventHandler.shared.debugEyeTangentsRecord = DebugEyeTangents.captureRecord(
+                        argument: debugEyes.argument, requested: debugEyes.tangents, fovRenderScale: settings.fovRenderScale,
+                        reportedAngles: [leftFovCorrected, rightFovCorrected].map { simd_float4($0.left, $0.right, $0.up, $0.down) })
+                }
                 EventHandler.shared.viewTransforms = [fixTransform(transformLeftCorrected), fixTransform(transformRightCorrected)]
                 // Wait, is this correct?
                 if mainDrawable.views.count > 1 {

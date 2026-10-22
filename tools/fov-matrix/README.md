@@ -84,6 +84,30 @@ disabled): `enc-base100` (flag `dump`, split ForceTwo, 100 Mbps: normal chart as
   (median achieved), `fps` (client presented fps). Holding 90 fps at 500 Mbps = `s500` with `fps` ~90, `encode_ms_p95` < 11.1,
   `encode_over_budget` ~0 and `bitrate_mbps` near 500.
 
+## Vision Pro frustum in the simulator
+
+`points-chart-avp.tsv` (`a100`/`a085`/`a070` x `asrun`/`centred`/`wider`, plus the doc's three recommended settings
+`a100-axis-C`/`a100-axis-A`/`a100-wider-A` at their budget's render scale; 100 Mbps) makes the simulator client report
+the device AVP per-eye frustum (CompositorServices |tan| L,R,D,U: L 1.7321,1,1.1918,1; R 1,1.7321,1.1918,1) x `fov_scale`
+instead of its own view. Needs a client with `-ALVRDebugEyeTangents` (debug/simulator builds) and the W32 up/down fix
+(`bugfix/fov-updown`): the argument fills the (left, right, bottom, top) slots, which only the fixed packing sends as
+up = top.
+
+The file is generated: the frustum, the visible field (default the 21 Oct seal-on 31/43/33/35 deg nasal/temporal/up/down)
+and the foveation sizes live in `avp-field.json`; `centred` (band on the field centre) and `wider` (band spans the field)
+derive from it per fov scale. After changing it (e.g. a seal-off field), regenerate (a test checks they agree):
+
+```sh
+python3 tools/diag/avp-sharpness.py points > tools/fov-matrix/points-chart-avp.tsv
+python3 tools/diag/avp-sharpness.py doc > docs/lumen/avp-frustum-sharpness.md
+```
+
+- **Extra column** `eye_tangents=L:l,r,d,u;R:l,r,d,u` (not a session path): the runner appends
+  `-ALVRDebugEyeTangents "<value>"` to the `simctl launch` arguments; without the column the launch is unchanged.
+- The client records `debug_eye_tangents` (requested, reported, fov_render_scale) in capture.json; the drawable overlay
+  places the stream by the reported tangents and fails when they are not `fov_scale` x requested. The simulator view is
+  |tan| 1,1,0.5625,0.5625, so most stream edges are out of view (at 1.0 all of them: a summary note, the lines carry the check).
+
 ## Tests
 
 ```sh

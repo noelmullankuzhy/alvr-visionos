@@ -32,6 +32,7 @@ cat > "$T/bin/xcrun" <<'EOF'
 case "$2" in
   get_app_container) echo "$FAKE_DATA" ;;
   launch)
+    n=0; for a in "$@"; do n=$((n + 1)); printf '%s[%s] ' "$n" "$a"; done >> "$FAKE_DATA/launch.args"; echo >> "$FAKE_DATA/launch.args"
     [ -f "$FAKE_DATA/Documents/diag/capture.request" ] && : > "$FAKE_DATA/leftover-seen"
     [ -n "${NOSTREAM:-}" ] || echo 'ALVRSTATS {"frames_decoded":5,"presented_fps":89.5,"decode_ms_mean":7.0}'
     d="$FAKE_PC/angle-chart/s-$$"; mkdir -p "$d"; : > "$d/chart_L.png"; : > "$d/encoder_input_L.png"; [ -n "${NOMETA:-}" ] || echo '{}' > "$d/meta.json"
@@ -143,6 +144,19 @@ t "grep -q '^written' $T/o11/st/pc-apply.log" "encoder keys applied strictly to 
 t "grep '^st	' $T/o11.out | grep -q '	20.00	0.100\$'" "p95 (20 ms) and over-budget fraction (0.100) from the stub GraphStatistics"
 t "grep '^st	' $T/o11.out | grep -q '	9.00	'" "median encode ms unchanged"
 t "head -1 $T/o11.out | grep -q 'notes	encode_ms_p95	encode_over_budget\$'" "new summary columns are last"
+
+echo "== debug eye tangents reach the client launch"
+AVP='L:1.7321,1,1.1918,1;R:1,1.7321,1.1918,1'
+printf 'av\t0.85\t1.0\t0.5,0.45,3,3,0,0\t100\t90\teye_tangents=%s\npl\t0.85\t1.0\t0.5,0.45,3,3,0,0\t100\t90\n' "$AVP" > "$T/avp.tsv"
+rm -f "$T/data/launch.args"
+run "$T/avp.tsv" "$T/o12" > "$T/o12.out" 2> "$T/o12.err"; rc=$?
+t "[ $rc = 0 ]" "eye tangents run exits 0 (rc=$rc)"
+t "head -1 $T/data/launch.args | grep -qF -- '11[-ALVRDebugEyeTangents] 12[$AVP]'" "point with eye_tangents: one launch argument pair, value intact"
+t "! sed -n 2p $T/data/launch.args | grep -q ALVRDebugEyeTangents && sed -n 2p $T/data/launch.args | grep -qF '9[-ALVRAutoEnterRenderer] 10[metal] '" "point without: launch arguments as before"
+t "! grep -q eye_tangents $T/o12/av/sets.txt" "eye tangents are not a session setting"
+run "$T/avp.tsv" "$T/o13" --dry-run > "$T/o13.out" 2> "$T/o13.err"
+t "grep -F 'simctl launch' $T/o13/plan.txt | head -1 | grep -qF -- \"-ALVRDebugEyeTangents '$AVP'\"" "dry-run plan shows the launch argument"
+t "grep -F 'simctl launch' $T/o13/plan.txt | sed -n 2p | grep -q 'metal >' " "dry-run plan: no argument for the point without"
 
 echo "== server dump without meta.json"
 rm -f "$T/overlay.args"

@@ -1,0 +1,20 @@
+{
+  "frustum_tan_LRDU": {
+    "L": [1.7321, 1.0, 1.1918, 1.0],
+    "R": [1.0, 1.7321, 1.1918, 1.0],
+    "viewport": [6261, 5023],
+    "source": "CompositorServices view tangents, device log evidence/device-20261021/diag-20261021T135020Z.log DIAG corner (avp-frustum-reference.md); viewport 6261x5023 at render quality 1.0"
+  },
+  "visible_field_deg": {
+    "nasal": 31,
+    "temporal": 43,
+    "up": 33,
+    "down": 35,
+    "source": "21 Oct 2026 stepping dots, seal on, one wearer, one fit (avp-frustum-reference.md); replace with a seal-off measurement here"
+  },
+  "fov_scales": [1.0, 0.85, 0.7],
+  "asrun": {"size": [0.5, 0.45], "edge_ratio": [3, 3]},
+  "centred": {"size": [0.5, 0.45], "edge_ratio": [3, 3], "rule": "band centre on the visible field's centre"},
+  "wider": {"edge_ratio": [2.5, 2.5], "rule": "band spans the whole visible field, centred on it"},
+  "points": {"render_scale": 1.0, "bitrate_mbps": 100, "fps": 90}
+}

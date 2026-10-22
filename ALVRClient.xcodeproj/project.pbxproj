@@ -44,6 +44,7 @@
 		D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68FA8082B742F6F0052B7FF /* FFR.swift */; };
 		E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */; };
 		A17A0E012C0000010011AA01 /* AutoEnterPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */; };
+		A1DE7A012C0000010011DE01 /* DebugEyeTangents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1DE7A022C0000010011DE02 /* DebugEyeTangents.swift */; };
 		B23000012C0000010011AA01 /* EntryEnterPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B23000022C0000010011AA02 /* EntryEnterPolicy.swift */; };
 		A17B0E012C0000010011AA01 /* StreamBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17B0E022C0000010011AA02 /* StreamBootstrap.swift */; };
 		A17C0E012C0000010011AA01 /* ViewLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17C0E022C0000010011AA02 /* ViewLayout.swift */; };
@@ -181,6 +182,7 @@
 		D68FA8082B742F6F0052B7FF /* FFR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFR.swift; sourceTree = "<group>"; };
 		E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalSettings.swift; sourceTree = "<group>"; };
 		A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoEnterPolicy.swift; sourceTree = "<group>"; };
+		A1DE7A022C0000010011DE02 /* DebugEyeTangents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugEyeTangents.swift; sourceTree = "<group>"; };
 		B23000022C0000010011AA02 /* EntryEnterPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntryEnterPolicy.swift; sourceTree = "<group>"; };
 		A17B0E022C0000010011AA02 /* StreamBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamBootstrap.swift; sourceTree = "<group>"; };
 		A17C0E022C0000010011AA02 /* ViewLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewLayout.swift; sourceTree = "<group>"; };
@@ -351,6 +353,7 @@
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
 				A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */,
+				A1DE7A022C0000010011DE02 /* DebugEyeTangents.swift */,
 				B23000022C0000010011AA02 /* EntryEnterPolicy.swift */,
 				A17B0E022C0000010011AA02 /* StreamBootstrap.swift */,
 				A17C0E022C0000010011AA02 /* ViewLayout.swift */,
@@ -562,6 +565,7 @@
 				E71DEF9A2C18D4B4008A2074 /* ALVRTypes.swift in Sources */,
 				E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */,
 				A17A0E012C0000010011AA01 /* AutoEnterPolicy.swift in Sources */,
+				A1DE7A012C0000010011DE01 /* DebugEyeTangents.swift in Sources */,
 				B23000012C0000010011AA01 /* EntryEnterPolicy.swift in Sources */,
 				A17B0E012C0000010011AA01 /* StreamBootstrap.swift in Sources */,
 				A17C0E012C0000010011AA01 /* ViewLayout.swift in Sources */,

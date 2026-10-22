@@ -206,6 +206,7 @@ run_point() {
   $FM sets "$POINTS" "$NAME" > "$PD/sets.txt" || { fail_hard "sets: cannot map point"; return 1; }
   CLIENT_JSON=$($FM client "$POINTS" "$NAME") || { fail_hard "client: cannot map point"; return 1; }
   OVL_ARGS=$($FM overlay-args "$POINTS" "$NAME") || { fail_hard "overlay-args: cannot map point"; return 1; }
+  EYE_T=$($FM eye-tangents "$POINTS" "$NAME") || { fail_hard "eye-tangents: cannot map point"; return 1; }
   FOV_ARG=$(echo "$OVL_ARGS" | cut -d' ' -f1-2)
   NOSCALE_ARGS=$(echo "$OVL_ARGS" | cut -d' ' -f3-)   # --render/--foveation without --fov-scale (meta tangents already include s)
 
@@ -244,11 +245,14 @@ run_point() {
     rm -f "$DATA/Documents/diag/capture.request"   # a leftover would capture on the first stream frame, before settle
     ls "$DATA/Documents/diag/captures" > "$PD/captures.before" 2>/dev/null || : > "$PD/captures.before"
   fi
+  # eye_tangents point column: the client reports these per-eye tangents (x fov scale) instead of its drawable's
+  set -- -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal
+  [ -n "$EYE_T" ] && set -- "$@" -ALVRDebugEyeTangents "$EYE_T"
   if [ "$DRY" = 1 ]; then
-    plan "+ SIMCTL_CHILD_ALVR_DIAG=1 SIMCTL_CHILD_RUST_LOG=info nohup xcrun simctl launch --console-pty --terminate-running-process $SIM $BID -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal > $PD/console.log 2>&1 &"
+    plan "+ SIMCTL_CHILD_ALVR_DIAG=1 SIMCTL_CHILD_RUST_LOG=info nohup xcrun simctl launch --console-pty --terminate-running-process $SIM $BID -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal${EYE_T:+ -ALVRDebugEyeTangents '$EYE_T'} > $PD/console.log 2>&1 &"
   else
     SIMCTL_CHILD_ALVR_DIAG=1 SIMCTL_CHILD_RUST_LOG=info nohup xcrun simctl launch --console-pty --terminate-running-process \
-      "$SIM" "$BID" -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal > "$PD/console.log" 2>&1 < /dev/null &
+      "$SIM" "$BID" "$@" > "$PD/console.log" 2>&1 < /dev/null &
     APP_PID=$!
   fi
 
