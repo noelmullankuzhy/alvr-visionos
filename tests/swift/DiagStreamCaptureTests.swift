@@ -65,6 +65,16 @@ private final class FakeFS {
         expect(after.take(nowMs: 11_499, idle: false, streamFrame: true) == nil, "not before N ms")
         expectEqual(after.take(nowMs: 11_500, idle: false, streamFrame: true)?.reason, "after_ms", "reason after_ms at N ms")
         expect(after.take(nowMs: 20_000, idle: false, streamFrame: true) == nil, "after_ms is one-shot")
+        // Once per stream: an idle frame means the stream stopped; the next stream gets its own clock and its own capture.
+        expect(after.take(nowMs: 21_000, idle: true) == nil, "idle frame between streams")
+        expect(after.take(nowMs: 30_000, idle: false, streamFrame: true) == nil, "second stream: first frame restarts the clock")
+        expect(after.take(nowMs: 31_499, idle: false, streamFrame: true) == nil, "second stream: not before N ms")
+        expectEqual(after.take(nowMs: 31_500, idle: false, streamFrame: true)?.reason, "after_ms", "second stream captures once more")
+        expect(after.take(nowMs: 40_000, idle: false, streamFrame: true) == nil, "second stream: still one-shot")
+        // A reconnect that never passed through an idle frame (session re-created) is reset by configureAfterMs.
+        after.configureAfterMs(1500)
+        expect(after.take(nowMs: 50_000, idle: false, streamFrame: true) == nil, "reconfigured: clock restarts")
+        expectEqual(after.take(nowMs: 51_500, idle: false, streamFrame: true)?.reason, "after_ms", "reconfigured: captures again")
         let zero = DiagCaptureRequests()
         zero.configureAfterMs(0)
         expectEqual(zero.take(nowMs: 1, idle: false, streamFrame: true)?.reason, "after_ms", "N = 0 captures on the first frame")

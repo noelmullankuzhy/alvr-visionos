@@ -444,6 +444,7 @@ final class DiagCaptureRequests {
     func configureAfterMs(_ ms: Int?) {
         lock.lock(); defer { lock.unlock() }
         afterMs = ms
+        firstStreamMs = nil; afterTaken = false   // a new session (reconnect, immersive space reopened) starts a new stream
     }
 
     // Bounded: any number of requests before the next stream frame collapse to one capture.
@@ -469,6 +470,7 @@ final class DiagCaptureRequests {
             count += 1
             return Request(number: count, reason: reason, eye: nil, spoke: nil, pct: nil, positionDegrees: nil)
         }
+        firstStreamMs = nil; afterTaken = false   // idle = no stream: the next stream gets its own after_ms capture
         if firstIdleMs == nil { firstIdleMs = nowMs }
         var mark: (String, Int, Int, Double?)?
         if !marks.isEmpty {
