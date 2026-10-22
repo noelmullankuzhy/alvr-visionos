@@ -2,6 +2,7 @@
 """Helpers for run-matrix.sh (stdlib only, Python 3.9+): points parsing, settings mapping, dump classification,
 stats and the summary row. The shell runner calls the subcommands at the bottom; tests import the functions."""
 import json
+import math
 import os
 import re
 import statistics
@@ -9,12 +10,24 @@ import sys
 
 BASE_RENDER = (3648, 2912)  # per-eye render at render_scale 1.0 (the page's standard preset)
 SUMMARY_COLUMNS = ['name', 'verdict', 'median_deg', 'max_deg', 'extent_err_deg', 'centre_px_deg', 'fps',
-                   'bitrate_mbps', 'encode_ms', 'verdict_render', 'verdict_encoded', 'notes']
+                   'bitrate_mbps', 'encode_ms', 'verdict_render', 'verdict_encoded', 'notes',
+                   'encode_ms_p95', 'encode_over_budget']
 NA = 'n/a'
+DEFAULT_FLAG = 'dump'
+FRAME_BUDGET_MS = 1000.0 / 90   # 90 Hz frame budget, 11.1 ms
 
 
 def g(v):
     return '%g' % v
+
+
+def valid_flag(flag):
+    words = flag.split(',')
+    return all(w in ('dump', 'stress') for w in words) and len(set(words)) == len(words)
+
+
+def flag_has_dump(flag):
+    return 'dump' in flag.split(',')
 
 
 def parse_points(lines):
@@ -59,8 +72,14 @@ def parse_points(lines):
         for x in extra:
             if '=' not in x:
                 raise ValueError('%s: extra %r must be path=json' % (where, x))
+        flag = DEFAULT_FLAG
+        for x in [x for x in extra if x.startswith('flag=')]:   # the chart flag is not a session path
+            flag = x[5:]
+            if not valid_flag(flag):
+                raise ValueError('%s: flag %r must be dump, stress or stress,dump' % (where, flag))
+            extra.remove(x)
         pts.append({'name': name, 'fov_scale': fov, 'render_scale': render, 'foveation': foveation,
-                    'bitrate_mbps': num(4, 'bitrate_mbps'), 'fps': num(5, 'fps'), 'extra': extra})
+                    'bitrate_mbps': num(4, 'bitrate_mbps'), 'fps': num(5, 'fps'), 'extra': extra, 'flag': flag})
     if not pts:
         raise ValueError('no points')
     return pts
@@ -171,10 +190,13 @@ def stats(events_path, console_path):
     def col(rows, key, scale=1.0):
         return _median([r[key] * scale for r in rows if isinstance(r.get(key), (int, float))])
 
+    enc = sorted(r['encoder_s'] * 1000.0 for r in graph if isinstance(r.get('encoder_s'), (int, float)))
     fps = col(client, 'presented_fps')
     dec = col(client, 'decode_ms_mean')
     return {'graph_n': len(graph), 'client_stats_n': len(client),
             'encode_ms': col(graph, 'encoder_s', 1000.0), 'bitrate_mbps': col(graph, 'bitrate_bps', 1e-6),
+            'encode_ms_p95': enc[math.ceil(0.95 * len(enc)) - 1] if enc else None,   # nearest rank
+            'encode_over_budget': sum(1 for e in enc if e > FRAME_BUDGET_MS) / len(enc) if enc else None,
             'client_fps': fps if fps is not None else col(graph, 'client_fps'),
             'decode_ms': dec if dec is not None else col(graph, 'decoder_s', 1000.0)}
 
@@ -273,6 +295,8 @@ def summary_row(name, point_dir):
     r['fps'] = _num(st.get('client_fps'), '%.1f')
     r['bitrate_mbps'] = _num(st.get('bitrate_mbps'), '%.1f')
     r['encode_ms'] = _num(st.get('encode_ms'), '%.2f')
+    r['encode_ms_p95'] = _num(st.get('encode_ms_p95'), '%.2f')
+    r['encode_over_budget'] = _num(st.get('encode_over_budget'), '%.3f')
     try:
         with open(os.path.join(point_dir, 'ERROR')) as f:
             r['verdict'] = 'ERROR'
@@ -308,7 +332,7 @@ def _one(path, name):
 
 
 def main(argv):
-    usage = ('usage: fovmatrix.py names|check POINTS | sets|client|overlay-args POINTS NAME | merge-client FILE JSON | '
+    usage = ('usage: fovmatrix.py names|check POINTS | sets|flag|client|overlay-args POINTS NAME | merge-client FILE JSON | '
              'dump-files DIR | stats EVENTS CONSOLE | header | row NAME DIR | json-get FILE a.b')
     try:
         cmd, a = argv[1], argv[2:]
@@ -318,6 +342,8 @@ def main(argv):
             print('ok %d points' % len(_points(a[0])))
         elif cmd == 'sets':
             print('\n'.join(session_sets(_one(a[0], a[1]))))
+        elif cmd == 'flag':
+            print(_one(a[0], a[1])['flag'])
         elif cmd == 'client':
             print(json.dumps(client_settings(_one(a[0], a[1]))))
         elif cmd == 'overlay-args':

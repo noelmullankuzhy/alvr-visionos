@@ -61,6 +61,56 @@ class PointsTest(unittest.TestCase):
         self.assertEqual(by['oneone']['foveation'], (0.5, 0.45, 3.0, 3.0, 0.536, -0.159))
 
 
+ENC_KEYS = ['video.encoder_config.nvenc.quality_preset={"variant":"P4"}',
+            'video.encoder_config.nvenc.multi_pass={"variant":"Disabled"}',
+            'video.encoder_config.nvenc.split_encode_mode={"variant":"ForceTwo"}']
+
+
+class FlagTest(unittest.TestCase):
+    def test_default_is_dump_and_not_a_session_key(self):
+        p = parse('a\t1\t1\toff\t100\t90\tvideo.q=2\n')[0]
+        self.assertEqual(p['flag'], 'dump')
+        self.assertEqual(p['extra'], ['video.q=2'])
+
+    def test_flag_column_is_taken_out_of_the_session_sets(self):
+        for f in ('dump', 'stress', 'stress,dump'):
+            p = parse('a\t1\t1\toff\t100\t90\tflag=%s\tvideo.q=2\n' % f)[0]
+            self.assertEqual(p['flag'], f)
+            self.assertEqual(p['extra'], ['video.q=2'])
+            self.assertEqual(fm.session_sets(p)[-1], 'video.q=2')
+            self.assertFalse([x for x in fm.session_sets(p) if x.startswith('flag')])
+
+    def test_bad_flag(self):
+        for bad in ('flag=', 'flag=bogus', 'flag=dump,bogus', 'flag=on'):
+            with self.assertRaises(ValueError) as cm:
+                parse('a\t1\t1\toff\t100\t90\t%s\n' % bad)
+            self.assertIn('flag', str(cm.exception))
+
+    def test_has_dump(self):
+        self.assertTrue(fm.flag_has_dump('dump'))
+        self.assertTrue(fm.flag_has_dump('stress,dump'))
+        self.assertFalse(fm.flag_has_dump('stress'))
+
+    def test_sim_and_chart_points_stay_dump(self):
+        for n in ('points-chart.tsv', 'points-chart-sim.tsv'):
+            with open(os.path.join(HERE, n)) as f:
+                self.assertEqual({p['flag'] for p in fm.parse_points(f.read().splitlines())}, {'dump'})
+
+    def test_shipped_stress_points(self):
+        with open(os.path.join(HERE, 'points-stress-enc.tsv')) as f:
+            pts = {p['name']: p for p in fm.parse_points(f.read().splitlines())}
+        self.assertEqual(list(pts), ['enc-base100', 's100', 's300', 's500', 's500-nosplit'])
+        self.assertEqual([pts[n]['flag'] for n in pts], ['dump', 'stress', 'stress', 'stress', 'stress'])
+        self.assertEqual([pts[n]['bitrate_mbps'] for n in pts], [100.0, 100.0, 300.0, 500.0, 500.0])
+        for p in pts.values():
+            self.assertEqual((p['fps'], p['fov_scale'], p['render_scale'], p['foveation']),
+                             (90.0, 1.0, 1.0, (0.5, 0.45, 3.0, 3.0, 0.536, -0.159)))
+        for n in ('enc-base100', 's100', 's300', 's500'):
+            self.assertEqual(pts[n]['extra'], ENC_KEYS)
+        self.assertEqual(pts['s500-nosplit']['extra'],
+                         ENC_KEYS[:2] + ['video.encoder_config.nvenc.split_encode_mode={"variant":"Disabled"}'])
+
+
 class SettingsTest(unittest.TestCase):
     def setUp(self):
         self.p = parse('a\t0.6\t1.03\t0.6,0.6,2.5,2.5,0.536,-0.159\t500\t90\tvideo.q=2\n')[0]
@@ -158,9 +208,25 @@ class StatsTest(unittest.TestCase):
             self.assertEqual(s['decode_ms'], 7.0)
             self.assertEqual(s['graph_n'], 3)
 
+    def test_encode_p95_and_over_budget(self):
+        with tempfile.TemporaryDirectory() as d:
+            ev = os.path.join(d, 'events.jsonl')
+            with open(ev, 'w') as f:   # 20 samples: 18 x 9 ms, 2 x 20 ms
+                for e in [0.009] * 18 + [0.020] * 2:
+                    f.write(graph(encoder_s=e) + '\n')
+            s = fm.stats(ev, '/nonexistent')
+            self.assertAlmostEqual(s['encode_ms'], 9.0)
+            self.assertAlmostEqual(s['encode_ms_p95'], 20.0)       # nearest rank: the 19th of 20
+            self.assertAlmostEqual(s['encode_over_budget'], 0.1)   # > 1000/90 ms
+            with open(ev, 'w') as f:   # exactly on the budget is not over it
+                f.write(graph(encoder_s=1 / 90) + '\n')
+            self.assertEqual(fm.stats(ev, '/nonexistent')['encode_over_budget'], 0.0)
+
     def test_missing_files(self):
         s = fm.stats('/nonexistent/a', '/nonexistent/b')
         self.assertIsNone(s['encode_ms'])
+        self.assertIsNone(s['encode_ms_p95'])
+        self.assertIsNone(s['encode_over_budget'])
         self.assertIsNone(s['client_fps'])
 
 
@@ -178,7 +244,8 @@ class RowTest(unittest.TestCase):
             wj(os.path.join(d, 'overlay', 'drawable.json'), overlay)
         wj(os.path.join(d, 'overlay', 'render-L.json'), {'verdict': 'FAIL', 'summary': {'verdict': 'FAIL'}})
         if with_stats:
-            wj(os.path.join(d, 'stats.json'), {'encode_ms': 9.0, 'bitrate_mbps': 498.4, 'client_fps': 89.5, 'decode_ms': 7.0})
+            wj(os.path.join(d, 'stats.json'), {'encode_ms': 9.0, 'bitrate_mbps': 498.4, 'client_fps': 89.5, 'decode_ms': 7.0,
+                                               'encode_ms_p95': 12.345, 'encode_over_budget': 0.0625})
 
     def test_row(self):
         with tempfile.TemporaryDirectory() as d:
@@ -195,6 +262,9 @@ class RowTest(unittest.TestCase):
             self.assertEqual((r['fps'], r['bitrate_mbps'], r['encode_ms']), ('89.5', '498.4', '9.00'))
             self.assertEqual(r['verdict_render'], 'FAIL')
             self.assertEqual(r['verdict_encoded'], 'n/a')
+            self.assertEqual((r['encode_ms_p95'], r['encode_over_budget']), ('12.35', '0.062'))
+            # appended: the old columns keep their place
+            self.assertEqual(fm.SUMMARY_COLUMNS[-3:], ['notes', 'encode_ms_p95', 'encode_over_budget'])
 
     def test_no_overlay_and_error_marker(self):
         with tempfile.TemporaryDirectory() as d:

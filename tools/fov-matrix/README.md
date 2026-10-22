@@ -43,7 +43,7 @@ idle captures have no render pose and carry no `pose` key.
 Files per point: `sets.txt pc-*.sh/.log console.log events.jsonl stats.json screenshot.png capture/ dump/ overlay/ ERROR`.
 
 `summary.tsv`: name, verdict, median_deg, max_deg, extent_err_deg, centre_px_deg (measured/predicted), fps, bitrate_mbps,
-encode_ms, verdict_render, verdict_encoded, notes. rdr2 mode skips the overlay unless `--overlay` (no chart in the image).
+encode_ms, verdict_render, verdict_encoded, notes, encode_ms_p95, encode_over_budget. rdr2 mode skips the overlay unless `--overlay` (no chart in the image).
 
 ## Streaming capture trace
 
@@ -57,6 +57,32 @@ idle `start_timer` capture (e.g. taken while the simulator's stream dropped) is 
 
 The simulator shows grey frames above about 120 Mbps, so for simulator runs use `points-chart-sim.tsv`: the same 10 points as
 `points-chart.tsv` with bitrate 100 Mbps (`points-chart.tsv` keeps 500 Mbps for a real headset).
+
+## Encoder stress
+
+Proves the encoder holds 90 fps at 100/300/500 Mbps on real hardware (the simulator greys out above ~120 Mbps). Needs the
+W20/W21 build (angle-chart `stress` flag); `--build` is its 12-char commit dir.
+
+```sh
+sh tools/fov-matrix/run-matrix.sh --points tools/fov-matrix/points-stress-enc.tsv --mode chart --out <dir> \
+  --bundle-id alvr.client --build <commit12>
+```
+
+Points (`points-stress-enc.tsv`, 90 fps, foveation 0.5,0.45,3,3,0.536,-0.159, fov/render scale 1.0, NVENC P4, multi-pass
+disabled): `enc-base100` (flag `dump`, split ForceTwo, 100 Mbps: normal chart as the baseline), `s100`/`s300`/`s500`
+(flag `stress`, split ForceTwo, 100/300/500 Mbps), `s500-nosplit` (stress, split Disabled, 500 Mbps).
+
+- **Chart flag, per point**: extra column `flag=dump|stress|stress,dump` (default `dump`; not a session path). The content
+  is written to the same toggle file (`angle_chart.enable`) and restored with the session as before. `stress` = per-frame
+  noise so the encoder runs at its bitrate cap. A flag without `dump` records statistics only: no server dump, no
+  overlays (logged `skipping the server dump fetch and the overlay steps`, not a failure; the verdict column shows `NO_OVERLAY`).
+- **NVENC keys** (extra columns, exact session paths from ALVR `settings.rs`): `video.encoder_config.nvenc.quality_preset={"variant":"P4"}`,
+  `...nvenc.multi_pass={"variant":"Disabled"}` (or `QuarterResolution`, `FullResolution`), `...nvenc.split_encode_mode={"variant":"ForceTwo"}`
+  (or `Auto`, `Disabled`). `apply` is strict: a misspelt path aborts the point.
+- **Summary columns** (appended after `notes`): `encode_ms` (median), `encode_ms_p95` (nearest rank over the GraphStatistics
+  `encoder_s` samples), `encode_over_budget` (fraction of those samples above the 90 Hz budget, 11.1 ms), `bitrate_mbps`
+  (median achieved), `fps` (client presented fps). Holding 90 fps at 500 Mbps = `s500` with `fps` ~90, `encode_ms_p95` < 11.1,
+  `encode_over_budget` ~0 and `bitrate_mbps` near 500.
 
 ## Tests
 

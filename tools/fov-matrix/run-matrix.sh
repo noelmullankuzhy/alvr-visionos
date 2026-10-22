@@ -218,7 +218,8 @@ run_point() {
   if [ "$DRY" != 1 ] && ! grep -q '^written' "$PD/pc-apply.log"; then
     fail_hard "pc settings: apply failed: $(tail -1 "$PD/pc-apply.log")"; return 1
   fi
-  if [ "$MODE" = chart ]; then fm=dump; else fm=off; fi
+  if [ "$MODE" = chart ]; then fm=$($FM flag "$POINTS" "$NAME") || { fail_hard "flag: cannot map point"; return 1; }; else fm=off; fi
+  WANT_DUMP=1; [ "$MODE" = chart ] && [ "${fm#*dump}" = "$fm" ] && WANT_DUMP=0   # chart flag without dump: statistics only
   PC_SETS= pc_action "$PD" flag flag "$fm" "$BUILD"
   if [ "$DRY" != 1 ] && ! grep -q '^flag ' "$PD/pc-flag.log"; then
     fail_hard "pc flag: failed: $(tail -1 "$PD/pc-flag.log")"; return 1
@@ -306,7 +307,9 @@ run_point() {
 
   # 9. server chart dump (chart mode)
   DUMP=
-  if [ "$MODE" = chart ]; then
+  if [ "$WANT_DUMP" = 0 ]; then
+    log "[$NAME] chart flag '$fm' has no dump: skipping the server dump fetch and the overlay steps (statistics only)"
+  elif [ "$MODE" = chart ]; then
     PC_SETS= mk_pc "$PD/pc-fetch.sh" fetch-dump "$BUILD"
     if [ "$DRY" = 1 ]; then
       plan "+ ssh -o ConnectTimeout=10 $WIN wsl -e sh -s < $PD/pc-fetch.sh 2> $PD/pc-fetch.err | base64 -D | tar -xf - -C $PD   # -> $PD/dump/"
@@ -318,7 +321,7 @@ run_point() {
   fi
 
   # 10. overlay tool
-  if [ "$MODE" = chart ] || [ "$FORCE_OVERLAY" = 1 ]; then
+  if [ "$WANT_DUMP" = 1 ] && { [ "$MODE" = chart ] || [ "$FORCE_OVERLAY" = 1 ]; }; then
     if [ "$DRY" = 1 ] || [ -d "$PD/capture" ]; then
       overlay drawable "$PD/overlay/drawable" --capture-dir "$PD/capture" $FOV_ARG
     fi

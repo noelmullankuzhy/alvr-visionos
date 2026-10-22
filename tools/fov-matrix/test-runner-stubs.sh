@@ -19,6 +19,8 @@ s=$FAKE_PC/.ssh-script.$$; cat > "$s"
 FOVMATRIX_PC_ROOT=$FAKE_PC sh "$s"; rc=$?
 # Test hook: hold the runner inside the backup call (backup file written, runner not yet back) so a signal lands there.
 if [ -n "${HOLD_AFTER_BACKUP:-}" ] && grep -q ' python3 - backup ' "$s"; then : > "$HOLD_AFTER_BACKUP"; /bin/sleep 3; fi
+# Test hook: what the angle-chart toggle file held right after each flag call (the PC side of the stress flag)
+if grep -q ' python3 - flag ' "$s"; then cat "$FAKE_PC/alvr-build/out/b1/alvr_streamer_windows/angle_chart.enable" >> "$FAKE_PC/flag.history" 2>/dev/null; fi
 rm -f "$s"; exit $rc
 EOF
 cat > "$T/bin/sleep" <<'EOF'
@@ -53,7 +55,10 @@ import sys
 EOF
 cat > "$T/harness/ws-probe.py" <<'EOF'
 import json, sys
-open(sys.argv[3], 'w').write(json.dumps({'event_type': {'id': 'GraphStatistics', 'data': {'encoder_s': 0.009, 'bitrate_bps': 5e8, 'client_fps': 90.0}}}) + '\n')
+# 20 samples: 18 at 9 ms, 2 at 20 ms (median 9, p95 20, 10 % over the 11.1 ms budget)
+with open(sys.argv[3], 'w') as f:
+    for e in [0.009] * 18 + [0.020] * 2:
+        f.write(json.dumps({'event_type': {'id': 'GraphStatistics', 'data': {'encoder_s': e, 'bitrate_bps': 5e8, 'client_fps': 90.0}}}) + '\n')
 EOF
 : > "$T/harness/pc-alvr-manualip.ps1"
 echo : > "$T/pcps.sh"
@@ -71,6 +76,7 @@ chmod +x "$T/bin/"*
 cat > "$T/mk.py" <<'EOF'
 import json, sys
 json.dump({'session_settings': {'video': {
+    'encoder_config': {'nvenc': {'quality_preset': {'variant': 'P1'}, 'multi_pass': {'variant': 'QuarterResolution'}, 'split_encode_mode': {'variant': 'Auto'}}},
     'preferred_fps': 72.0, 'bitrate': {'mode': {'variant': 'Adaptive', 'ConstantMbps': 30}},
     'foveated_encoding': {'enabled': True, 'content': {'center_size_x': 0.4, 'center_size_y': 0.4, 'edge_ratio_x': 4.0,
                                                        'edge_ratio_y': 4.0, 'center_shift_x': 0.0, 'center_shift_y': 0.0}},
@@ -112,6 +118,31 @@ done
 t "grep '^drawable ' $T/overlay.args | grep -q -- '--fov-scale' && ! grep '^drawable ' $T/overlay.args | grep -q -- '--meta'" "drawable overlay keeps --fov-scale and takes no --meta"
 t "grep -q request_file $T/o1/p1/capture/capture.json" "capture was taken on request (capture.json trigger request_file) and pulled"
 t "! [ -e $T/data/Documents/diag/capture.request ]" "request file consumed by the (stub) client"
+
+echo "== encoder stress points: flag content, overlay skip, encoder keys, p95"
+NVK=video.encoder_config.nvenc
+printf 'st\t1.0\t1.0\t0.5,0.45,3,3,0,0\t500\t90\tflag=stress\t%s.quality_preset={"variant":"P4"}\t%s.multi_pass={"variant":"Disabled"}\t%s.split_encode_mode={"variant":"ForceTwo"}\n' "$NVK" "$NVK" "$NVK" > "$T/stress.tsv"
+printf 'sd\t1.0\t1.0\t0.5,0.45,3,3,0,0\t500\t90\tflag=stress,dump\n' >> "$T/stress.tsv"
+printf 'dd\t1.0\t1.0\t0.5,0.45,3,3,0,0\t500\t90\n' >> "$T/stress.tsv"
+rm -f "$T/overlay.args" "$T/pc/flag.history"
+run "$T/stress.tsv" "$T/o11" > "$T/o11.out" 2> "$T/o11.err"; rc=$?
+t "[ $rc = 0 ]" "stress run exits 0 (rc=$rc)"
+t "[ \"\$(tr '\n' ' ' < $T/pc/flag.history)\" = 'stress stress,dump dump ' ]" "toggle file content per point: stress, stress,dump, dump (default)"
+t "grep -q 'flag stress ' $T/o11/st/pc-flag.log && grep -q 'flag stress,dump ' $T/o11/sd/pc-flag.log" "flag calls name the content"
+t "! [ -e $T/pc/alvr-build/out/b1/alvr_streamer_windows/angle_chart.enable ]" "toggle restored (absent as before) after the stress run"
+t "cmp -s $SESSION $T/session.orig" "stress run: session restored"
+t "grep -q 'restored and verified' $T/o11/run.log" "stress run: restore verified in the log"
+t "grep -q '\[st\].*skipping' $T/o11/run.log" "stress-only point logs the overlay skip"
+t "! [ -e $T/o11/st/ERROR ] && ! [ -d $T/o11/st/dump ] && ! [ -e $T/o11/st/overlay/drawable.json ]" "stress-only point: no failure, no dump fetch, no overlay"
+t "! grep -q '$T/o11/st/' $T/overlay.args" "stress-only point: overlay tool never called for it"
+t "grep -q '$T/o11/sd/' $T/overlay.args && grep -q '$T/o11/dd/' $T/overlay.args" "stress,dump and dump points still run the overlays"
+for k in quality_preset='{"variant":"P4"}' multi_pass='{"variant":"Disabled"}' split_encode_mode='{"variant":"ForceTwo"}'; do
+  t "grep -qF 'set $NVK.$k' $T/o11/st/pc-apply.log && grep -qF '$NVK.$k' $T/o11/st/sets.txt" "encoder key reaches the session apply call: $k"
+done
+t "grep -q '^written' $T/o11/st/pc-apply.log" "encoder keys applied strictly to the stub session shape"
+t "grep '^st	' $T/o11.out | grep -q '	20.00	0.100\$'" "p95 (20 ms) and over-budget fraction (0.100) from the stub GraphStatistics"
+t "grep '^st	' $T/o11.out | grep -q '	9.00	'" "median encode ms unchanged"
+t "head -1 $T/o11.out | grep -q 'notes	encode_ms_p95	encode_over_budget\$'" "new summary columns are last"
 
 echo "== server dump without meta.json"
 rm -f "$T/overlay.args"
