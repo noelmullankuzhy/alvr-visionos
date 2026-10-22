@@ -82,6 +82,41 @@ class PcSessionTest(unittest.TestCase):
             ps.backup(self.root, self.build)
         self.assertIn('stale backup', str(cm.exception))
 
+    def with_nonce(self, nonce, fn, *args):
+        old = os.environ.get('FOVMATRIX_NONCE')
+        os.environ['FOVMATRIX_NONCE'] = nonce
+        try:
+            return fn(self.root, self.build, *args)
+        finally:
+            if old is None:
+                del os.environ['FOVMATRIX_NONCE']
+            else:
+                os.environ['FOVMATRIX_NONCE'] = old
+
+    def test_restore_only_restores_this_runs_backup(self):
+        self.with_nonce('run-A', ps.backup)
+        ps.apply(self.root, self.build, ['video.preferred_fps=90.0'])
+        out = self.with_nonce('run-B', ps.restore)   # another run: its backup is not ours
+        self.assertTrue(out.startswith('restore SKIP FOREIGN'), out)
+        self.assertEqual(self.live()['session_settings']['video']['preferred_fps'], 90.0)  # live untouched
+        self.assertTrue(os.path.exists(ps.paths(self.root, self.build)['orig']))             # backup untouched
+        self.assertTrue(self.with_nonce('run-A', ps.restore).startswith('restore OK'))
+        self.assertEqual(rd(self.session), self.orig_text)
+        self.assertFalse(os.path.exists(ps.paths(self.root, self.build)['nonce']))
+
+    def test_refused_stale_backup_keeps_its_owner(self):
+        self.with_nonce('run-A', ps.backup)
+        with self.assertRaises(SystemExit):
+            self.with_nonce('run-B', ps.backup)
+        self.assertEqual(rd(ps.paths(self.root, self.build)['nonce']).strip(), 'run-A')
+        self.assertTrue(self.with_nonce('run-B', ps.restore).startswith('restore SKIP FOREIGN'))
+
+    def test_manual_restore_without_nonce_restores_any_backup(self):
+        self.with_nonce('run-A', ps.backup)
+        ps.apply(self.root, self.build, ['video.preferred_fps=90.0'])
+        self.assertTrue(ps.restore(self.root, self.build).startswith('restore OK'))
+        self.assertEqual(rd(self.session), self.orig_text)
+
     def test_apply_without_backup_refused(self):
         with self.assertRaises(SystemExit):
             ps.apply(self.root, self.build, ['video.preferred_fps=90'])

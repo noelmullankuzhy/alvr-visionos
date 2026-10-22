@@ -29,7 +29,7 @@ def paths(root, build):
     w = os.path.join(root, 'fov-matrix')
     return {'live': os.path.join(d, 'session.json'), 'flag': os.path.join(d, 'angle_chart.enable'),
             'work': w, 'orig': os.path.join(w, 'session.orig.json'), 'sha': os.path.join(w, 'session.orig.sha256'),
-            'flagorig': os.path.join(w, 'flag.orig.json'), 'dumps': os.path.join(root, 'angle-chart')}
+            'flagorig': os.path.join(w, 'flag.orig.json'), 'nonce': os.path.join(w, 'session.orig.nonce'), 'dumps': os.path.join(root, 'angle-chart')}
 
 
 def backup(root, build):
@@ -40,6 +40,10 @@ def backup(root, build):
         raise SystemExit('backup FAILED: stale backup %s (sha %s) from an earlier run that did not restore; '
                          'run run-matrix.sh --restore first' % (p['orig'], rd(p['sha']).strip() if os.path.exists(p['sha']) else '?'))
     os.makedirs(p['work'], exist_ok=True)
+    # Per-run owner tag (FOVMATRIX_NONCE from run-matrix.sh), written before the backup file exists: restore with the
+    # same env only touches a backup this run created.
+    with open(p['nonce'], 'w') as f:
+        f.write(os.environ.get('FOVMATRIX_NONCE', '') + '\n')
     shutil.copyfile(p['live'], p['orig'])
     digest = sha(p['orig'])
     if digest != sha(p['live']):
@@ -81,6 +85,11 @@ def restore(root, build):
     p = paths(root, build)
     if not os.path.exists(p['orig']):
         return 'restore SKIP no backup (nothing was changed by this tool)'
+    ours = os.environ.get('FOVMATRIX_NONCE')
+    if ours:  # a run-matrix.sh run: never restore a backup another run (or a crashed one) left behind
+        theirs = rd(p['nonce']).strip() if os.path.exists(p['nonce']) else ''
+        if theirs != ours:
+            return 'restore SKIP FOREIGN backup %s (owner %r, this run %r): left untouched; run run-matrix.sh --restore' % (p['orig'], theirs, ours)
     want = rd(p['sha']).strip() if os.path.exists(p['sha']) else ''
     if sha(p['orig']) != want:
         raise SystemExit('restore FAILED: backup %s hash %s != recorded %s; backup kept' % (p['orig'], sha(p['orig']), want))
@@ -95,7 +104,7 @@ def restore(root, build):
                 f.write(flag['content'])
         elif os.path.exists(p['flag']):
             os.remove(p['flag'])
-    for k in ('orig', 'sha', 'flagorig'):
+    for k in ('orig', 'sha', 'flagorig', 'nonce'):
         if os.path.exists(p[k]):
             os.remove(p[k])
     return 'restore OK sha=%s' % got

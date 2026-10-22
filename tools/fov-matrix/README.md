@@ -31,7 +31,7 @@ frames -> settle -> write `Documents/diag/capture.request` into the simulator ap
 deletes it and captures the drawables it is presenting; `trigger.reason` = `request_file` in capture.json) -> server stats
 probe (ws, as e4) while waiting up to 20 s (`--capture-timeout`) for a new capture dir -> pull capture dir, screenshot, server
 dump (tar over base64) -> `fov-overlay.py` drawable + render/encoded per dump PNG -> stats (encode ms/bitrate from
-GraphStatistics, client fps/decode from ALVRSTATS) -> restore. The trap (installed before the first PC change, armed before the backup runs, restore exactly once) restores on error/Ctrl-C/SIGTERM/SIGHUP.
+GraphStatistics, client fps/decode from ALVRSTATS) -> restore. The trap (installed before the first PC change, armed before the backup runs, restore exactly once) restores on error/Ctrl-C/SIGTERM/SIGHUP. Every run tags its PC backup with a nonce (`session.orig.nonce`) and only restores a backup carrying its own nonce: a stale or foreign backup is left untouched (loud message, use `--restore`). The app's `capture.request` is cleared before each launch.
 Files per point: `sets.txt pc-*.sh/.log console.log events.jsonl stats.json screenshot.png capture/ dump/ overlay/ ERROR`.
 
 `summary.tsv`: name, verdict, median_deg, max_deg, extent_err_deg, centre_px_deg (measured/predicted), fps, bitrate_mbps,
@@ -57,7 +57,7 @@ sh tools/fov-matrix/test-runner-stubs.sh      # runner with stub ssh/xcrun: happ
    Needs Diagnostics on (`ALVR_DIAG=1` is set by the runner) and `captureDiagnosticFrames` (set by the runner). Without it
    the runner records a loud `capture:` error (screenshot kept) and skips the drawable overlay. Manual alternative:
    `ALVR_DIAG_CAPTURE_AFTER_MS=N` takes one automatic capture N ms after the first presented stream frame
-   (`trigger.reason` = `after_ms`).
+   (`trigger.reason` = `after_ms`; once per stream: re-armed when the stream stops).
 2. `fov-overlay.py` CLI: assumed `fov-overlay.py <mode> --capture-dir|--image ... --eye --fov-scale --render --foveation
    --out-png --out-json` (positional mode; `FOV_OVERLAY_MODE_ARG=--mode` switches). Drawable runs once without `--eye` with
    `--fov-scale` only. Summary extraction reads `verdict`, `median_abs_residual_deg`, `max_abs_residual_deg`,

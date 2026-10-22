@@ -17,7 +17,7 @@ for a in "$@"; do [ "$a" = -N ] && exec /bin/sleep 600; done
 s=$FAKE_PC/.ssh-script.$$; cat > "$s"
 FOVMATRIX_PC_ROOT=$FAKE_PC sh "$s"; rc=$?
 # Test hook: hold the runner inside the backup call (backup file written, runner not yet back) so a signal lands there.
-if [ -n "${HOLD_AFTER_BACKUP:-}" ] && grep -q '^python3 - backup' "$s"; then : > "$HOLD_AFTER_BACKUP"; /bin/sleep 3; fi
+if [ -n "${HOLD_AFTER_BACKUP:-}" ] && grep -q ' python3 - backup ' "$s"; then : > "$HOLD_AFTER_BACKUP"; /bin/sleep 3; fi
 rm -f "$s"; exit $rc
 EOF
 cat > "$T/bin/sleep" <<'EOF'
@@ -29,6 +29,7 @@ cat > "$T/bin/xcrun" <<'EOF'
 case "$2" in
   get_app_container) echo "$FAKE_DATA" ;;
   launch)
+    [ -f "$FAKE_DATA/Documents/diag/capture.request" ] && : > "$FAKE_DATA/leftover-seen"
     [ -n "${NOSTREAM:-}" ] || echo 'ALVRSTATS {"frames_decoded":5,"presented_fps":89.5,"decode_ms_mean":7.0}'
     d="$FAKE_PC/angle-chart/s-$$"; mkdir -p "$d"; : > "$d/chart_L.png"; : > "$d/encoder_input_L.png"; echo '{}' > "$d/meta.json"
     # The streaming client takes a capture only on request: the runner writes Documents/diag/capture.request, the client deletes it.
@@ -95,6 +96,13 @@ t "grep -q 'restored and verified' $T/o1/run.log" "restore verified in the log"
 t "grep -q request_file $T/o1/p1/capture/capture.json" "capture was taken on request (capture.json trigger request_file) and pulled"
 t "! [ -e $T/data/Documents/diag/capture.request ]" "request file consumed by the (stub) client"
 
+echo "== leftover capture.request from an earlier run"
+mkdir -p "$T/data/Documents/diag"; echo old > "$T/data/Documents/diag/capture.request"; rm -f "$T/data/leftover-seen"
+run "$T/ok.tsv" "$T/o9" > "$T/o9.out" 2> "$T/o9.err"; rc=$?
+t "[ $rc = 0 ]" "leftover request run exits 0 (rc=$rc)"
+t "! [ -e $T/data/leftover-seen ]" "leftover capture.request removed before the app launched"
+t "cmp -s $SESSION $T/session.orig" "leftover request run: session restored"
+
 echo "== failing point"
 run "$T/bad.tsv" "$T/o2" > "$T/o2.out" 2> "$T/o2.err"; rc=$?
 t "[ $rc = 1 ]" "exit 1 when a point has problems (rc=$rc)"
@@ -134,11 +142,51 @@ signal_case applied TERM "$T/o5" "$T/o5/p1/pc-apply.log" written 0
 echo "== SIGHUP after settings applied"
 signal_case hup HUP "$T/o6" "$T/o6/p1/pc-apply.log" written 0
 
+# A stale backup (earlier run that did not restore) differs from the live session and carries a valid hash, so a wrong
+# restore would pass its own integrity check and silently overwrite the live session.
+make_stale() {
+  mkdir -p "$T/pc/fov-matrix"
+  echo '{"stale": "backup from an earlier run"}' > "$T/pc/fov-matrix/session.orig.json"
+  cp "$T/pc/fov-matrix/session.orig.json" "$T/stale.copy"
+  python3 -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$T/stale.copy" > "$T/pc/fov-matrix/session.orig.sha256"
+}
+clear_stale() { rm -f "$T"/pc/fov-matrix/session.orig.*; }
+stale_untouched() {  # stale_untouched LABEL
+  t "cmp -s $T/pc/fov-matrix/session.orig.json $T/stale.copy" "$1: stale backup left untouched"
+  t "! cmp -s $SESSION $T/stale.copy" "$1: live session not overwritten by the stale backup"
+}
+
 echo "== stale backup refused"
-mkdir -p "$T/pc/fov-matrix"; cp "$SESSION" "$T/pc/fov-matrix/session.orig.json"
+make_stale
 run "$T/ok.tsv" "$T/o4" > "$T/o4.out" 2> "$T/o4.err"; rc=$?
 t "[ $rc = 4 ]" "stale backup aborts with exit 4 (rc=$rc)"
 t "grep -q 'stale backup' $T/o4.err" "message says stale backup"
-t "[ -e $T/pc/fov-matrix/session.orig.json ]" "stale backup left untouched"
+stale_untouched "stale"
+t "cmp -s $SESSION $T/session.orig" "stale: live session unchanged"
+clear_stale
+
+echo "== stale backup and no live session"
+make_stale
+rm -f "$SESSION"
+run "$T/ok.tsv" "$T/o7" > "$T/o7.out" 2> "$T/o7.err"; rc=$?
+t "[ $rc = 4 ]" "no live session + stale backup aborts with exit 4 (rc=$rc)"
+t "cmp -s $T/pc/fov-matrix/session.orig.json $T/stale.copy" "no-session: stale backup left untouched"
+t "! [ -e $SESSION ]" "no-session: stale backup not restored over the missing session"
+cp "$T/session.orig" "$SESSION"; clear_stale
+
+echo "== SIGTERM during a stale-refused backup"
+make_stale
+rm -f "$T/hold-stale"
+( export HOLD_AFTER_BACKUP="$T/hold-stale"; EXEC=exec NOSTREAM=1 run "$T/ok.tsv" "$T/o8" > "$T/o8.out" 2> "$T/o8.err" ) &
+RP=$!
+if wait_for "$T/hold-stale" ""; then check ok "stale-signal: runner held inside the refused backup call"; else check no "stale-signal: runner never reached the backup call"; fi
+if kill -TERM "$RP" 2>/dev/null; then check ok "stale-signal: SIGTERM delivered"; else check no "stale-signal: SIGTERM not delivered"; fi
+wait $RP
+stale_untouched "stale-signal"
+t "cmp -s $SESSION $T/session.orig" "stale-signal: live session unchanged"
+clear_stale
+
+echo "== a finished run leaves no backup files (normal and failing points)"
+t "! [ -e $T/pc/fov-matrix/session.orig.nonce ] && ! [ -e $T/pc/fov-matrix/session.orig.json ]" "no backup or nonce sidecar left after the earlier runs"
 
 [ "$FAILS" = 0 ] && echo "ALL PASS" || { echo "$FAILS FAILED"; exit 1; }

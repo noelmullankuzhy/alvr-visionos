@@ -86,6 +86,8 @@ xo() {  # xo LOGFILE cmd...  : stdout+stderr to LOGFILE
   "$@" > "$f" 2>&1
 }
 
+# Owner tag of this run's PC backup (pc-session.py checks it before any restore). Empty for --restore: restores whatever is there.
+NONCE=; [ "$RESTORE_ONLY" = 1 ] || NONCE="$$-$(date +%s)"
 TP=; PP=; APP_PID=; HOLD_REPORT=; BACKED_UP=0; STARTED=0; SESSION_SHA=; FAILED=0; DATA=
 [ "$DRY" = 1 ] && : > "$OUT/plan.txt"
 
@@ -95,7 +97,7 @@ mk_pc() {  # mk_pc OUTFILE action args... : a POSIX sh script for `ssh WIN wsl -
     if [ -n "${PC_SETS:-}" ]; then
       echo "mkdir -p $PCW"; echo "cat > $PCW/sets.txt <<'SETS'"; cat "$PC_SETS"; echo 'SETS'
     fi
-    echo "python3 - $* <<'PY'"; cat "$HERE/pc-session.py"; echo 'PY'
+    echo "FOVMATRIX_NONCE=$NONCE python3 - $* <<'PY'"; cat "$HERE/pc-session.py"; echo 'PY'
   } > "$o"
 }
 pcrun() {  # pcrun SCRIPT LOG
@@ -175,6 +177,8 @@ cleanup() {
       if [ -n "$SESSION_SHA" ] && [ "$got" != "$SESSION_SHA" ]; then
         echo "run-matrix: SESSION HASH MISMATCH after restore: backed up $SESSION_SHA, restored $got" >&2; rc=5
       else log "PC session restored and verified ($got)"; fi
+    elif grep -q '^restore SKIP FOREIGN' "$OUT/pc-restore.log" 2>/dev/null; then
+      echo "run-matrix: a backup from another run is on the PC and was left untouched (not restored): $(grep '^restore SKIP FOREIGN' "$OUT/pc-restore.log" | head -1). Check $PCW, then run --restore." >&2
     elif grep -q '^restore SKIP' "$OUT/pc-restore.log" 2>/dev/null; then
       log "PC session: nothing to restore"
     else
@@ -226,11 +230,13 @@ run_point() {
     DATA='<app-data-container>'
     plan "+ DATA=\$(xcrun simctl get_app_container $SIM $BID data)"
     plan "+ $FM merge-client \$DATA/Documents/globalsettings.data '$CLIENT_JSON'"
+    plan "+ rm -f \$DATA/Documents/diag/capture.request   # no leftover request from an earlier run"
     plan "+ ls \$DATA/Documents/diag/captures > $PD/captures.before"
   else
     DATA=$(xcrun simctl get_app_container "$SIM" "$BID" data) || { fail_hard "client: get_app_container failed (app not installed? bundle id $BID)"; return 1; }
     mkdir -p "$DATA/Documents"
     $FM merge-client "$DATA/Documents/globalsettings.data" "$CLIENT_JSON" > "$PD/client-settings.log" 2>&1 || { fail_hard "client settings: $(cat "$PD/client-settings.log")"; return 1; }
+    rm -f "$DATA/Documents/diag/capture.request"   # a leftover would capture on the first stream frame, before settle
     ls "$DATA/Documents/diag/captures" > "$PD/captures.before" 2>/dev/null || : > "$PD/captures.before"
   fi
   if [ "$DRY" = 1 ]; then
@@ -341,12 +347,10 @@ if [ "$RESTORE_ONLY" = 1 ]; then log "restore only (build $BUILD)"; exit 0; fi
 log "matrix $MODE: $(wc -l < "$POINTS" | tr -d ' ') lines in $POINTS, build $BUILD, out $OUT"
 [ "$DRY" = 1 ] && plan "### backup PC session (hash recorded; refuses if a stale backup exists)"
 # Armed BEFORE the backup runs: a signal during the backup must still restore (restore is a no-op without a backup file).
-BACKED_UP=1
+BACKED_UP=1   # restore checks the run nonce on the PC: a refused/foreign (stale) backup is never restored by this run
 PC_SETS= pc_action "$OUT" backup backup "$BUILD"
 if [ "$DRY" != 1 ]; then
   grep -q '^backup sha=' "$OUT/pc-backup.log" || {
-    # A refused backup (stale file from an earlier run) stays untouched: never restore it from this run.
-    grep -q 'stale backup' "$OUT/pc-backup.log" && BACKED_UP=0
     echo "run-matrix: PC session backup failed (nothing changed): $(tail -2 "$OUT/pc-backup.log")" >&2; exit 4; }
   SESSION_SHA=$(sed -n 's/^backup sha=\([0-9a-f]*\).*/\1/p' "$OUT/pc-backup.log" | head -1)
   echo "$SESSION_SHA" > "$OUT/session.sha256"
