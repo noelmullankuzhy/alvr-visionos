@@ -536,5 +536,136 @@ DIAG diag t_ms=31 file_recovered=true dropped_lines=7
             subprocess.check_call([sys.executable, str(SCRIPT), '--help'], stdout=subprocess.DEVNULL)
 
 
+def raster(ppd, cpd, offset=0.3, size_deg=1.5, mirror=False):
+    """A square-wave patch rendered at pixel centres, as the rasteriser does: one bar per cycle from the patch's low
+    edge (offset px into the first pixel), 255 white bars on 0 black."""
+    length = size_deg * ppd
+    out = []
+    for i in range(int(round(offset + length))):
+        d = i + 0.5 - offset
+        out.append(255 if 0 <= d < length and (d * cpd / ppd) % 1 < 0.5 else 0)
+    return out[::-1] if mirror else out
+
+
+class ChartCaptureCounterTests(unittest.TestCase):
+    def classify(self, profile, cpd, size_deg=1.5):
+        result = report.count_bars(profile, len(profile) / (size_deg * cpd))
+        return result, report.classify_bars(result, report.expected_bars(cpd))
+
+    def test_square_waves_count_exactly_within_physical_nyquist(self):
+        for ppd in (40, 35, 34.5, 30, 20):
+            for cpd in (8, 10, 12, 14, 17, 20):
+                if cpd > ppd / 2:
+                    continue
+                for offset in (0.0, 0.3, 0.49):
+                    for mirror in (False, True):
+                        result, verdict = self.classify(raster(ppd, cpd, offset, mirror=mirror), cpd)
+                        label = 'ppd {} cpd {} offset {} mirror {}'.format(ppd, cpd, offset, mirror)
+                        self.assertEqual(result['count'], report.expected_bars(cpd), label)
+                        self.assertLessEqual(result['bar_spread_px'], 1, label)
+                        self.assertEqual(verdict, 'correct', label)
+        self.assertEqual([report.expected_bars(c) for c in (8, 10, 12, 14, 17, 20)], [12, 15, 18, 21, 26, 30])
+
+    def test_uneven_bars_with_the_right_count(self):
+        profile = []
+        for k in range(12):
+            bar = 1 if k % 2 == 0 else 4
+            profile += [255] * bar + [0] * (5 - bar)
+        result, verdict = self.classify(profile, 8)
+        self.assertEqual(result['count'], 12)
+        self.assertEqual(result['bar_spread_px'], 3)
+        self.assertEqual(verdict, 'uneven')
+
+    def test_aliased_beats(self):
+        for ppd, cpd in ((30, 20), (20, 17), (25, 14)):
+            result, verdict = self.classify(raster(ppd, cpd), cpd)
+            self.assertNotEqual(result['count'], report.expected_bars(cpd), (ppd, cpd))
+            self.assertEqual(verdict, 'aliased', (ppd, cpd, result))
+
+    def test_missing_bars_merge_to_grey(self):
+        full = raster(40, 20, 0.0)
+        half = full[:len(full) // 2] + [128] * (len(full) - len(full) // 2)
+        result, verdict = self.classify(half, 20)
+        self.assertEqual(result['count'], 15)
+        self.assertEqual(verdict, 'missing')
+        result, verdict = self.classify([200] * 60, 8)
+        self.assertEqual((result['count'], verdict), (0, 'missing'))
+
+    @staticmethod
+    def capture_dir(root):
+        """One left-eye capture at rq 1.000: an 8 cpd V patch drawn at 40 px/deg (60 px) and a 20 cpd H patch at 30 px/deg
+        (45 px: beats, aliased); a 12 cpd V patch at 40 px/deg drawn with every other bar merged (count low, flat)."""
+        vc_spec = importlib.util.spec_from_file_location('verify_capture', SCRIPT.with_name('verify-capture.py'))
+        vc = importlib.util.module_from_spec(vc_spec)
+        vc_spec.loader.exec_module(vc)
+        width, height = 240, 100
+        pix = bytearray([0, 0, 0, 255] * width * height)
+
+        def put(x, y, v):
+            pix[(y * width + x) * 4:(y * width + x) * 4 + 3] = bytes([v, v, v])
+        v8 = raster(40, 8, 0.0)
+        for y in range(20, 80):
+            for i, v in enumerate(v8):
+                put(10 + i, y, v)
+        h20 = raster(30, 20, 0.0)
+        for i, v in enumerate(h20):
+            for x in range(100, 130):
+                put(x, 20 + i, v)
+        for y in range(20, 80):
+            for i in range(60):
+                put(150 + i, y, 128)
+        capture = root / 'captures' / 'chart-20261022T100000Z-rq1.00-fovon'
+        capture.mkdir(parents=True)
+        vc.write_png(capture / 'drawable-0-texture-0-slice-0.png', width, height, pix)
+
+        def patch(pos, cpd, orient, rect, nyq_l, nyq_p):
+            return dict(position=pos, cpd=cpd, orientation=orient, temporal_deg=0.0, up_deg=1.0, expected_bars=report.expected_bars(cpd),
+                        logical_rect=[r * 2 for r in rect], physical_rect=rect, nyquist_logical_cpd=nyq_l, nyquist_physical_cpd=nyq_p)
+        meta = dict(trigger=dict(reason='chartcap'), t_ms=500,
+                    slices=[dict(eye='L', view=0, slice=0, texture_index=0, png='drawable-0-texture-0-slice-0.png', width=width, height=height)],
+                    chart_capture=dict(mode='auto', rq='1.000', rq_set='1.000', rq_confirmed=True, fov='on', settle_frames=30, patch_deg=1.5,
+                                       views=[dict(eye='L', view=0, slice=0, texture_index=0, tangents=[1.7321, 1, 1.1918, 1],
+                                                   viewport=[0, 0, 6261, 5023], screen=[6261, 5023], physical=[2432, 2368], mapped=True,
+                                                   patches=[patch('axis', 8, 'V', [10.0, 20.0, 70.0, 80.0], 20.0, 20.0),
+                                                            patch('axis', 20, 'H', [100.0, 20.0, 130.0, 65.0], 20.0, 15.0),
+                                                            patch('axis', 12, 'V', [150.0, 20.0, 210.0, 80.0], 20.0, 20.0)])]))
+        (capture / 'capture.json').write_text(json.dumps(meta))
+        (root / 'diag-a.log').write_text(
+            'DIAG grating t_ms=1 chart=on mode=auto foveation=on\n'
+            'DIAG rrm t_ms=400 phase=quality s=0 fix=none fix_x_deg=0 fix_y_deg=0 eye=L drawable=0 view=0 layer=0 rq=1.000 fov=on '
+            'map=ok screen=6261x5023 physical=2432x2368 viewport=0,0,6261,5023 h_rate=0:1 h_ppd=-20:34.50,0:40.00,20:34.50 '
+            'v_rate=0:1 v_ppd=0:40.00 h_peak_deg=0.0 v_peak_deg=0.0 map_hash=a\n'
+            'DIAG chartcap t_ms=500 eye=L rq=1.000 rq_set=1.000 confirmed=yes fov=on dir=chart-20261022T100000Z-rq1.00-fovon '
+            'slice=0 physical=2432x2368 patches=24\n'
+            'DIAG chartcap t_ms=900 step=done captures=1 failed=0 fov=on fov_off=unavailable restore=0.750\n')
+
+    def test_capture_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.capture_dir(root)
+            records, _, _ = report.read_logs(root)
+            patches = report.chart_capture_patches(root)
+            summary = report.chart_capture_summary(patches, records)
+            out = report.generate(root)
+        key = {(p['orient'], p['cpd']): p for p in patches}
+        self.assertEqual((key[('V', 8)]['count'], key[('V', 8)]['class']), (12, 'correct'))
+        self.assertEqual(key[('H', 20)]['class'], 'aliased')
+        self.assertEqual((key[('V', 12)]['count'], key[('V', 12)]['class']), (0, 'missing'))
+        rows = {r['orient']: r for r in summary}
+        self.assertEqual(rows['V']['finest_correct_cpd'], 8)
+        self.assertEqual(rows['V']['finest_count_correct_cpd'], 8)
+        self.assertEqual(rows['V']['nyquist_logical_cpd'], '20.00')
+        self.assertEqual(rows['V']['nyquist_physical_cpd'], '20.00')   # nearest rrm: h_ppd 40 on axis
+        self.assertIsNone(rows['H']['finest_correct_cpd'])
+        self.assertEqual(rows['H']['nyquist_physical_capture_cpd'], '15.00')
+        # Exactly one pixel per cycle: every pixel centre at the same phase, the patch renders flat.
+        result = report.count_bars(raster(20, 20, 0.0), 1.0)
+        self.assertEqual(report.classify_bars(result, 30), 'missing')
+        self.assertEqual(rows['V']['grid_verdict'], 'below grid Nyquist')
+        self.assertIn('Auto capture', out)
+        self.assertIn('| L | 1.000 | on | axis | V | 8 | 8 | 20.00 | 20.00 | 20.00 | below grid Nyquist |', out)
+        self.assertIn('| L | 1.000 | on | axis | V | 8 | 12 | 12 |', out)
+
+
 if __name__ == '__main__':
     unittest.main()
