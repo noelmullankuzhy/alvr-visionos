@@ -11,6 +11,7 @@ private final class BoundaryDotsScene {
     private var session = BoundaryDotsSession()
     private var dotEntities: [ModelEntity] = []
     private var pinches = BoundaryDotsPinches<SpatialEventCollection.Event.ID>()
+    private var drag = BoundaryDotsDrag<SpatialEventCollection.Event.ID>()
     private let cursorEntity = ModelEntity()
     private let statusEntity = ModelEntity()
     private var eyeEntities: [BoundaryDotsEye: ModelEntity] = [:]
@@ -142,12 +143,15 @@ private final class BoundaryDotsScene {
 
     /// Hand and elapsed time come from the spatial events, including events on
     /// empty black backdrop. Only a short right pinch consults the initial target.
-    func spatialEvent(_ event: SpatialEventCollection.Event, target: Entity) -> Bool {
+    /// `handPosition` is the pinch point (inputDevicePose) in scene metres; the
+    /// left hand drags the cursor along its ray, the right hand selects/confirms.
+    func spatialEvent(_ event: SpatialEventCollection.Event, target: Entity, handPosition: SIMD3<Float>?) -> Bool {
         guard !finished, poseAvailable, root.isEnabled,
               EntryEnterPolicy.boundaryDotsVisible(diagnostics: Diag.isOn,
                   connected: EventHandler.shared.connectionState == .connected,
                   streaming: EventHandler.shared.streamingActive) else {
             pinches = BoundaryDotsPinches()
+            drag = BoundaryDotsDrag()
             return false
         }
         guard event.kind == .indirectPinch else { return false }
@@ -164,14 +168,27 @@ private final class BoundaryDotsScene {
         case .cancelled: phase = .cancelled
         @unknown default: return false
         }
+        if let handPosition {
+            let rotation = simd_quatd(vector: SIMD4<Double>(root.orientation.vector))
+            switch drag.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
+                               headRotation: rotation, cursor: session.cursor) {
+            case .move(let dot)?:
+                if session.place(dot) { refresh() }
+            case .release(let from, let to)?:
+                if session.place(to) {
+                    Diag.log("dots", session.markFields(to, action: to.eccDeg > from.eccDeg ? "step_out" : "step_in", via: "step"))
+                    refresh()
+                }
+            case nil:
+                break
+            }
+        }
         guard let pinch = pinches.update(id: event.id, hand: hand, phase: phase,
                                         timestamp: event.timestamp,
                                         target: (event.targetedEntity ?? target).name) else { return false }
-        if pinch.hand == .left {
-            if let dot = session.step(outward: !pinch.held) {
-                Diag.log("dots", session.markFields(dot, action: pinch.held ? "step_in" : "step_out", via: "step"))
-            }
-        } else if pinch.held {
+        // Left pinches only drag (above); a quick left pinch is reserved.
+        if pinch.hand == .left { return false }
+        if pinch.held {
             if let dot = session.confirm() {
                 Diag.log("dots", session.markFields(dot, action: "confirm", via: "step"))
             }
@@ -236,6 +253,12 @@ struct BoundaryDotsView: View {
         }
     }
 
+    private func handPosition(_ event: SpatialEventCollection.Event,
+                              _ value: EntityTargetValue<SpatialEventCollection>) -> SIMD3<Float>? {
+        guard let pose = event.inputDevicePose else { return nil }
+        return value.convert(pose.pose3D.position, from: .local, to: .scene)
+    }
+
     var body: some View {
         RealityView { content in
             if Diag.isOn, model.offlineDiagnostics.space == .boundaryDots {
@@ -245,12 +268,12 @@ struct BoundaryDotsView: View {
         .gesture(SpatialEventGesture(coordinateSpace: .local).targetedToAnyEntity()
             .onChanged { value in
                 for event in value.gestureValue {
-                    if scene.spatialEvent(event, target: value.entity) { dismiss() }
+                    if scene.spatialEvent(event, target: value.entity, handPosition: handPosition(event, value)) { dismiss() }
                 }
             }
             .onEnded { value in
                 for event in value.gestureValue {
-                    if scene.spatialEvent(event, target: value.entity) { dismiss() }
+                    if scene.spatialEvent(event, target: value.entity, handPosition: handPosition(event, value)) { dismiss() }
                 }
             })
         .onDisappear {
