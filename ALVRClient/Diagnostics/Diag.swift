@@ -453,6 +453,11 @@ final class DiagCaptureRequests {
         filePending = true
     }
 
+    var streamingPending: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return filePending
+    }
+
     func take(nowMs: Int, idle: Bool, streamFrame: Bool = false) -> Request? {
         lock.lock(); defer { lock.unlock() }
         guard count < 24 else { return nil }
@@ -482,6 +487,36 @@ final class DiagCaptureRequests {
         }
         count += 1
         return Request(number: count, reason: mark == nil ? "start_timer" : "corner_mark", eye: mark?.0, spoke: mark?.1, pct: mark?.2, positionDegrees: mark?.3)
+    }
+}
+
+// One capture in flight: next() hands out a request only when the previous capture has finished writing. A request that
+// arrives meanwhile stays pending (not dropped) and is reported as .busy so the session can log why nothing happened.
+final class DiagCaptureGate {
+    enum Outcome {
+        case none
+        case request(DiagCaptureRequests.Request)
+        case busy(pendingStreaming: Bool)
+        case waiting(String)
+    }
+    let requests: DiagCaptureRequests
+    private let lock = NSLock()
+    private var busy = false
+    init(requests: DiagCaptureRequests) { self.requests = requests }
+
+    func next(nowMs: Int, idle: Bool, streamFrame: Bool) -> Outcome {
+        lock.lock(); defer { lock.unlock() }
+        if busy { return .busy(pendingStreaming: requests.streamingPending) }
+        if let request = requests.take(nowMs: nowMs, idle: idle, streamFrame: streamFrame) {
+            busy = true
+            return .request(request)
+        }
+        if !idle && !streamFrame && requests.streamingPending { return .waiting("no_stream_frame") }
+        return .none
+    }
+
+    func finished() {
+        lock.lock(); busy = false; lock.unlock()
     }
 }
 

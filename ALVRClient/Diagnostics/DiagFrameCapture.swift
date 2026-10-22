@@ -87,7 +87,9 @@ enum DiagFrameCapture {
         }
         blit.endEncoding()
         let encodedMs = (ProcessInfo.processInfo.systemUptime - start) * 1000
+        let reason = (metadata["trigger"] as? [String: Any])?["reason"] as? String ?? "unknown"
         buffer.addCompletedHandler { command in
+            let gpuDoneMs = (ProcessInfo.processInfo.systemUptime - start) * 1000
             queue.async {
                 guard command.status == .completed else {
                     Diag.log("capture", ["error": command.error?.localizedDescription ?? "command_buffer_failed"])
@@ -102,19 +104,24 @@ enum DiagFrameCapture {
                         for slice in 0..<read.slices {
                             let pointer = read.buffer.contents().advanced(by: slice * read.imageBytes)
                             var rgba = [UInt8](repeating: 0, count: texture.width * texture.height * 4)
-                            for y in 0..<texture.height {
-                                let row = pointer.advanced(by: y * read.rowBytes)
-                                for x in 0..<texture.width {
-                                    for c in 0..<4 {
-                                        let value: UInt8
-                                        if texture.pixelFormat == .rgba16Float {
-                                            let f = Float(Float16(bitPattern: row.assumingMemoryBound(to: UInt16.self)[x * 4 + c]))
-                                            value = UInt8((min(1, max(0, f.isNaN ? 0 : f)) * 255).rounded())
-                                        } else {
-                                            let channel = texture.pixelFormat == .bgra8Unorm && c < 3 ? 2 - c : c
-                                            value = row.assumingMemoryBound(to: UInt8.self)[x * 4 + channel]
+                            let w = texture.width, half = texture.pixelFormat == .rgba16Float, bgra = texture.pixelFormat == .bgra8Unorm
+                            rgba.withUnsafeMutableBufferPointer { out in
+                                for y in 0..<texture.height {
+                                    let row = pointer.advanced(by: y * read.rowBytes)
+                                    let base = y * w * 4
+                                    if half {
+                                        let src = row.assumingMemoryBound(to: UInt16.self)
+                                        for i in 0..<(w * 4) {
+                                            let f = Float(Float16(bitPattern: src[i]))
+                                            out[base + i] = UInt8((min(1, max(0, f.isNaN ? 0 : f)) * 255).rounded())
                                         }
-                                        rgba[(y * texture.width + x) * 4 + c] = value
+                                    } else {
+                                        let src = row.assumingMemoryBound(to: UInt8.self)
+                                        for x in 0..<w {
+                                            let i = x * 4
+                                            out[base + i] = src[i + (bgra ? 2 : 0)]; out[base + i + 1] = src[i + 1]
+                                            out[base + i + 2] = src[i + (bgra ? 0 : 2)]; out[base + i + 3] = src[i + 3]
+                                        }
                                     }
                                 }
                             }
@@ -142,8 +149,9 @@ enum DiagFrameCapture {
                     let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
                     try data.write(to: directory.appendingPathComponent("capture.json"), options: .atomic)
                     bytes += data.count
-                    Diag.log("capture", tMs: tMs, [ "dir": directory.lastPathComponent, "slices": slices.count, "bytes": bytes,
-                                         "ms_encode_blit": encodedMs, "ms_to_write": (ProcessInfo.processInfo.systemUptime - start) * 1000])
+                    Diag.log("capture", tMs: tMs, [ "dir": directory.lastPathComponent, "reason": reason, "slices": slices.count, "bytes": bytes,
+                                         "ms_encode_blit": encodedMs, "ms_gpu_done": gpuDoneMs, "ms_to_write": (ProcessInfo.processInfo.systemUptime - start) * 1000])
+                    Diag.log("capture_trigger", ["step": "written", "reason": reason, "dir": directory.lastPathComponent])
                     completion(true)
                 } catch {
                     Diag.log("capture", ["error": error.localizedDescription, "dir": directory.lastPathComponent])
@@ -158,8 +166,8 @@ enum DiagFrameCapture {
 import CompositorServices
 
 final class DiagFrameCaptureSession {
-    private let lock = NSLock()
-    private var busy = false
+    private let gate = DiagCaptureGate(requests: DiagCaptureRequests.shared)
+    private var lastWait: String?   // render thread only: log each wait reason once, not per frame
     // Request-file poll: a utility timer, never the render thread. The session exists only with diagnostics on.
     private let requestFile: DiagCaptureRequestFile
     private let pollQueue = DispatchQueue(label: "uk.lumenio.alvr.capture.request", qos: .utility)
@@ -172,10 +180,15 @@ final class DiagFrameCaptureSession {
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
         timer.schedule(deadline: .now() + 0.25, repeating: 0.25, leeway: .milliseconds(50))
         timer.setEventHandler { [requestFile] in
-            if requestFile.poll(nowMs: Diag.monotonicMs()) { DiagCaptureRequests.shared.requestStreaming() }
+            if requestFile.poll(nowMs: Diag.monotonicMs()) {
+                DiagCaptureRequests.shared.requestStreaming()
+                Diag.log("capture_trigger", ["step": "request_seen", "source": "request_file", "file": DiagCaptureRequestFile.name])
+            }
         }
         timer.resume()
         pollTimer = timer
+        Diag.log("capture_trigger", ["step": "session_started", "dir": requestFile.url.deletingLastPathComponent().path,
+                                     "after_ms": DiagCaptureRequestFile.afterMs(environment: ProcessInfo.processInfo.environment).map(String.init) ?? "off"])
     }
     deinit {
         pollTimer?.cancel()
@@ -186,10 +199,20 @@ final class DiagFrameCaptureSession {
     // `streamFrame`: stream content was composited into these drawables this frame (captures them as presented).
     func encode(buffer: MTLCommandBuffer, drawables: [LayerRenderer.Drawable], idle: Bool, streamFrame: Bool = false, chart: CornerChartRenderer?) {
         DiagCaptureRequests.shared.setAcceptsMarks(idle)
-        lock.lock()
-        guard !busy, let request = DiagCaptureRequests.shared.take(nowMs: Diag.monotonicMs(), idle: idle, streamFrame: streamFrame) else { lock.unlock(); return }
-        busy = true
-        lock.unlock()
+        let request: DiagCaptureRequests.Request
+        switch gate.next(nowMs: Diag.monotonicMs(), idle: idle, streamFrame: streamFrame) {
+        case .none:
+            lastWait = nil; return
+        case .busy(let pending):
+            if pending, lastWait != "busy" { lastWait = "busy"; Diag.log("capture_trigger", ["step": "waiting", "why": "previous_capture_in_flight"]) }
+            return
+        case .waiting(let why):
+            if lastWait != why { lastWait = why; Diag.log("capture_trigger", ["step": "waiting", "why": why]) }
+            return
+        case .request(let taken):
+            lastWait = nil; request = taken
+        }
+        Diag.log("capture_trigger", ["step": "request_taken", "reason": request.reason, "number": request.number, "idle": idle, "stream_frame": streamFrame])
         let targets = drawables.enumerated().flatMap { index, drawable in
             drawable.colorTextures.enumerated().map { textureIndex, texture in
                 let views: [[String: Any]] = drawable.views.enumerated().compactMap { viewIndex, view in
@@ -212,9 +235,11 @@ final class DiagFrameCaptureSession {
                                      "eye": request.eye as Any? ?? NSNull(), "pct": request.pct as Any? ?? NSNull(),
                                      "pos_deg": request.positionDegrees as Any? ?? NSNull()]
         DiagFrameCapture.submit(buffer: buffer, targets: targets, directory: directory,
-                                metadata: ["corner_chart": chartState, "trigger": trigger]) { [self] _ in
-            lock.lock(); busy = false; lock.unlock()
+                                metadata: ["corner_chart": chartState, "trigger": trigger]) { [gate] ok in
+            if !ok { Diag.log("capture_trigger", ["step": "skipped", "reason": request.reason, "why": "capture_failed_see_capture_error"]) }
+            gate.finished()
         }
+        Diag.log("capture_trigger", ["step": "submitted", "reason": request.reason, "dir": directory.lastPathComponent, "targets": targets.count])
     }
 }
 #endif

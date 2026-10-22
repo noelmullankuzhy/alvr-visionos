@@ -96,6 +96,28 @@ private final class FakeFS {
         for i in 0..<40 { cap.requestStreaming(); if cap.take(nowMs: i, idle: false, streamFrame: true) != nil { taken += 1 } }
         expectEqual(taken, 24, "session cap covers streaming captures")
 
+        // Live failure (chart-matrix-20261022 m3): an idle start_timer capture was still being written (9.9 s on the simulator)
+        // when the request file arrived. The request must wait, not be dropped, and be taken on the first stream frame after.
+        let gate = DiagCaptureGate(requests: DiagCaptureRequests())
+        _ = gate.next(nowMs: 0, idle: true, streamFrame: false)
+        guard case .request(let idleCapture) = gate.next(nowMs: 3000, idle: true, streamFrame: false) else { fatalError("idle timer") }
+        expectEqual(idleCapture.reason, "start_timer", "idle capture starts the in-flight write")
+        gate.requests.requestStreaming()
+        for i in 0..<5 {
+            guard case .busy(let pending) = gate.next(nowMs: 4000 + i * 16, idle: false, streamFrame: true) else { fatalError("busy") }
+            expect(pending, "busy while the idle capture is written, streaming request pending")
+        }
+        gate.finished()
+        guard case .request(let streamed) = gate.next(nowMs: 14_000, idle: false, streamFrame: true) else { fatalError("stream request") }
+        expectEqual(streamed.reason, "request_file", "request taken on the first stream frame after the write finished")
+        gate.finished()
+        guard case .none = gate.next(nowMs: 14_100, idle: false, streamFrame: true) else { fatalError("none") }
+        expect(!gate.requests.streamingPending, "request consumed")
+        gate.requests.requestStreaming()
+        expect(gate.requests.streamingPending, "pending reported")
+        guard case .waiting(let why) = gate.next(nowMs: 14_200, idle: false, streamFrame: false) else { fatalError("waiting") }
+        expectEqual(why, "no_stream_frame", "pending request on a frame without stream content says why it waits")
+
         // Diag off: DiagCaptureRequests is never configured or fed, so streaming frames never capture.
         let untouched = DiagCaptureRequests(acceptsMarks: false)
         for i in 0..<5 { expect(untouched.take(nowMs: i * 1000, idle: false, streamFrame: true) == nil, "unconfigured: never captures") }
