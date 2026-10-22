@@ -14,8 +14,9 @@ SECTIONS = (
     'M5 drawable / rasterization maps and render-quality sweep',
     'M6 cadence', 'M9 thermal / memory / GPU', 'M2 EDR ramp / thresholds',
     'M3 PQ player', 'M7 decode', 'M8 network', 'Corner chart',
-    'Eye badges and Diag file health', 'Boundary dots',
+    'Eye badges and Diag file health', 'Boundary dots', 'Resolution measurement',
 )
+RRM_DEGREES = ('-40', '-30', '-20', '-10', '-5', '0', '5', '10', '20', '30', '40')
 TOKEN = re.compile(r'([A-Za-z0-9_.]+)=("(?:[^"\\\x00-\x1f]|\\["\\nrt])*"|[^\s"=]+)(?=\s|$)')
 HEADER = re.compile(r'DIAG ([A-Za-z0-9_.]+) t_ms=([0-9]+)(?=\s|$)')
 NO = 'no data'
@@ -552,6 +553,217 @@ def dots_report(records):
     return lines
 
 
+def deg_values(text):
+    """'-40:19.60,0:40.00' -> {'-40': '19.60', '0': '40.00'} (logged text kept as is)."""
+    values = {}
+    for pair in (text or '').split(','):
+        parts = pair.split(':')
+        if len(parts) == 2 and number(parts[0]) is not None:
+            values['{:g}'.format(number(parts[0]))] = parts[1]
+    return values
+
+
+def rrm_profiles(records):
+    """Rendered physical px/deg per eye, render quality and foveation: the last centre-fixation sweep sample,
+    else the last quality-step sample. One row per line through the eye axis (h: + right, v: + up)."""
+    chosen = {}
+    for record in records:
+        f = record['fields']
+        if record['topic'] != 'rrm' or f.get('eye') not in ('L', 'R'):
+            continue
+        key = (f.get('eye'), f.get('rq'), f.get('fov'))
+        centre = f.get('phase') == 'sweep' and f.get('fix') == 'centre'
+        if centre or key not in chosen or not chosen[key][0]:
+            chosen[key] = (centre, record)
+    rows = []
+    for key in sorted(chosen, key=lambda k: tuple(str(v) for v in k)):
+        record = chosen[key][1]
+        f = record['fields']
+        for line in ('h', 'v'):
+            row = dict(eye=f.get('eye'), rq=f.get('rq'), fov=f.get('fov'), line=line, phase=f.get('phase'),
+                       fix=f.get('fix'), map=f.get('map'), screen=f.get('screen'), physical=f.get('physical'),
+                       peak_deg=f.get(line + '_peak_deg'), source=record['source'])
+            row.update(deg_values(f.get(line + '_ppd')))
+            rows.append(row)
+    return rows
+
+
+def rrm_gaze(records):
+    """Per eye and 20 s sweep: does the rate map follow the fixation dot?
+
+    fixed: one map hash and peaks within 1 degree across fixations. follows gaze: the horizontal peak moves
+    at least 5 degrees towards left20 / right20 and the vertical one towards up15 / down15 (each pair logged).
+    Otherwise: changes, not with gaze. Fewer than two fixations, or no rate map: no data.
+    """
+    runs, current = [], {}
+    for record in records:
+        f = record['fields']
+        if record['topic'] == 'm1':
+            current = {}
+        if record['topic'] != 'rrm' or f.get('phase') != 'sweep' or f.get('eye') not in ('L', 'R'):
+            continue
+        eye, second = f['eye'], number(f.get('s'))
+        run = current.get(eye)
+        if run is None or second is None or second <= run['last']:
+            run = dict(eye=eye, rq=f.get('rq'), fov=f.get('fov'), samples=[], last=-1, source=record['source'])
+            current[eye] = run
+            runs.append(run)
+        run['last'] = second if second is not None else run['last']
+        run['samples'].append(record)
+    rows = []
+    for run in runs:
+        groups = defaultdict(list)
+        for record in run['samples']:
+            groups[record['fields'].get('fix')].append(record['fields'])
+        peaks = {}
+        for name, items in groups.items():
+            h = [number(i.get('h_peak_deg')) for i in items]
+            v = [number(i.get('v_peak_deg')) for i in items]
+            h, v = [x for x in h if x is not None], [x for x in v if x is not None]
+            peaks[name] = (sum(h) / len(h) if h else None, sum(v) / len(v) if v else None)
+        hashes = {s['fields'].get('map_hash') for s in run['samples']} - {None, 'none'}
+        mapped = any(s['fields'].get('map') == 'ok' for s in run['samples'])
+        order = [n for n in ('centre', 'left20', 'right20', 'up15', 'down15') if n in peaks]
+        verdict = 'no data'
+        if mapped and len(peaks) >= 2 and 'centre' in peaks:
+            ch, cv = peaks['centre']
+            values = [p for p in peaks.values()]
+            spread = max((max(xs) - min(xs) for xs in ([p[0] for p in values if p[0] is not None],
+                                                         [p[1] for p in values if p[1] is not None]) if xs), default=0)
+
+            def moved(name, axis, sign, centre):
+                value = peaks.get(name, (None, None))[axis]
+                return None if value is None or centre is None else sign * (value - centre) >= 5
+            checks = [moved('left20', 0, -1, ch), moved('right20', 0, 1, ch), moved('up15', 1, 1, cv), moved('down15', 1, -1, cv)]
+            checks = [c for c in checks if c is not None]
+            if len(hashes) <= 1 and spread <= 1:
+                verdict = 'fixed'
+            elif checks and all(checks):
+                verdict = 'follows gaze'
+            else:
+                verdict = 'changes, not with gaze'
+        rows.append(dict(eye=run['eye'], rq=run['rq'], fov=run['fov'], samples=len(run['samples']), hashes=len(hashes),
+                         peaks=', '.join('{}:{}/{}'.format(n, fmt(peaks[n][0]), fmt(peaks[n][1])) for n in order) or None,
+                         verdict=verdict, source=run['source']))
+    return rows
+
+
+GRATING_CPD = (8, 10, 12, 14, 17, 20)
+
+
+def grating_judgments(records):
+    """Per run, eye label, rq, fov, position and orientation: the last judgment of each patch (cpd -> fields)."""
+    groups, run = {}, 0
+    for record in records:
+        f = record['fields']
+        if record['topic'] == 'm1' or record['topic'] == 'grating' and f.get('chart') == 'on':
+            run += 1
+        if record['topic'] != 'grating' or 'cpd' not in f or f.get('seen') not in ('yes', 'no'):
+            continue
+        cpd = number(f.get('cpd'))
+        if cpd is None:
+            continue
+        key = (run, f.get('eye'), f.get('rq'), f.get('fov'), f.get('pos'), f.get('orient'))
+        group = groups.setdefault(key, dict(judgments={}, source=record['source'], t_ms=None))
+        group['judgments'][int(cpd)] = f
+        group['source'] = record['source']
+        group['t_ms'] = record['t_ms']
+    return groups
+
+
+def grating_physical_nyquist(records, source, eye, rq, fov, pos, orient, t_ms):
+    """Physical Nyquist (ppd / 2) at the patch set from the rrm sample nearest in time with the same eye
+    (both -> L), render quality and foveation in the same log. V bars: h_ppd at 0 / temporal 20 (L -20, R +20). H bars: v_ppd at 0;
+    at temporal 20 the separable rate map gives v_ppd(0) / cos 20° (logical vertical ppd grows by sec(az))."""
+    eye = 'R' if eye == 'R' else 'L'
+    samples = [r for r in records if r['topic'] == 'rrm' and r['source'].rsplit(':', 1)[0] == source.rsplit(':', 1)[0] and r['fields'].get('eye') == eye
+               and r['fields'].get('rq') == rq and r['fields'].get('fov') == fov]
+    if not samples:
+        return None
+    nearest = min(samples, key=lambda r: abs(r['t_ms'] - t_ms))['fields']
+    temporal = pos == 'temporal20'
+    if orient == 'V':
+        ppd = number(deg_values(nearest.get('h_ppd')).get(('20' if eye == 'R' else '-20') if temporal else '0'))
+    else:
+        ppd = number(deg_values(nearest.get('v_ppd')).get('0'))
+        if ppd is not None and temporal:
+            ppd /= math.cos(math.radians(20))
+    return ppd / 2 if ppd is not None else None
+
+
+def grating_limit(finest, physical):
+    """render-grid limited: finest seen >= the level one step below the finest level the physical grid can carry
+    (the coarsest level when none fits); lens/eye limited: below that; undetermined: no rate map or nothing seen."""
+    if finest is None or physical is None:
+        return 'undetermined'
+    fits = [i for i, c in enumerate(GRATING_CPD) if c <= physical * 1.001]
+    threshold = GRATING_CPD[max(fits[-1] - 1, 0)] if fits else GRATING_CPD[0]
+    return 'render-grid limited' if finest >= threshold else 'lens/eye limited'
+
+
+def grating_rows(records):
+    """Finest seen cycles/deg per eye label, render quality (read back), foveation, position and orientation.
+    The last judgment of a patch wins; patches logged above_nyquist=yes are listed apart and never count."""
+    rows = []
+    for key, group in grating_judgments(records).items():
+        judged = {c: f['seen'] == 'yes' for c, f in group['judgments'].items() if f.get('above_nyquist') != 'yes'}
+        above = sorted(c for c, f in group['judgments'].items() if f.get('above_nyquist') == 'yes')
+        logical = [number(f.get('nyquist_logical_cpd')) for f in group['judgments'].values()]
+        logical = [n for n in logical if n is not None]
+        seen = sorted(c for c, s in judged.items() if s)
+        finest = max(seen) if seen else None
+        physical = grating_physical_nyquist(records, group['source'], key[1], key[2], key[3], key[4], key[5], group['t_ms'])
+        rows.append(dict(eye=key[1], rq=key[2], fov=key[3], pos=key[4], orient=key[5], finest_seen_cpd=finest,
+                         nyquist_logical_cpd='{:.2f}'.format(min(logical)) if logical else None,
+                         nyquist_physical_cpd='{:.2f}'.format(physical) if physical is not None else None,
+                         limit=grating_limit(finest, physical), judged=len(judged),
+                         seen_cpd=','.join(map(str, seen)) or None,
+                         not_seen_cpd=','.join(str(c) for c in sorted(judged) if not judged[c]) or None,
+                         above_nyquist_cpd=','.join(map(str, above)) or None,
+                         run=key[0], source=group['source']))
+    return rows
+
+
+def grating_above_nyquist(records):
+    """Judgments of patches logged above their logical Nyquist (aliased on the render grid): reported, never counted."""
+    rows = []
+    for key, group in grating_judgments(records).items():
+        for cpd in sorted(group['judgments']):
+            f = group['judgments'][cpd]
+            if f.get('above_nyquist') == 'yes':
+                rows.append(dict(eye=key[1], rq=key[2], fov=key[3], pos=key[4], orient=key[5], cpd=cpd, seen=f['seen'],
+                                 nyquist_logical_cpd=f.get('nyquist_logical_cpd'), run=key[0], source=group['source']))
+    return rows
+
+
+def resolution_report(records):
+    selected = [r for r in records if r['topic'] in ('rrm', 'grating')]
+    lines = section(SECTIONS[12], selected)
+    lines += ['Rendered density: physical px per degree from the rasterization rate map (finite difference of '
+              'physicalCoordinates(screenCoordinates:layer:) times logical px/deg, which grows as sec² off axis), '
+              'along the horizontal (h, + right) and vertical (v, + up) lines through the eye axis. '
+              'Rows use the last centre-fixation sweep sample, else the quality-step sample. No map: rate 1.', '']
+    lines += table(rrm_profiles(records), ('eye', 'rq', 'fov', 'line') + RRM_DEGREES +
+                   ('peak_deg', 'phase', 'map', 'screen', 'physical', 'source')) + ['']
+    lines += ['Gaze follow (per eye and 20 s sweep; peaks are mean plateau centres h/v in degrees per fixation): '
+              'fixed = one map hash and peaks within 1°; follows gaze = peaks move ≥5° towards each logged fixation.', '']
+    lines += table(rrm_gaze(records), ('eye', 'rq', 'fov', 'samples', 'hashes', 'peaks', 'verdict', 'source')) + ['']
+    lines += ['Grating limit: finest cycles/deg judged seen (square wave, 1.5° patches sized by the view tangents). '
+              'rq is the render quality read back; the last judgment of a patch wins. nyquist_logical_cpd: half the '
+              'logical px/deg at the patch (lowest logged in the set); nyquist_physical_cpd: half the rate-map px/deg '
+              'from the nearest rrm sample of the same eye, rq and fov. limit: render-grid limited = finest seen within '
+              'one level of the physical Nyquist (the grid stops it); lens/eye limited = finer levels the grid carries '
+              'were not seen; undetermined = no rate map or nothing seen.', '']
+    lines += table(grating_rows(records), ('eye', 'rq', 'fov', 'pos', 'orient', 'finest_seen_cpd', 'nyquist_logical_cpd',
+                                           'nyquist_physical_cpd', 'limit', 'judged', 'seen_cpd', 'not_seen_cpd',
+                                           'above_nyquist_cpd', 'run', 'source')) + ['']
+    lines += ['Above the logical Nyquist (aliased on the render grid; not counted as seen):', '']
+    lines += table(grating_above_nyquist(records), ('eye', 'rq', 'fov', 'pos', 'orient', 'cpd', 'seen',
+                                                    'nyquist_logical_cpd', 'run', 'source')) + ['']
+    lines += measurements(selected, ('phase', 's', 'fix', 'eye', 'rq', 'fov', 'cpd', 'orient', 'seen')) + ['']
+    return lines
+
+
 def generate(directory, sender_path=None):
     directory = Path(directory)
     records, malformed, errors = read_logs(directory)
@@ -681,8 +893,9 @@ def generate(directory, sender_path=None):
     lines += table(corner_rows(records), ('eye', 'pos_deg', 'ring_pct', 'radius', 'shape', 'superellipse_n', 'area_frac', 'kind', 'sides', 'cuts', 'visible_area_frac', 'mark_source', 'summary_source')) + ['']
     lines += measurements(selected, ('eye', 'pos_deg', 'ring_pct', 'r', 'shape', 'superellipse_n', 'area_frac')) + ['']
     lines += dots_report(records)
+    lines += resolution_report(records)
     selected = topics('eye_badge', 'diag')
-    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session'}
+    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session', 'rrm', 'grating'}
     unknown = [r for r in records if r['topic'] not in known]
     lines += section(SECTIONS[10], selected + unknown, malformed + bad_sender + errors)
     lines += ['malformed lines skipped={}; malformed sender lines skipped={}; input file errors={}'.format(len(malformed), len(bad_sender), len(errors)), '',

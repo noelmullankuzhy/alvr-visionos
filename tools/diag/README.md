@@ -760,6 +760,117 @@ the drawable are retained without clamping; an unexpected area above 1 exposes
 the approximation or inconsistent measurements. Incomplete walks show **no data**,
 not zero area. A visible-but-unhighlightable dot must remain a tracker-limit note.
 
+## Resolution measurement
+
+Measures what the Vision Pro renders and what the wearer resolves: (1) the rendered
+density from each frame's rasterization rate map, in physical px per degree through
+the eye axis, and whether that map follows gaze; (2) the finest square-wave grating
+seen through the lens. About 5 minutes on the headset; Metal immersive space, no
+stream. Code: `ALVRClient/Diagnostics/ResolutionChart.swift` (math, tested by
+`tests/swift/ResolutionChartTests.swift`) and `ResolutionChartRenderer.swift`.
+
+1. Turn on **Diagnostics** and restart the app. Under Advanced Settings set
+   **Corner chart** to Off, **Resolution chart** to **Both eyes** (or Left only /
+   Right only: the other eye is black), leave **Resolution chart foveation** on and
+   **Render quality sweep** off. Leave the streamer disconnected.
+2. **Enter diagnostics** (Metal). Keep the head still. For 20 s a white 0.5° dot
+   steps centre → 20° left → 20° right → 15° up → 15° down, 4 s each: follow it
+   with the eyes only. Each view logs one `rrm` line per second (20 per eye).
+3. The grating chart appears, head-locked: two sets of 1.5° patches, one at the
+   eye axis and one at 20° temporal. Top row vertical bars (centre 1° up), bottom
+   row horizontal (centre 1.5° down); 8, 10, 12, 14, 17, 20 cycles/deg, each
+   labelled. 20 cpd is the logical Nyquist on axis at quality 1.0 (40 logical
+   px/deg), so finer levels cannot be drawn. The coarsest patch sits at the set's
+   position and finer ones alternate outward, temporal first. Patch centres, in
+   degrees temporal from the eye axis (`temporal_deg`, logged):
+
+   | cpd | 8 | 10 | 12 | 14 | 17 | 20 |
+   |---|---|---|---|---|---|---|
+   | axis set | 0 | +2 | −2 | +4 | −4 | +6 |
+   | temporal20 set | 20 | 22 | 18 | 24 | 16 | 26 |
+
+   Temporal is screen left for the left eye and screen right for the right eye.
+   The status under the axis set shows render quality and patch number
+   (`0.50 1-24`). A yellow frame marks the current patch; the walk starts at
+   render quality **0.5**.
+4. Look at the framed patch. **Hold the right pinch (>= 0.5 s)** if you can see the
+   bars (any orientation-correct stripes, not moiré or a grey field), **hold the
+   left pinch** if not; either records and moves to the next patch. A quick right /
+   left pinch moves forward / back without recording (redo a patch: the last
+   judgment wins). Gamepad: d-pad right/up, left/down; A seen, B not seen.
+   About 3 s per patch; 24 patches per quality.
+5. After patch 24 the quality steps to **0.75**, then **1.0** (each change logs an
+   `rrm` line with the new map size). After the last 1.0 patch the status reads
+   `donE` and the previous render quality is restored. Leave the space.
+6. Optional, foveation off: switch **Resolution chart foveation** off, leave and
+   re-enter **Enter diagnostics** (the layer is configured on entry), repeat 2-5.
+   `m1_config foveation=` and `grating chart=on foveation=` record what the layer
+   actually got; `rrm map=none` means the drawable had no rate map. Switch the
+   setting back on afterwards.
+7. Pull `diag-*.log` and run `diag-report.py`; see **Resolution measurement**.
+
+Log lines (`+` deg is screen right / up; logical coordinates are Metal's, origin
+top left, y down; the eye axis is `x = tan_left/(tan_left+tan_right)·W`,
+`y = tan_top/(tan_top+tan_bottom)·H` of the view's viewport):
+
+```
+DIAG rrm phase=sweep|quality s=0..19 fix=centre|left20|right20|up15|down15|none fix_x_deg fix_y_deg
+         eye=L|R drawable view layer rq=<read back> fov=on|off map=ok|none screen=WxH physical=WxH
+         viewport=x,y,w,h tan_left tan_right tan_bottom tan_top axis_x axis_y logical_ppd_x logical_ppd_y
+         h_rate=-40:r,...,40:r h_ppd=-40:p,... v_rate=... v_ppd=... h_peak_deg v_peak_deg map_hash
+DIAG grating chart=on mode=.. foveation=on|off foveation_setting=on|off
+DIAG grating walk=start quality=0.500 restore=..  |  quality=0.750  |  chart=done restore=..
+DIAG grating eye=both|L|R pos=axis|temporal20 cpd=8|10|12|14|17|20 orient=V|H seen=yes|no
+         rq=<read back>|unavailable rq_set=<requested> fov=on|off nyquist_logical_cpd=<x.xx>|unavailable
+         above_nyquist=yes|no|unknown temporal_deg up_deg size_deg=1.5
+```
+
+`*_rate` is physical px per logical px (central difference of
+`physicalCoordinates(screenCoordinates:layer:)` over ±2 logical px) at 0, ±5, ±10,
+±20, ±30, ±40°; `*_ppd` = rate × logical px/deg, where logical px/deg =
+(W/(tan_left+tan_right))·π/180·sec²θ (40.0 on axis at quality 1.0). Angles outside
+the viewport are omitted. `*_peak_deg` is the centre of the highest-rate plateau
+on a 1° scan within ±40°; `map_hash` is FNV-1a of the map's parameter data, so an
+unchanged hash means an unchanged map. Patch positions and sizes are true angles
+(Fick: tan x = tan az, tan y = tan el / cos az) from the view tangents, not logical
+pixels; bars are drawn as geometry through the rate map, so they render (and alias)
+exactly as any app content would. The finest-cpd result is one wearer, one fit.
+
+`nyquist_logical_cpd` is half the logical px/deg across the bars at the patch centre,
+from the latest frame's tangents and logical viewport (both eyes: the left one).
+V bars use the horizontal density k_x·sec²(az)·π/180; H bars use the vertical
+density k_y·sec²(el)/cos(az)·π/180. On axis it is 15.0 / 17.5 / 20.0 at quality
+0.5 / 0.75 / 1.0. A patch above it (`above_nyquist=yes`, 0.1 % slack) is still
+shown and judged, but its bars alias on the render grid. The report lists those
+judgments apart and never counts them as seen.
+
+Render-grid or lens/eye limited: the report takes the physical Nyquist (half the
+rate-map px/deg) from the `rrm` sample nearest in time, in the same log, with the
+same eye (both: L), quality and foveation. V bars use `h_ppd` at 0° (axis), or at
+−20° (L) / +20° (R) for the temporal set. H bars use `v_ppd` at 0°; for the
+temporal set that is divided by cos 20°, because the rate map is separable and the
+logical vertical density grows by sec(az). The verdict compares the finest level
+seen with the level one step below the finest level the physical grid can carry:
+- `render-grid limited`: finest seen is at or above that level, so the rendered
+  pixels stop the wearer and more render resolution would show more.
+- `lens/eye limited`: finest seen is below it. The grid carries finer bars that
+  the optics or the eye do not pass.
+- `undetermined`: no matching rate-map sample, or nothing was seen.
+
+The report gives: a rendered px/deg profile per eye, quality and foveation (h and v
+rows, one column per angle); a gaze-follow verdict per eye and sweep (`fixed`: one
+map hash and peaks within 1°; `follows gaze`: peaks move ≥5° towards each
+fixation; otherwise `changes, not with gaze`); and the finest seen cpd per eye
+label, quality, foveation, position and orientation, with every judged level,
+both Nyquists (`nyquist_logical_cpd`: lowest logged in the set;
+`nyquist_physical_cpd`) and the limit verdict; then the above-Nyquist judgments
+in a separate table.
+
+Limits: selection is by stepping, not gaze, so the tested patch is the framed one;
+look at it. Both eyes labels a binocular judgment. Starting a stream replaces the
+chart; leaving mid-walk does not restore the quality of that (discarded) layer.
+Do not run the render quality sweep at the same time (both set the quality).
+
 ## Repeatable diagnostic report (D8)
 
 ```sh

@@ -438,6 +438,21 @@ struct Entry: View {
                             .onChange(of: gStore.settings.cornerChart) {
                                 saveAction()
                             }
+                            Picker(selection: $gStore.settings.resolutionChart) {
+                                ForEach(CornerChartMode.allCases, id: \.rawValue) {
+                                    Text($0.rawValue).tag($0.rawValue)
+                                }
+                            } label: {
+                                Text("Resolution chart")
+                                Text("With no stream, corner chart off: 20 s fixation dot (rate-map log), then grating patches 8-20 cycles/deg at 0.5/0.75/1.0 render quality. Pinch right/left: next/previous; hold right: seen; hold left: not seen (or d-pad, A, B).")
+                                    .font(.system(size: 10))
+                            }
+                            .pickerStyle(.menu)
+                            .onChange(of: gStore.settings.resolutionChart) {
+                                saveAction()
+                            }
+                            Toggle("Resolution chart foveation", isOn: $gStore.settings.resolutionFoveation)
+                                .onChange(of: gStore.settings.resolutionFoveation) { saveAction() }
                         }
 
                         Button {

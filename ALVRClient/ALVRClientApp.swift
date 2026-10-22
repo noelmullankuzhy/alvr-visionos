@@ -17,12 +17,19 @@ import CompositorServices
 struct ContentStageConfiguration: CompositorLayerConfiguration {
     // Immersion style of the space this layer is in, for the diagnostics log only.
     var immersion = "unknown"
+    // The space this layer is for; only the offline diagnostics space may drop foveation (resolution chart).
+    var entry = LayerEntry.other
 
     func makeConfiguration(capabilities: LayerRenderer.Capabilities, configuration: inout LayerRenderer.Configuration) {
         configuration.depthFormat = .depth32Float
         configuration.colorFormat = .bgra8Unorm_srgb
     
-        let foveationEnabled = capabilities.supportsFoveation
+        let settings = ALVRClientApp.gStore.settings
+        // Diagnostics resolution chart only: a configuration without foveation when chosen (off by default), in the
+        // offline diagnostics space with no stream connected.
+        let foveationEnabled = capabilities.supportsFoveation && !GratingChart.foveationDisabled(
+            diagnostics: Diag.isOn, chart: settings.resolutionChart, foveation: settings.resolutionFoveation,
+            entry: entry, connected: EventHandler.shared.connectionState == .connected)
         configuration.isFoveationEnabled = foveationEnabled
 
 #if XCODE_BETA_26
@@ -274,7 +281,7 @@ struct ALVRClientApp: App {
 
         // Independent entry for offline diagnostics; the online Enter path is unchanged.
         ImmersiveSpace(id: "MetalDiagnosticsOffline") {
-            CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed")) { layerRenderer in
+            CompositorLayer(configuration: ContentStageConfiguration(immersion: "mixed", entry: .diagnostics)) { layerRenderer in
                 guard Diag.isOn else { return }
                 let system = MetalClientSystem(layerRenderer, offlineDiagnostics: true, displayFullImmersion: false)
                 system.startRenderLoop()
