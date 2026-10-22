@@ -27,7 +27,9 @@ The ladder decides, per bitrate, whether the headset can decode each of them at 
 PC keeps up; the device numbers say whether the headset does.
 
 **Pass rule** (per rung, over the 60 s probe at 90 fps): `decode_ms_p95` < 11 ms **and** `dropped_total` < 1 % of the frames
-received. 11 ms is the 90 Hz frame budget (11.1 ms) with a little margin. A rung without device statistics is
+received. Both are decode-side columns: `dropped_total` / `dropped_pct` count frames dropped before decode, on decode overrun
+and on queue overflow only. Selection skips (older queued frames passed over for a newer one by the pacing) are reported
+apart in `dropped_selection_skip` and never count against the rule. 11 ms is the 90 Hz frame budget (11.1 ms) with a little margin. A rung without device statistics is
 `NO_DEVICE_STATS`, never a pass; a rung with a problem (client never connected, copy failed, ...) is `ERROR` with the
 reason in `notes`.
 
@@ -69,6 +71,11 @@ xcrun devicectl device copy from --device 00008112-001E456E0C21A01E --domain-typ
   --domain-identifier uk.lumenio.alvr --source Documents/telemetry --destination <rung dir>/telemetry
 ```
 
+`devicectl help device process launch` documents the app arguments only as the trailing positional `[<command-line-arguments> ...]`
+and says nothing about a `--` separator. If the device rejects `-ALVRAutoEnter` as an unknown option, run with
+`LADDER_DEVICECTL_ARGSEP=--` (default empty), which inserts `--` before the arguments; the dry run prints the exact command.
+The ssh tunnel is killed after each rung, when the client never connects, and on error / Ctrl-C.
+
 The headset gets no `-ALVRDebugEyeTangents`: with Crop FOV on (the default) the client sends the same box that column
 holds, from its own lens model. Check the `DIAG fov_sent ... render_1to1=3968x3232 recommended=3968x3232` line if in doubt.
 
@@ -79,9 +86,11 @@ holds, from its own lens model. Check the `DIAG fov_sent ... render_1to1=3968x32
   needed, no client change). The script copies that directory and keeps the last 60 `stats` windows of the newest session
   file that started after the rung's launch (`device-stats.jsonl`). A file from an earlier rung is never used.
   `decode_ms_mean` is the mean of the windows' `decode_ms_mean`; `decode_ms_p95` is the nearest-rank 95th percentile of the
-  windows' `decode_ms_p95` (`decode_ms_p95_max` is the worst window); `dropped_total` is the sum of `frames_dropped`
-  (dropped before decode + decode overrun + queue overflow + selection skip); `dropped_pct` is that over the sum of
-  `frames_received`; `device_fps` is the mean `presented_fps`; `device_n` the number of windows (60 expected).
+  windows' `decode_ms_p95` (`decode_ms_p95_max` is the worst window); `dropped_total` is the sum of the decode-side drops
+  (`frames_dropped` minus `dropped_selection_skip`: before decode + decode overrun + queue overflow); `dropped_pct` is that
+  over the sum of `frames_received`; `dropped_selection_skip` is the sum of the pacing skips, for information; `decode_ms_p95` is a p95 of per-window p95s, not of the frames, so it leans high and `decode_ms_p95_max` bounds it;
+  the last 60 windows are taken after the probe ends, so the first few seconds of that span lie just outside the server probe
+  (the stream is still running while the directory is copied); `device_fps` is the mean `presented_fps`; `device_n` the number of windows (60 expected).
 - **Server** (the probe, `events.jsonl`): `StatisticsSummary` events, one per second. `encode_nvenc_ms` and
   `encode_nvenc_p95` are the mean and nearest-rank p95 of `encode_nvenc_ms` over the summaries (`n/a` on a server without the
   NVENC timer); `encode_latency_ms` the mean of `encode_latency_ms`; `bitrate_mbps` the mean of `video_mbits_per_sec`.
@@ -89,7 +98,7 @@ holds, from its own lens model. Check the `DIAG fov_sent ... render_1to1=3968x32
   conversion).
 
 Columns of `summary.tsv`: `name verdict encode_nvenc_ms encode_nvenc_p95 encode_latency_ms encode_ms encode_ms_p95
-decode_ms_mean decode_ms_p95 decode_ms_p95_max dropped_total dropped_pct device_fps bitrate_mbps device_n notes`. The matrix
+decode_ms_mean decode_ms_p95 decode_ms_p95_max dropped_total dropped_pct dropped_selection_skip device_fps bitrate_mbps device_n notes`. The matrix
 `summary.tsv` gains `encode_nvenc_ms`, `encode_nvenc_p95` as its last two columns.
 
 Files per rung in `<out>/<rung>/`: `sets.txt` (the session sets), `events.jsonl` (the probe), `telemetry/` (the copied
@@ -100,4 +109,5 @@ directory), `device-stats.jsonl` (the 60 windows used), `summary.tsv` (the row),
 
 `python3 -m unittest discover -s tools/fov-matrix -t tools/fov-matrix` (NVENC columns, device statistics, ladder row and pass
 rule, the points file) and `sh tools/fov-matrix/test-ladder-stubs.sh` (the live path with stub ssh / devicectl / ws-probe:
-rows, stale telemetry, failing launch and copy, SIGTERM restore).
+rows, stale telemetry, failing launch and copy, SIGTERM restore, no ssh tunnel left after a rung that times out or after
+SIGTERM, the launch separator).

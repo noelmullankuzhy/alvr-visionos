@@ -16,7 +16,7 @@ SUMMARY_COLUMNS = ['name', 'verdict', 'median_deg', 'max_deg', 'extent_err_deg',
     + ['%s_mtf50_cpd' % p for p in MTF_POSITIONS] + ['display_ceiling_cpd']
 FIELD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'avp-field.json')
 LADDER_COLUMNS = ['name', 'verdict', 'encode_nvenc_ms', 'encode_nvenc_p95', 'encode_latency_ms', 'encode_ms', 'encode_ms_p95',
-                  'decode_ms_mean', 'decode_ms_p95', 'decode_ms_p95_max', 'dropped_total', 'dropped_pct', 'device_fps',
+                  'decode_ms_mean', 'decode_ms_p95', 'decode_ms_p95_max', 'dropped_total', 'dropped_pct', 'dropped_selection_skip', 'device_fps',
                   'bitrate_mbps', 'device_n', 'notes']
 LADDER_DECODE_P95_MS = 11.0   # pass rule: device decode_ms_p95 below this ...
 LADDER_DROPPED_PCT = 1.0      # ... and dropped frames below this share of the frames received, over the probe
@@ -438,18 +438,24 @@ def device_summary(rows):
     def vals(key):
         return [r[key] for r in rows if isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool)]
 
-    def dropped(r):
+    def count(r, key):
+        return r[key] if isinstance(r.get(key), int) and not isinstance(r.get(key), bool) else 0
+
+    def skipped(r):  # pacing: older queued frames passed over for a newer one; not a decode failure
+        return count(r, 'dropped_selection_skip')
+
+    def dropped(r):  # decode side only: before decode + decode overrun + queue overflow
         if isinstance(r.get('frames_dropped'), int):
-            return r['frames_dropped']
-        return sum(r[k] for k in ('dropped_before_decode', 'dropped_decode_overrun', 'dropped_queue_overflow',
-                                  'dropped_selection_skip') if isinstance(r.get(k), int))
+            return max(r['frames_dropped'] - skipped(r), 0)   # frames_dropped includes the selection skips
+        return sum(count(r, k) for k in ('dropped_before_decode', 'dropped_decode_overrun', 'dropped_queue_overflow'))
     out = {'device_n': len(rows), 'decode_ms_mean': _mean(vals('decode_ms_mean')), 'decode_ms_p95': _p95(vals('decode_ms_p95')),
            'decode_ms_p95_max': max(vals('decode_ms_p95'), default=None), 'device_fps': _mean(vals('presented_fps')),
-           'dropped_total': None, 'dropped_pct': None}
+           'dropped_total': None, 'dropped_pct': None, 'dropped_selection_skip': None}
     received = sum(vals('frames_received'))
     if rows:
         out['dropped_total'] = sum(dropped(r) for r in rows)
         out['dropped_pct'] = 100.0 * out['dropped_total'] / received if received else None
+        out['dropped_selection_skip'] = sum(skipped(r) for r in rows)
     return out
 
 
@@ -482,6 +488,7 @@ def ladder_row(name, point_dir):
              encode_ms_p95=_num(st['encode_ms_p95'], '%.2f'), decode_ms_mean=_num(dv['decode_ms_mean'], '%.2f'),
              decode_ms_p95=_num(dv['decode_ms_p95'], '%.2f'), decode_ms_p95_max=_num(dv['decode_ms_p95_max'], '%.2f'),
              dropped_total=_num(dv['dropped_total'], '%d'), dropped_pct=_num(dv['dropped_pct'], '%.2f'),
+             dropped_selection_skip=_num(dv['dropped_selection_skip'], '%d'),
              device_fps=_num(dv['device_fps'], '%.1f'), bitrate_mbps=_num(mbps, '%.1f'), device_n=str(dv['device_n']))
     try:
         with open(os.path.join(point_dir, 'ERROR')) as f:

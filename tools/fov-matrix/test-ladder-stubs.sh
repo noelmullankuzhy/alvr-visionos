@@ -15,7 +15,7 @@ t() { if eval "$1"; then check ok "$2"; else check no "$2"; fi; }
 mkdir -p "$T/bin" "$T/harness" "$T/pc/alvr-build/out/b1/alvr_streamer_windows" "$T/dev"
 cat > "$T/bin/ssh" <<'EOF'
 #!/bin/sh
-for a in "$@"; do [ "$a" = -N ] && exec /bin/sleep 600; done
+for a in "$@"; do [ "$a" = -N ] && { echo $$ >> "$FAKE_PC/tunnel.pids"; exec /bin/sleep 600; }; done
 s=$FAKE_PC/.ssh-script.$$; cat > "$s"
 FOVMATRIX_PC_ROOT=$FAKE_PC sh "$s"; rc=$?
 if grep -q ' python3 - flag ' "$s"; then cat "$FAKE_PC/alvr-build/out/b1/alvr_streamer_windows/angle_chart.enable" >> "$FAKE_PC/flag.history" 2>/dev/null || echo absent >> "$FAKE_PC/flag.history"; fi
@@ -95,6 +95,12 @@ cp "$SESSION" "$T/session.orig"
 # two rungs from the real file
 grep -E '^(dC-p1-100|dT-p1-500)	' "$HERE/points-device-ladder.tsv" > "$T/two.tsv"
 
+tunnels_alive() {  # any tunnel stub pid recorded since the last reset still running
+  [ -f "$T/pc/tunnel.pids" ] || return 1
+  while read -r pid; do kill -0 "$pid" 2>/dev/null && return 0; done < "$T/pc/tunnel.pids"
+  return 1
+}
+
 run() {  # run OUTDIR [extra args]
   od=$1; shift
   PATH="$T/bin:$PATH" PCW="$T/pc/fov-matrix" FAKE_PC="$T/pc" FAKE_DEV="$T/dev" HARNESS="$T/harness" PCPS="$T/pcps.sh" VRSETTINGS="$T/vrsettings" VRSERVER_LOG="$T/vrserver.txt" \
@@ -107,7 +113,7 @@ t "[ $rc = 0 ]" "exit 0 (rc=$rc)"
 t "[ \$(wc -l < $T/o1.out) = 3 ]" "stdout is the summary only (header + 2 rows)"
 t "grep -q '^dC-p1-100	PASS	7.00	7.00	9.50' $T/o1.out" "dC row PASS with NVENC 7.00 / latency 9.50 from the server events"
 t "grep -q '^dT-p1-500	PASS' $T/o1.out" "dT row PASS"
-t "grep -q '	6.00	9.00	9.00	0	0.00	90.0	299.0	5	' $T/o1.out" "device columns from the newest telemetry file, last 5 windows, bitrate from the server"
+t "grep -q '	6.00	9.00	9.00	0	0.00	0	90.0	299.0	5	' $T/o1.out" "device columns from the newest telemetry file, last 5 windows, bitrate from the server"
 t "cmp -s $SESSION $T/session.orig" "session restored byte for byte"
 t "grep -q 'launch --device 00008112-001E456E0C21A01E --terminate-existing uk.lumenio.alvr -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal' $T/dev/launch.args" "client launched with the auto-enter arguments"
 t "! grep -q DebugEyeTangents $T/dev/launch.args" "no debug tangents on the device"
@@ -119,6 +125,7 @@ t "[ -s $T/o1/dC-p1-100/device-stats.jsonl ] && [ -s $T/o1/dC-p1-100/events.json
 t "[ ! -e $T/pc/fov-matrix/session.orig.json ]" "no backup left on the PC"
 
 echo "== client never connects"
+tunnels_alive && { pkill -f 'sleep 600' 2>/dev/null; }; rm -f "$T/pc/tunnel.pids"
 ( NOCLIENT=1; export NOCLIENT; run "$T/o2" > "$T/o2.out" 2> "$T/o2.err" ); rc=$?
 t "[ $rc = 1 ]" "exit 1 (rc=$rc)"
 t "grep -q '^OPERATOR:' $T/o2.err" "one OPERATOR line printed"
@@ -126,10 +133,20 @@ t "[ \$(grep -c '^OPERATOR:' $T/o2.err) = 2 ]" "once per rung"
 t "grep -q 'client: no client_fps' $T/o2/dC-p1-100/ERROR" "rung error says no client"
 t "grep -q '^dC-p1-100	ERROR' $T/o2.out" "summary row ERROR"
 t "cmp -s $SESSION $T/session.orig" "session restored after failed rungs"
+t "[ -s $T/pc/tunnel.pids ] && [ \$(wc -l < $T/pc/tunnel.pids) = 2 ] && ! tunnels_alive" "a rung that times out leaves no tunnel process (2 started, none alive)"
 
 echo "== devicectl launch fails: operator line, run goes on"
 ( LAUNCH_FAIL=1; export LAUNCH_FAIL; run "$T/o3" --only dC-p1-100 > "$T/o3.out" 2> "$T/o3.err" ); rc=$?
 t "[ $rc = 0 ] && grep -q 'OPERATOR: devicectl could not launch' $T/o3.err" "launch failure -> OPERATOR line, stream still measured (rc=$rc)"
+
+echo "== LADDER_DEVICECTL_ARGSEP=-- and the dry run"
+rm -f "$T/dev/launch.args"
+( LADDER_DEVICECTL_ARGSEP=--; export LADDER_DEVICECTL_ARGSEP; run "$T/o3b" --only dC-p1-100 > "$T/o3b.out" 2> "$T/o3b.err" ); rc=$?
+t "[ $rc = 0 ] && grep -q -- '--terminate-existing uk.lumenio.alvr -- -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal' $T/dev/launch.args" "ARGSEP=-- puts the separator before the app arguments (rc=$rc)"
+run "$T/o3c" --only dC-p1-100 --dry-run > "$T/o3c.out" 2>&1
+t "grep -q -- 'launch --device 00008112-001E456E0C21A01E --terminate-existing uk.lumenio.alvr -ALVRAutoEnter YES' $T/o3c.out" "default launch command has no separator, dry run prints it"
+( LADDER_DEVICECTL_ARGSEP=--; export LADDER_DEVICECTL_ARGSEP; run "$T/o3d" --only dC-p1-100 --dry-run > "$T/o3d.out" 2>&1 )
+t "grep -q -- 'uk.lumenio.alvr -- -ALVRAutoEnter YES' $T/o3d.out" "dry run prints the separator when set"
 
 echo "== devicectl copy fails"
 ( COPY_FAIL=1; export COPY_FAIL; run "$T/o4" --only dC-p1-100 > "$T/o4.out" 2> "$T/o4.err" ); rc=$?
@@ -143,12 +160,14 @@ t "[ $rc = 1 ] && grep -q 'no stats windows in a telemetry file at or after' $T/
 python3 "$T/mk.py" "$T/scratch.json" "$T/dev/telemetry"
 
 echo "== SIGTERM mid-run restores"
+rm -f "$T/pc/tunnel.pids"
 ( run "$T/o6" --connect-timeout 60 > "$T/o6.out" 2> "$T/o6.err" ) &
 sleep 1; n=0
 while [ ! -f "$T/pc/fov-matrix/session.orig.json" ] && [ $n -lt 50 ]; do /bin/sleep 0.2; n=$((n + 1)); done
 pkill -TERM -f "run-ladder.sh --points $T/two.tsv --out $T/o6" 2>/dev/null
 wait
 t "cmp -s $SESSION $T/session.orig" "session restored after SIGTERM"
+t "[ -s $T/pc/tunnel.pids ] && ! tunnels_alive" "no tunnel process left after SIGTERM"
 
 echo "== bad input"
 sh "$HERE/run-ladder.sh" --out "$T/o7" > /dev/null 2>&1; t "[ $? = 2 ]" "no --points -> exit 2"

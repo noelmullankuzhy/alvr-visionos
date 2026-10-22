@@ -115,10 +115,23 @@ class DeviceStatsTest(unittest.TestCase):
         self.assertAlmostEqual(s['device_fps'], 89.0)
         self.assertEqual(s['device_n'], 2)
 
-    def test_dropped_falls_back_to_the_four_counters(self):
+    def test_dropped_falls_back_to_the_decode_side_counters(self):
         r = json.loads(dev(dropped_before_decode=1, dropped_decode_overrun=2, dropped_queue_overflow=3, dropped_selection_skip=4))
         del r['frames_dropped']
-        self.assertEqual(fm.device_summary([r])['dropped_total'], 10)
+        s = fm.device_summary([r])
+        self.assertEqual((s['dropped_total'], s['dropped_selection_skip']), (6, 4))
+
+    def test_selection_skips_are_not_decode_drops(self):
+        # frames_dropped counts the skips too; the rule's dropped_total and dropped_pct must not
+        r = json.loads(dev(frames_received=90, frames_dropped=12, dropped_before_decode=0, dropped_decode_overrun=1,
+                           dropped_queue_overflow=0, dropped_selection_skip=11))
+        s = fm.device_summary([r])
+        self.assertEqual((s['dropped_total'], s['dropped_selection_skip']), (1, 11))
+        self.assertAlmostEqual(s['dropped_pct'], 100.0 / 90)
+        self.assertEqual(fm.ladder_verdict(8.0, 100.0 * 1 / 180), 'PASS')   # 11 skips alone would have been 12 %
+        # a record without the skip counter: frames_dropped is all decode side
+        r = json.loads(dev(frames_dropped=2)); del r['dropped_selection_skip']
+        self.assertEqual(fm.device_summary([r])['dropped_total'], 2)
 
     def test_optional_decode_fields_missing(self):
         r = json.loads(dev())
@@ -157,7 +170,7 @@ class LadderTest(unittest.TestCase):
             self.assertEqual(r['encode_latency_ms'], '9.50')
             self.assertEqual(r['encode_ms'], '11.00')
             self.assertEqual((r['decode_ms_mean'], r['decode_ms_p95'], r['decode_ms_p95_max']), ('6.00', '14.60', '14.90'))
-            self.assertEqual((r['dropped_total'], r['dropped_pct']), ('0', '0.00'))
+            self.assertEqual((r['dropped_total'], r['dropped_pct'], r['dropped_selection_skip']), ('0', '0.00', '0'))
             self.assertEqual((r['device_fps'], r['bitrate_mbps'], r['device_n']), ('90.0', '298.0', '60'))
 
     def test_row_pass(self):

@@ -16,7 +16,9 @@
 #   --settle S (20), --probe-seconds S (60), --connect-timeout S (120), --operator-after S (20), --only NAME[,NAME],
 #   --stop-on-error. A launch argument the device ignores: after --operator-after s without a client the script prints one
 #   "OPERATOR:" line asking for a manual start and keeps waiting up to --connect-timeout.
-# Env overrides: HARNESS PCPS PYTHON WIN PCW XCRUN VRSETTINGS VRSERVER_LOG (see README.md).
+# Env overrides: HARNESS PCPS PYTHON WIN PCW XCRUN VRSETTINGS VRSERVER_LOG (see README.md), LADDER_DEVICECTL_ARGSEP (default
+#   empty; `--` puts a separator before the client's -ALVR... arguments in the devicectl launch, if the device rejects them).
+# The ssh tunnel is killed after every rung, at the client-connect timeout, and on EXIT/INT/TERM/HUP (cleanup).
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -27,6 +29,7 @@ WIN=${WIN:-win-workstation}
 XCRUN=${XCRUN:-xcrun}
 DEVICE=${DEVICE:-00008112-001E456E0C21A01E}
 BID=${BID:-uk.lumenio.alvr}
+ARGSEP=${LADDER_DEVICECTL_ARGSEP:-}   # unquoted where used: empty vanishes, `--` becomes one word
 BUILD=${BUILD:-1ce896631ea1}
 PCW=${PCW:-/mnt/c/Users/noelm/claude-tmp/fov-matrix}   # override only in the stub test
 TOOL=run-ladder
@@ -78,6 +81,10 @@ TP=; PP=; BACKED_UP=0; STARTED=0; SESSION_SHA=; FAILED=0; RESTORE_RC=0; NAME=; P
 [ "$DRY" = 1 ] && : > "$OUT/plan.txt"
 . "$HERE/lib-pc.sh"   # log plan x xo, the PC exec path, backup/apply/restore, start_server, stop_steamvr (shared with run-matrix.sh)
 
+kill_tunnel() {  # the ssh tunnel of the current rung; safe to call with none running
+  if [ -n "$TP" ]; then kill "$TP" 2>/dev/null; wait "$TP" 2>/dev/null; TP=; fi
+}
+
 CLEANED=0
 cleanup() {
   rc=$?
@@ -86,7 +93,7 @@ cleanup() {
   CLEANED=1
   trap '' INT TERM HUP
   trap - EXIT
-  [ -n "$TP" ] && kill "$TP" 2>/dev/null
+  kill_tunnel
   [ -n "$PP" ] && kill "$PP" 2>/dev/null
   if [ "$STARTED" = 1 ] || [ "$RESTORE_ONLY" = 1 ]; then stop_steamvr; [ "$DRY" = 1 ] || sleep 4; fi
   if [ "$BACKED_UP" = 1 ] || [ "$RESTORE_ONLY" = 1 ]; then
@@ -122,6 +129,7 @@ wait_client() {  # until the server events show the client streaming (Statistics
 run_rung() {
   NAME=$1; PD=$OUT/$NAME
   mkdir -p "$PD"; rm -f "$PD/ERROR"
+  kill_tunnel   # none should be left from the last rung; never two
   log "[$NAME] start"
   [ "$DRY" = 1 ] && plan "### rung $NAME"
   $FM sets "$POINTS" "$NAME" > "$PD/sets.txt" || { fail_hard "sets: cannot map rung"; return 1; }
@@ -151,14 +159,14 @@ run_rung() {
   fi
   # No -ALVRDebugEyeTangents: the device sends its own crop box (Crop FOV on = the box in the points file's eye_tangents column).
   if [ "$DRY" = 1 ]; then
-    plan "+ $XCRUN devicectl device process launch --device $DEVICE --terminate-existing $BID -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal > $PD/launch.log 2>&1"
-  elif ! "$XCRUN" devicectl device process launch --device "$DEVICE" --terminate-existing "$BID" -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal > "$PD/launch.log" 2>&1; then
+    plan "+ $XCRUN devicectl device process launch --device $DEVICE --terminate-existing $BID${ARGSEP:+ $ARGSEP} -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal > $PD/launch.log 2>&1"
+  elif ! "$XCRUN" devicectl device process launch --device "$DEVICE" --terminate-existing "$BID" $ARGSEP -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal > "$PD/launch.log" 2>&1; then
     log "[$NAME] devicectl launch failed, see $PD/launch.log: $(tail -1 "$PD/launch.log")"
     echo "OPERATOR: devicectl could not launch the client ($(tail -1 "$PD/launch.log")); open ALVR in the headset and enter the stream" >&2
   fi
 
   # 5. wait for the client, settle, probe
-  wait_client || { fail_hard "client: no client_fps > 0 in the server events in ${CONNECT_TIMEOUT}s (headset on? client open? see $PD/launch.log, $PD/connect-probe.log)"; return 1; }
+  wait_client || { kill_tunnel; fail_hard "client: no client_fps > 0 in the server events in ${CONNECT_TIMEOUT}s (headset on? client open? see $PD/launch.log, $PD/connect-probe.log)"; return 1; }
   log "[$NAME] client streaming, settling ${SETTLE}s"
   [ "$DRY" = 1 ] && plan "+ sleep $SETTLE" || sleep "$SETTLE"
   if [ "$DRY" = 1 ]; then
@@ -185,7 +193,7 @@ run_rung() {
   fi
 
   # 7. stop the stream (tunnel, then SteamVR gracefully), the rung's row
-  if [ "$DRY" = 1 ]; then plan "+ kill <tunnel>"; else kill "$TP" 2>/dev/null; wait "$TP" 2>/dev/null; TP=; fi
+  if [ "$DRY" = 1 ]; then plan "+ kill <tunnel>"; else kill_tunnel; fi
   stop_steamvr
   if [ "$DRY" = 1 ]; then plan "+ $FM ladder-row $NAME $PD > $PD/summary.tsv"; else
     { $FM ladder-header; $FM ladder-row "$NAME" "$PD"; } > "$PD/summary.tsv"
