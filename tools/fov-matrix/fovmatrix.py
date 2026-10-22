@@ -12,9 +12,15 @@ BASE_RENDER = (3648, 2912)  # per-eye render at render_scale 1.0 (the page's sta
 MTF_POSITIONS = ('centre', 'nose', 'temple', 'up', 'down')   # stream_mtf.POSITIONS
 SUMMARY_COLUMNS = ['name', 'verdict', 'median_deg', 'max_deg', 'extent_err_deg', 'centre_px_deg', 'fps',
                    'bitrate_mbps', 'encode_ms', 'verdict_render', 'verdict_encoded', 'notes',
-                   'encode_ms_p95', 'encode_over_budget'] \
+                   'encode_ms_p95', 'encode_over_budget', 'encode_nvenc_ms', 'encode_nvenc_p95'] \
     + ['%s_mtf50_cpd' % p for p in MTF_POSITIONS] + ['display_ceiling_cpd']
 FIELD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'avp-field.json')
+LADDER_COLUMNS = ['name', 'verdict', 'encode_nvenc_ms', 'encode_nvenc_p95', 'encode_latency_ms', 'encode_ms', 'encode_ms_p95',
+                  'decode_ms_mean', 'decode_ms_p95', 'decode_ms_p95_max', 'dropped_total', 'dropped_pct', 'device_fps',
+                  'bitrate_mbps', 'device_n', 'notes']
+LADDER_DECODE_P95_MS = 11.0   # pass rule: device decode_ms_p95 below this ...
+LADDER_DROPPED_PCT = 1.0      # ... and dropped frames below this share of the frames received, over the probe
+TELEMETRY_NAME = re.compile(r'^\d{8}T\d{6}Z\.jsonl$')   # StreamTelemetryFileSink.fileName
 NA = 'n/a'
 DEFAULT_FLAG = 'dump'
 FRAME_BUDGET_MS = 1000.0 / 90   # 90 Hz frame budget, 11.1 ms
@@ -184,8 +190,19 @@ def _median(v):
     return statistics.median(v) if v else None
 
 
+def _mean(v):
+    return sum(v) / len(v) if v else None
+
+
+def _p95(v):
+    """Nearest rank, like encode_ms_p95."""
+    v = sorted(v)
+    return v[math.ceil(0.95 * len(v)) - 1] if v else None
+
+
 def stats(events_path, console_path):
     graph = []
+    summ = []   # StatisticsSummary, one per second
     try:
         with open(events_path, errors='replace') as f:
             for line in f:
@@ -194,6 +211,8 @@ def stats(events_path, console_path):
                     et = e.get('event_type') or {}
                     if et.get('id') == 'GraphStatistics' and isinstance(et.get('data'), dict):
                         graph.append(et['data'])
+                    elif et.get('id') == 'StatisticsSummary' and isinstance(et.get('data'), dict):
+                        summ.append(et['data'])
                 except (ValueError, AttributeError):
                     pass
     except OSError:
@@ -216,6 +235,9 @@ def stats(events_path, console_path):
         return _median([r[key] * scale for r in rows if isinstance(r.get(key), (int, float))])
 
     enc = sorted(r['encoder_s'] * 1000.0 for r in graph if isinstance(r.get('encoder_s'), (int, float)))
+    nvenc = [r['encode_nvenc_ms'] for r in summ if isinstance(r.get('encode_nvenc_ms'), (int, float))]   # optional: servers before W44 omit it
+    server_mbps = [r['video_mbits_per_sec'] for r in summ if isinstance(r.get('video_mbits_per_sec'), (int, float))]
+    latency = [r['encode_latency_ms'] for r in summ if isinstance(r.get('encode_latency_ms'), (int, float))]
     fps = col(client, 'presented_fps')
     dec = col(client, 'decode_ms_mean')
     return {'graph_n': len(graph), 'client_stats_n': len(client),
@@ -223,7 +245,9 @@ def stats(events_path, console_path):
             'encode_ms_p95': enc[math.ceil(0.95 * len(enc)) - 1] if enc else None,   # nearest rank
             'encode_over_budget': sum(1 for e in enc if e > FRAME_BUDGET_MS) / len(enc) if enc else None,
             'client_fps': fps if fps is not None else col(graph, 'client_fps'),
-            'decode_ms': dec if dec is not None else col(graph, 'decoder_s', 1000.0)}
+            'decode_ms': dec if dec is not None else col(graph, 'decoder_s', 1000.0),
+            'encode_nvenc_ms': _mean(nvenc), 'encode_nvenc_p95': _p95(nvenc),
+            'encode_latency_ms': _mean(latency), 'server_mbps': _mean(server_mbps)}
 
 
 def _find(obj, key):
@@ -351,6 +375,8 @@ def summary_row(name, point_dir):
     r['encode_ms'] = _num(st.get('encode_ms'), '%.2f')
     r['encode_ms_p95'] = _num(st.get('encode_ms_p95'), '%.2f')
     r['encode_over_budget'] = _num(st.get('encode_over_budget'), '%.3f')
+    r['encode_nvenc_ms'] = _num(st.get('encode_nvenc_ms'), '%.2f')
+    r['encode_nvenc_p95'] = _num(st.get('encode_nvenc_p95'), '%.2f')
     r.update(mtf_columns(point_dir))
     try:
         with open(os.path.join(point_dir, 'ERROR')) as f:
@@ -359,6 +385,111 @@ def summary_row(name, point_dir):
     except OSError:
         pass
     return '\t'.join(r[k].replace('\t', ' ') for k in SUMMARY_COLUMNS)
+
+
+def client_connected(events_path):
+    """True once the server reports a client frame rate: a StatisticsSummary with client_fps > 0."""
+    try:
+        with open(events_path, errors='replace') as f:
+            for line in f:
+                try:
+                    et = json.loads(line).get('event_type') or {}
+                except (ValueError, AttributeError):
+                    continue
+                d = et.get('data')
+                if et.get('id') == 'StatisticsSummary' and isinstance(d, dict) \
+                        and isinstance(d.get('client_fps'), (int, float)) and d['client_fps'] > 0:
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+def newest_telemetry(path, since=None):
+    """Newest Documents/telemetry/<utc>.jsonl in PATH or PATH/telemetry (devicectl copies a directory either way); with
+    SINCE (yyyymmddThhmmssZ) only files whose session started at or after it, so a stale file of an earlier rung is never used."""
+    found = []
+    for d in (path, os.path.join(path, 'telemetry')):
+        try:
+            found += [(n, os.path.join(d, n)) for n in os.listdir(d) if TELEMETRY_NAME.match(n) and (not since or n[:16] >= since)]
+        except OSError:
+            pass
+    return max(found)[1] if found else None
+
+
+def select_device_stats(path, last_n, since=None):
+    """The last LAST_N `stats` records (one per 1 s window) of the newest telemetry file: the end of the stream, i.e.
+    the probe window when this runs right after the probe."""
+    f = newest_telemetry(path, since)
+    rows = []
+    if f:
+        with open(f, errors='replace') as fh:
+            for line in fh:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get('type') == 'stats':
+                    rows.append(r)
+    return rows[-last_n:] if last_n > 0 else []
+
+
+def device_summary(rows):
+    def vals(key):
+        return [r[key] for r in rows if isinstance(r.get(key), (int, float)) and not isinstance(r.get(key), bool)]
+
+    def dropped(r):
+        if isinstance(r.get('frames_dropped'), int):
+            return r['frames_dropped']
+        return sum(r[k] for k in ('dropped_before_decode', 'dropped_decode_overrun', 'dropped_queue_overflow',
+                                  'dropped_selection_skip') if isinstance(r.get(k), int))
+    out = {'device_n': len(rows), 'decode_ms_mean': _mean(vals('decode_ms_mean')), 'decode_ms_p95': _p95(vals('decode_ms_p95')),
+           'decode_ms_p95_max': max(vals('decode_ms_p95'), default=None), 'device_fps': _mean(vals('presented_fps')),
+           'dropped_total': None, 'dropped_pct': None}
+    received = sum(vals('frames_received'))
+    if rows:
+        out['dropped_total'] = sum(dropped(r) for r in rows)
+        out['dropped_pct'] = 100.0 * out['dropped_total'] / received if received else None
+    return out
+
+
+def ladder_verdict(decode_p95, dropped_pct):
+    if decode_p95 is None or dropped_pct is None:
+        return 'NO_DEVICE_STATS'
+    return 'PASS' if decode_p95 < LADDER_DECODE_P95_MS and dropped_pct < LADDER_DROPPED_PCT else 'FAIL'
+
+
+def ladder_row(name, point_dir):
+    """Summary row of one ladder rung: server numbers from DIR/events.jsonl (the probe), device numbers from
+    DIR/device-stats.jsonl (select_device_stats output)."""
+    st = stats(os.path.join(point_dir, 'events.jsonl'), '/nonexistent')
+    rows = []
+    try:
+        with open(os.path.join(point_dir, 'device-stats.jsonl'), errors='replace') as f:
+            for line in f:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    dv = device_summary([r for r in rows if isinstance(r, dict)])
+    mbps = st['server_mbps'] if st['server_mbps'] is not None else st['bitrate_mbps']
+    r = dict.fromkeys(LADDER_COLUMNS, NA)
+    r.update(name=name, verdict=ladder_verdict(dv['decode_ms_p95'], dv['dropped_pct']),
+             encode_nvenc_ms=_num(st['encode_nvenc_ms'], '%.2f'), encode_nvenc_p95=_num(st['encode_nvenc_p95'], '%.2f'),
+             encode_latency_ms=_num(st['encode_latency_ms'], '%.2f'), encode_ms=_num(st['encode_ms'], '%.2f'),
+             encode_ms_p95=_num(st['encode_ms_p95'], '%.2f'), decode_ms_mean=_num(dv['decode_ms_mean'], '%.2f'),
+             decode_ms_p95=_num(dv['decode_ms_p95'], '%.2f'), decode_ms_p95_max=_num(dv['decode_ms_p95_max'], '%.2f'),
+             dropped_total=_num(dv['dropped_total'], '%d'), dropped_pct=_num(dv['dropped_pct'], '%.2f'),
+             device_fps=_num(dv['device_fps'], '%.1f'), bitrate_mbps=_num(mbps, '%.1f'), device_n=str(dv['device_n']))
+    try:
+        with open(os.path.join(point_dir, 'ERROR')) as f:
+            r['verdict'] = 'ERROR'
+            r['notes'] = ' '.join(f.read().split())[:300] or 'error'
+    except OSError:
+        pass
+    return '\t'.join(r[k].replace('\t', ' ') for k in LADDER_COLUMNS)
 
 
 def json_get(path, dotted):
@@ -388,7 +519,8 @@ def _one(path, name):
 
 def main(argv):
     usage = ('usage: fovmatrix.py names|check POINTS | sets|flag|eye-tangents|client|overlay-args POINTS NAME | merge-client FILE JSON | '
-             'dump-files DIR | stats EVENTS CONSOLE | header | row NAME DIR | json-get FILE a.b')
+             'dump-files DIR | stats EVENTS CONSOLE | header | row NAME DIR | json-get FILE a.b | '
+             'ladder-header | ladder-row NAME DIR | device-select DIR N [SINCE_UTC] | client-connected EVENTS')
     try:
         cmd, a = argv[1], argv[2:]
         if cmd == 'names':
@@ -417,6 +549,15 @@ def main(argv):
             print('\t'.join(SUMMARY_COLUMNS))
         elif cmd == 'row':
             print(summary_row(a[0], a[1]))
+        elif cmd == 'ladder-header':
+            print('\t'.join(LADDER_COLUMNS))
+        elif cmd == 'ladder-row':
+            print(ladder_row(a[0], a[1]))
+        elif cmd == 'device-select':   # the last N stats records as JSON lines (to DIR/device-stats.jsonl)
+            for rec in select_device_stats(a[0], int(a[1]), a[2] if len(a) > 2 else None):
+                print(json.dumps(rec, sort_keys=True))
+        elif cmd == 'client-connected':
+            return 0 if client_connected(a[0]) else 1
         elif cmd == 'json-get':
             print(json_get(a[0], a[1]))
         else:

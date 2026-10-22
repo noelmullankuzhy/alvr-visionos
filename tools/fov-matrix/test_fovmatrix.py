@@ -570,11 +570,13 @@ class RowTest(unittest.TestCase):
             self.assertEqual(r['verdict_encoded'], 'n/a')
             self.assertEqual((r['encode_ms_p95'], r['encode_over_budget']), ('12.35', '0.062'))
             # appended: the old columns keep their place
-            self.assertEqual(fm.SUMMARY_COLUMNS[11:14], ['notes', 'encode_ms_p95', 'encode_over_budget'])
-            self.assertEqual(fm.SUMMARY_COLUMNS[14:], ['centre_mtf50_cpd', 'nose_mtf50_cpd', 'temple_mtf50_cpd', 'up_mtf50_cpd',
+            self.assertEqual(fm.SUMMARY_COLUMNS[11:16], ['notes', 'encode_ms_p95', 'encode_over_budget', 'encode_nvenc_ms',
+                                                         'encode_nvenc_p95'])
+            self.assertEqual(fm.SUMMARY_COLUMNS[16:], ['centre_mtf50_cpd', 'nose_mtf50_cpd', 'temple_mtf50_cpd', 'up_mtf50_cpd',
                                                        'down_mtf50_cpd', 'display_ceiling_cpd'])
+            self.assertEqual((r['encode_nvenc_ms'], r['encode_nvenc_p95']), ('n/a', 'n/a'))   # this stats.json has no NVENC timer
             # no capture: the stream MTF columns are n/a; the display ceiling is the W33 constant from avp-field.json
-            self.assertEqual([r[k] for k in fm.SUMMARY_COLUMNS[14:19]], ['n/a'] * 5)
+            self.assertEqual([r[k] for k in fm.SUMMARY_COLUMNS[16:21]], ['n/a'] * 5)
             self.assertEqual(r['display_ceiling_cpd'], '17')
 
     def test_no_overlay_and_error_marker(self):
