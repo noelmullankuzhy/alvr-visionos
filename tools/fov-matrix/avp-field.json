@@ -16,5 +16,11 @@
   "asrun": {"size": [0.5, 0.45], "edge_ratio": [3, 3]},
   "centred": {"size": [0.5, 0.45], "edge_ratio": [3, 3], "rule": "band centre on the visible field's centre"},
   "wider": {"edge_ratio": [2.5, 2.5], "rule": "band spans the whole visible field, centred on it"},
-  "points": {"render_scale": 1.0, "bitrate_mbps": 100, "fps": 90}
+  "points": {"render_scale": 1.0, "bitrate_mbps": 100, "fps": 90},
+  "crop": {
+    "lens_reference_rays": "0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5",
+    "offset_deg": 0,
+    "margin_deg": 2,
+    "source": "ALVRClient/Diagnostics/BoundaryDots.swift BoundaryDotsLensReference.left (device-20261021, seal on; L rays deg CCW from right: eccentricity deg; R mirrored); CropFov.defaultMarginDeg"
+  }
 }

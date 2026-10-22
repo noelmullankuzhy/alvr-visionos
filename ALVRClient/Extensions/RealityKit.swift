@@ -157,7 +157,8 @@ public extension LayerRenderer.Drawable {
             down: fov.down * fov_inscribe_scale * fovPostScale,
         );
 
-        return (fov_orth_corrected, simd_float4(tan(-fov_orth_corrected.left), tan(fov_orth_corrected.right), tan(fov_orth_corrected.up), tan(-fov_orth_corrected.down)), viewTransform.translationOnly())
+        // The sent tangents become Renderer's uniforms.tangents: the video quad is drawn on them (CropFovTests).
+        return (fov_orth_corrected, ViewLayout.uniformTangents(left: fov_orth_corrected.left, right: fov_orth_corrected.right, up: fov_orth_corrected.up, down: fov_orth_corrected.down), viewTransform.translationOnly())
     }
     
     // Tangent magnitudes (left, right, bottom, top) on visionOS 2+, the app's deployment target. The visionOS 1

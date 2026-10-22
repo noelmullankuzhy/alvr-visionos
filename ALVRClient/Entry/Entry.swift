@@ -453,6 +453,13 @@ struct Entry: View {
                             }
                             Toggle("Resolution chart foveation", isOn: $gStore.settings.resolutionFoveation)
                                 .onChange(of: gStore.settings.resolutionFoveation) { saveAction() }
+                            Toggle("Crop FOV to outline", isOn: $gStore.settings.cropFovToOutline)
+                                .onChange(of: gStore.settings.cropFovToOutline) { saveAction() }
+                            Stepper("Crop margin \(String(format: "%g", gStore.settings.cropMarginDeg)) deg",
+                                    value: $gStore.settings.cropMarginDeg, in: 0...10, step: 0.5)
+                                .onChange(of: gStore.settings.cropMarginDeg) { saveAction() }
+                            Text("Next stream: each eye reports the Boundary dots lens outline's bounding box (reference + lens offset) widened by the margin, not the whole frustum; the rest of the view is black. Set the server's foveation center shift to the DIAG fov_sent axis_center_shift.")
+                                .font(.system(size: 10))
                         }
 
                         Button {

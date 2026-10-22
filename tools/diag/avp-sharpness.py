@@ -7,7 +7,8 @@ visible field, fov scales, foveation sizes). Replace the visible field there (e.
   python3 tools/diag/avp-sharpness.py doc > docs/lumen/avp-frustum-sharpness.md
 
 Variants: asrun (fixed size, no shift); axis (fixed size, band centred on the eye axis); centred (fixed size, band centred
-on the visible field); wider (band spans the whole visible field, centred on it); off. Each candidate's render is the
+on the visible field); wider (band spans the whole visible field, centred on it); off; crop (points rows a100-crop-C/-A
+only: the frame is the lens outline's bbox + margin, the client's "Crop FOV to outline", band on its eye axis). Each candidate's render is the
 largest at the 3648:2912 aspect whose foveated coded size fits the per-eye budget; px/deg is fov-overlay.py's page
 prediction (render px per degree over the foveation squeeze). Standard library only; `--field FILE` overrides the file."""
 import importlib.util
@@ -84,6 +85,46 @@ def mean(v):
     return sum(v) / len(v)
 
 
+def lens_ecc(rays, ray):
+    """Lens reference eccentricity at `ray` deg: linear between the nearest measured rays (BoundaryDotsLensReference.interpolate)."""
+    ray %= 360
+    if ray in rays:
+        return rays[ray]
+    keys = sorted(rays)
+    below = max([k for k in keys if k < ray], default=keys[-1])
+    above = min([k for k in keys if k > ray], default=keys[0])
+    span = (above - below) % 360
+    return rays[below] + (ray - below) % 360 / span * (rays[above] - rays[below])
+
+
+def crop_tan(p, eye, offset=None, margin=None):
+    """|tan| L,R,D,U the client sends with "Crop FOV to outline" (ALVRClient/CropFov.swift): the bbox of the lens outline
+    (reference + offset every 5 deg, R mirrored), each side widened by `margin` deg, no wider than the device frustum."""
+    c = p['crop']
+    offset = c['offset_deg'] if offset is None else offset
+    margin = max(0, c['margin_deg'] if margin is None else margin)
+    rays = {float(k): float(v) for k, v in (x.split(':') for x in c['lens_reference_rays'].split(','))}
+    pts = []
+    for ray in range(0, 360, 5):
+        r = math.tan(math.radians(max(0, lens_ecc(rays, ray if eye == 'L' else 540 - ray) + offset)))
+        pts.append((r * math.cos(math.radians(ray)), r * math.sin(math.radians(ray))))
+    box = (-min(x for x, _ in pts), max(x for x, _ in pts), -min(y for _, y in pts), max(y for _, y in pts))
+    return [min(math.tan(math.atan(t) + math.radians(margin)), lim) for t, lim in zip(box, p['frustum_tan_LRDU'][eye])]
+
+
+def crop_eyes(p):
+    """The sent |tan| per eye, rounded as written to eye_tangents."""
+    return {e: [round(v, 4) for v in crop_tan(p, e)] for e in 'LR'}
+
+
+def crop_shift(tans, c):
+    """center_shift (x, y) centring the band on the eye axis of per-eye |tan| L,R,D,U boxes at centre size c (mean of the eyes)."""
+    temporal_nasal = {'L': (0, 1), 'R': (1, 0)}
+    shx = mean([axis_shift(tans[e][temporal_nasal[e][0]], tans[e][temporal_nasal[e][1]], c[0]) for e in 'LR'])
+    shy = mean([axis_shift(tans[e][3], tans[e][2], c[1]) for e in 'LR'])     # up, down
+    return shx, shy
+
+
 def derive(p, s, variant):
     """(cx, cy, rx, ry, shx, shy) or None. One shift for both eyes (ALVR mirrors x for R): the mean of the per-eye ones."""
     if variant == 'off':
@@ -95,6 +136,10 @@ def derive(p, s, variant):
         (cx, cy), (rx, ry) = p['centred']['size'], p['centred']['edge_ratio']
         shx = mean([axis_shift(*sides(p, e, s)[:2], cx) for e in 'LR'])     # temporal, nasal
         shy = mean([axis_shift(*sides(p, e, s)[2:], cy) for e in 'LR'])     # up, down
+        return (cx, cy, rx, ry, round(shx, 3), round(shy, 3))
+    if variant == 'crop':                   # eye axis of the cropped frame (fov scale not applied: the crop is the frame)
+        (cx, cy), (rx, ry) = p['centred']['size'], p['centred']['edge_ratio']
+        shx, shy = crop_shift(crop_eyes(p), (cx, cy))
         return (cx, cy, rx, ry, round(shx, 3), round(shy, 3))
     fr = [field_fractions(p, e, s) for e in 'LR']
     fx, fy = mean([mean(x) for x, _ in fr]), mean([mean(y) for _, y in fr])
@@ -136,9 +181,10 @@ def max_render(fv, budget):
     return best
 
 
-def eye_detail(p, eye, s, fv, w, h):
-    """px/deg on the eye axis (h0, v0), at 10/20/30 deg (T10.. N.. U.. D..) and at the visible-field edges (Tf Nf Uf Df)."""
-    l, r, d, u = (s * v for v in p['frustum_tan_LRDU'][eye])
+def eye_detail(p, eye, s, fv, w, h, tans=None):
+    """px/deg on the eye axis (h0, v0), at 10/20/30 deg (T10.. N.. U.. D..) and at the visible-field edges (Tf Nf Uf Df).
+    `tans`: the frame's |tan| L,R,D,U instead of the scaled frustum (the crop)."""
+    l, r, d, u = tans or (s * v for v in p['frustum_tan_LRDU'][eye])
     ax, ay = axes_for(fv, w, h)
     x = fo.make_axis('h', 'render', -l, r, w, fov=None if fv is None else ax, mirror=eye == 'R')
     y = fo.make_axis('v', 'render', -u, d, h, fov=None if fv is None else ay)
@@ -189,6 +235,25 @@ def recommend(rows):
     return [first, second, third]
 
 
+def crop_rows(p):
+    """a100-crop-C/-A: the crop frame at budget C/A's render (the axis rows' foveation sizes, band on the cropped axis) and
+    the centre px/deg against the full frustum's at the same render."""
+    tans, fv = crop_eyes(p), derive(p, 1.0, 'crop')
+    axis = derive(p, 1.0, 'axis')
+    rows = {}
+    for bname in ('C', 'A'):
+        w, h, cw, ch = max_render(fv, BUDGETS[bname])
+        det = {e: eye_detail(p, e, 1.0, fv, w, h, tans=tans[e]) for e in 'LR'}
+        full = {e: eye_detail(p, e, 1.0, axis, w, h) for e in 'LR'}
+        f = p['frustum_tan_LRDU']['L']
+        rows['a100-crop-' + bname] = {
+            'fv': fv, 'render': (w, h), 'coded': (cw, ch), 'tans': tans, 'det': det,
+            'centre': min(det[e][k] for e in 'LR' for k in ('h0', 'v0')),
+            'frustum_centre': min(full[e][k] for e in 'LR' for k in ('h0', 'v0')),
+            'ratio': ((f[0] + f[1]) / (tans['L'][0] + tans['L'][1]), (f[2] + f[3]) / (tans['L'][2] + tans['L'][3]))}
+    return rows
+
+
 def fvtext(fv):
     return 'off' if fv is None else ','.join('%g' % v for v in fv)
 
@@ -207,6 +272,15 @@ def points(p):
     for r in recommend(list(candidates(p))):
         out.append('a%03d-%s-%s\t%g\t%g\t%s\t%g\t%g\teye_tangents=%s' % (round(r['s'] * 100), r['fov'], r['budget'], r['s'], round(r['render'][0] / ASPECT[0], 4),
                                                                          fvtext(r['fv']), pt['bitrate_mbps'], pt['fps'], eyes))
+    c = p['crop']
+    out.append('# Crop FOV to outline (ALVRClient/CropFov.swift, docs/lumen/crop-fov.md): lens outline bbox, offset %g, + %g deg '
+               'margin; eye_tangents = what the client sends.' % (c['offset_deg'], c['margin_deg']))
+    for name, r in crop_rows(p).items():
+        crop_eyes_text = 'L:%s;R:%s' % tuple(','.join('%g' % v for v in r['tans'][k]) for k in 'LR')
+        out.append('# %s: predicted centre %.1f px/deg (frustum %.1f at the same render, x%.2f h / x%.2f v)' % (
+            name, r['centre'], r['frustum_centre'], r['ratio'][0], r['ratio'][1]))
+        out.append('%s\t1\t%g\t%s\t%g\t%g\teye_tangents=%s' % (name, round(r['render'][0] / ASPECT[0], 4), fvtext(r['fv']),
+                                                             pt['bitrate_mbps'], pt['fps'], crop_eyes_text))
     return '\n'.join(out) + '\n'
 
 

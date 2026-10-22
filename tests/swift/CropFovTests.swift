@@ -63,7 +63,7 @@ enum CropFovTests {
         near(crop.x, 0.140988, "crop shift x in numbers", tolerance: 1e-4)
         near(crop.y, -0.030553, "crop shift y in numbers", tolerance: 1e-4)
         // One shift for both eyes (ALVR mirrors x for R): the mean of the per-eye shifts, equal for mirrored eyes.
-        let lOnly = CropFov.centerShift(left: cropL!, right: cropL!.yxzw, centerSize: size)
+        let lOnly = CropFov.centerShift(left: cropL!, right: simd_float4(cropL!.y, cropL!.x, cropL!.z, cropL!.w), centerSize: size)
         near(lOnly.x, crop.x, "mirrored eyes give the same shift", tolerance: 1e-6)
         // The band centre lands on the axis: 0.5 + s c0 = temporal / (temporal + nasal).
         near(0.5 + crop.x * 0.25, 0.949373 / 1.773709, "band centre x on the axis", tolerance: 1e-5)
