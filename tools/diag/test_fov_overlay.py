@@ -739,6 +739,34 @@ class RealSample(Base):
         self.check('oneone')
 
 
+M5 = REAL.parents[2] / 'm5' / 'f100-asrun'
+
+
+@unittest.skipUnless((M5 / 'dump' / 'meta.json').exists() and (M5 / 'capture' / 'capture.json').exists(), 'm5 sample not present')
+class RealM5(Base):
+    """W16 on the simulator proof data (read only): the encoder edge zone matches its prediction, the drawable extents are
+    measured or unverified, never a chart line mistaken for the border."""
+
+    def test_encoder_edge_zone_ratio(self):
+        for eye in 'LR':
+            code, j = self.measure('encoded', M5 / 'dump' / 'encoder-input.png', ['--meta', M5 / 'dump' / 'meta.json', '--eye', eye], eye)
+            edge = j['summary']['zones']['edge']
+            self.assertTrue(edge['n_resolvable'], eye)
+            self.assertAlmostEqual(edge['sharpness_px_per_deg'] / edge['predicted_px_per_deg'], 1.0, delta=0.1, msg=eye)
+
+    def test_drawable_extent_is_measured_or_unverified(self):
+        out = self.dir / 'd.json'
+        args = ['drawable', '--capture-dir', M5 / 'capture', '--fov-scale', '1.0', '--render', '3648x2912', '--foveation', '0.5,0.449999988,3,3,0,0',
+                '--out-json', out]
+        self.run_main(args)
+        s = json.loads(out.read_text())['summary']
+        for side, e in s['stream_extent_deg'].items():
+            self.assertTrue(e['measured_deg'] is None or abs(e['error_deg']) <= 0.5, (side, e))
+        if any(e['measured_deg'] is None for e in s['stream_extent_deg'].values()):
+            self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+        self.assertAlmostEqual(s['fitted_yaw_deg'], -0.385, delta=0.05)
+
+
 class Spec(unittest.TestCase):
     def test_pattern_widths_and_colours(self):
         img = fo.synth_render(1824, 1456, (1.7321, 1.0, 1.1918, 1.0), 1.0, 'L')
