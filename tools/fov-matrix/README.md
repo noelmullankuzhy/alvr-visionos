@@ -37,8 +37,7 @@ capture.json colour and pose fields (streaming captures): `encoding: "srgb"` = t
 encoded and copied as is; primaries are the drawable's, untagged), so a dim chart background is visible; `source_pixel_format`
 = the Metal pixel format of the drawable. `pose` = `{render, display, delta_deg, sim_yaw_dither_rad}`: `render` = the head pose
 the server rendered the captured frame for (the frame's view params), `display` = the pose the drawable was presented with, each
-`{yaw_deg, pitch_deg, roll_deg, t}` (`t` seconds on the layer clock); `delta_deg` = display minus render, per axis wrapped to
-(-180, 180]. Convention: right-handed, yaw about +Y, pitch about +X, roll about +Z, intrinsic Y-X-Z (R = Ry*Rx*Rz), degrees.
+`{yaw_deg, pitch_deg, roll_deg, t}` (`t` seconds on the layer clock); `delta_deg` = display relative to render (the display camera orientation in the render camera frame, R_render^T R_display, rotation parts only, decomposed intrinsic Y-X-Z). Convention: right-handed, yaw about +Y, pitch about +X, roll about +Z, intrinsic Y-X-Z (R = Ry*Rx*Rz), degrees.
 `sim_yaw_dither_rad` = the FakeHeadPose yaw ((seq mod 1024) x 1e-5 rad) sent with that frame's pose (simulator only, else null);
 idle captures have no render pose and carry no `pose` key.
 Files per point: `sets.txt pc-*.sh/.log console.log events.jsonl stats.json screenshot.png capture/ dump/ overlay/ ERROR`.

@@ -24,28 +24,33 @@ enum DiagCapturePose {
     //   render  = the tracking pose the server rendered the captured frame for (QueuedFrame.viewParams, converted
     //             by WorldTracker.convertSteamVRViewPose)
     //   display = the pose used to present the drawable (the device anchor at the vsync time, with floor correction)
-    //   delta_deg = display - render, each component wrapped to (-180, 180]
+    //   delta_deg = display relative to render: the display camera orientation expressed in the render camera frame,
+    //               R_rel = R_render^T * R_display (rotation parts only), decomposed intrinsic Y-X-Z. It is NOT the axis-by-axis
+    //               difference of the world Euler angles (those differ once the render camera is pitched or rolled).
     // Both are in the same world frame (the renderer's reprojection uses them together). t is the layer clock in seconds.
     struct Angles: Equatable {
         var yawDeg: Double, pitchDeg: Double, rollDeg: Double
         var t: Double
     }
 
-    static func angles(matrix m: simd_float4x4, t: Double) -> Angles {
-        let r02 = Double(m.columns.2.x), r12 = Double(m.columns.2.y), r22 = Double(m.columns.2.z)
-        let r10 = Double(m.columns.0.y), r11 = Double(m.columns.1.y)
+    private static func rotation(_ m: simd_float4x4) -> simd_double3x3 {
+        simd_double3x3(simd_double3(Double(m.columns.0.x), Double(m.columns.0.y), Double(m.columns.0.z)),
+                       simd_double3(Double(m.columns.1.x), Double(m.columns.1.y), Double(m.columns.1.z)),
+                       simd_double3(Double(m.columns.2.x), Double(m.columns.2.y), Double(m.columns.2.z)))
+    }
+
+    private static func decompose(_ m: simd_double3x3) -> (yawDeg: Double, pitchDeg: Double, rollDeg: Double) {
         let deg = 180 / Double.pi
-        return Angles(yawDeg: atan2(r02, r22) * deg, pitchDeg: asin(min(1, max(-1, -r12))) * deg, rollDeg: atan2(r10, r11) * deg, t: t)
+        return (atan2(m.columns.2.x, m.columns.2.z) * deg, asin(min(1, max(-1, -m.columns.2.y))) * deg, atan2(m.columns.0.y, m.columns.1.y) * deg)
     }
 
-    private static func wrap(_ degrees: Double) -> Double {
-        var d = degrees.truncatingRemainder(dividingBy: 360)
-        if d > 180 { d -= 360 } else if d <= -180 { d += 360 }
-        return d
+    static func angles(matrix m: simd_float4x4, t: Double) -> Angles {
+        let a = decompose(rotation(m))
+        return Angles(yawDeg: a.yawDeg, pitchDeg: a.pitchDeg, rollDeg: a.rollDeg, t: t)
     }
 
-    static func delta(render: Angles, display: Angles) -> (yawDeg: Double, pitchDeg: Double, rollDeg: Double) {
-        (wrap(display.yawDeg - render.yawDeg), wrap(display.pitchDeg - render.pitchDeg), wrap(display.rollDeg - render.rollDeg))
+    static func delta(render: simd_float4x4, display: simd_float4x4) -> (yawDeg: Double, pitchDeg: Double, rollDeg: Double) {
+        decompose(rotation(render).transpose * rotation(display))
     }
 
     private static func json(_ a: Angles) -> [String: Double] {
@@ -61,10 +66,11 @@ enum DiagCapturePose {
 
     // Adds "encoding", "source_pixel_format" and "pose" to capture.json; existing keys are untouched.
     // simYawDitherRad: the FakeHeadPose yaw ((sequence mod 1024) x 1e-5 rad) carried by the render pose; nil off the simulator.
-    static func annotate(_ capture: inout [String: Any], sourcePixelFormat: String, render: Angles, display: Angles, simYawDitherRad: Double?) {
+    static func annotate(_ capture: inout [String: Any], sourcePixelFormat: String, render: simd_float4x4, display: simd_float4x4,
+                         renderT: Double, displayT: Double, simYawDitherRad: Double?) {
         let d = delta(render: render, display: display)
         annotateEncoding(&capture, sourcePixelFormat: sourcePixelFormat)
-        capture["pose"] = ["render": json(render), "display": json(display),
+        capture["pose"] = ["render": json(angles(matrix: render, t: renderT)), "display": json(angles(matrix: display, t: displayT)),
                            "delta_deg": ["yaw": d.yawDeg, "pitch": d.pitchDeg, "roll": d.rollDeg],
                            "sim_yaw_dither_rad": simYawDitherRad as Any? ?? NSNull()] as [String: Any]
     }

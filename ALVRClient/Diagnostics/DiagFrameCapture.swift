@@ -1,4 +1,5 @@
 import Foundation
+import simd
 import Metal
 import CoreGraphics
 import ImageIO
@@ -22,7 +23,7 @@ enum DiagFrameCapture {
         let slices: Int
         let rateTables: [[String: Any]]
     }
-    typealias PoseRecord = (render: DiagCapturePose.Angles, display: DiagCapturePose.Angles, simYawDitherRad: Double?)
+    typealias PoseRecord = (render: simd_float4x4, display: simd_float4x4, renderT: Double, displayT: Double, simYawDitherRad: Double?)
     // binary16 bit pattern -> sRGB-encoded byte (a linear drawable is encoded through this table).
     private static let srgbByteForHalf: [UInt8] = (0...UInt16.max).map { DiagCaptureEncoding.srgbByte(Float(Float16(bitPattern: $0))) }
     private static let queue = DispatchQueue(label: "uk.lumenio.alvr.capture", qos: .utility)
@@ -51,6 +52,38 @@ enum DiagFrameCapture {
         }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw NSError(domain: "DiagCapturePNG", code: 2) }
+    }
+
+    // Readback bytes -> RGBA8 for the PNG (pure; unit tested without a GPU: tests/swift/DiagCaptureConvertTests.swift).
+    static func rgbaBytes(from pointer: UnsafeRawPointer, rowBytes: Int, width w: Int, height: Int, format: MTLPixelFormat) -> [UInt8] {
+        var rgba = [UInt8](repeating: 0, count: w * height * 4)
+        let half = format == .rgba16Float
+        let bgra = format == .bgra8Unorm || format == .bgra8Unorm_srgb
+        rgba.withUnsafeMutableBufferPointer { out in
+            for y in 0..<height {
+                let row = pointer.advanced(by: y * rowBytes)
+                let base = y * w * 4
+                if half {
+                    let src = row.assumingMemoryBound(to: UInt16.self)
+                    for i in 0..<(w * 4) {
+                        if i % 4 == 3 {
+                            let f = Float(Float16(bitPattern: src[i]))
+                            out[base + i] = UInt8((min(1, max(0, f.isNaN ? 0 : f)) * 255).rounded())
+                        } else {
+                            out[base + i] = srgbByteForHalf[Int(src[i])]
+                        }
+                    }
+                } else {
+                    let src = row.assumingMemoryBound(to: UInt8.self)
+                    for x in 0..<w {
+                        let i = x * 4
+                        out[base + i] = src[i + (bgra ? 2 : 0)]; out[base + i + 1] = src[i + 1]
+                        out[base + i + 2] = src[i + (bgra ? 0 : 2)]; out[base + i + 3] = src[i + 3]
+                    }
+                }
+            }
+        }
+        return rgba
     }
 
     static func formatName(_ format: MTLPixelFormat) -> String {
@@ -122,33 +155,7 @@ enum DiagFrameCapture {
                         let target = read.target, texture = target.texture
                         for slice in 0..<read.slices {
                             let pointer = read.buffer.contents().advanced(by: slice * read.imageBytes)
-                            var rgba = [UInt8](repeating: 0, count: texture.width * texture.height * 4)
-                            let w = texture.width, half = texture.pixelFormat == .rgba16Float
-                            let bgra = texture.pixelFormat == .bgra8Unorm || texture.pixelFormat == .bgra8Unorm_srgb
-                            rgba.withUnsafeMutableBufferPointer { out in
-                                for y in 0..<texture.height {
-                                    let row = pointer.advanced(by: y * read.rowBytes)
-                                    let base = y * w * 4
-                                    if half {
-                                        let src = row.assumingMemoryBound(to: UInt16.self)
-                                        for i in 0..<(w * 4) {
-                                            if i % 4 == 3 {
-                                                let f = Float(Float16(bitPattern: src[i]))
-                                                out[base + i] = UInt8((min(1, max(0, f.isNaN ? 0 : f)) * 255).rounded())
-                                            } else {
-                                                out[base + i] = srgbByteForHalf[Int(src[i])]
-                                            }
-                                        }
-                                    } else {
-                                        let src = row.assumingMemoryBound(to: UInt8.self)
-                                        for x in 0..<w {
-                                            let i = x * 4
-                                            out[base + i] = src[i + (bgra ? 2 : 0)]; out[base + i + 1] = src[i + 1]
-                                            out[base + i + 2] = src[i + (bgra ? 0 : 2)]; out[base + i + 3] = src[i + 3]
-                                        }
-                                    }
-                                }
-                            }
+                            let rgba = rgbaBytes(from: pointer, rowBytes: read.rowBytes, width: texture.width, height: texture.height, format: texture.pixelFormat)
                             let name = "drawable-\(target.drawableIndex)-texture-\(target.textureIndex)-slice-\(slice).png"
                             let url = directory.appendingPathComponent(name)
                             try writePNG(url: url, width: texture.width, height: texture.height, rgba: rgba)
@@ -172,7 +179,7 @@ enum DiagFrameCapture {
                     json["ms_encode_blit"] = encodedMs
                     let sourceFormat = formatName(reads[0].target.texture.pixelFormat)
                     if let pose {
-                        DiagCapturePose.annotate(&json, sourcePixelFormat: sourceFormat, render: pose.render, display: pose.display, simYawDitherRad: pose.simYawDitherRad)
+                        DiagCapturePose.annotate(&json, sourcePixelFormat: sourceFormat, render: pose.render, display: pose.display, renderT: pose.renderT, displayT: pose.displayT, simYawDitherRad: pose.simYawDitherRad)
                     } else {
                         DiagCapturePose.annotateEncoding(&json, sourcePixelFormat: sourceFormat)
                     }

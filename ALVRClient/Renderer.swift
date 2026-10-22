@@ -1202,8 +1202,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                     diagStreamFrame = true
                     if diagFrameCapture != nil, let frame = queuedFrame {
                         let dither = WorldTracker.shared.simYawDither(timestampNs: frame.timestamp).map { Double($0) }
-                        diagPose = (render: DiagCapturePose.angles(matrix: framePose, t: Double(frame.timestamp) / Double(NSEC_PER_SEC)),
-                                    display: DiagCapturePose.angles(matrix: simdDeviceAnchor, t: vsyncTime), simYawDitherRad: dither)
+                        diagPose = (render: framePose, display: simdDeviceAnchor, renderT: Double(frame.timestamp) / Double(NSEC_PER_SEC),
+                                    displayT: vsyncTime, simYawDitherRad: dither)
                     }
                     renderStreamingFrame(0, commandBuffer: commandBuffer, renderEncoder: encoder, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
                     endRenderStreamingFrame(renderEncoder: encoder)
