@@ -112,6 +112,10 @@ struct StreamStatsRecord: Encodable, Equatable {
     var pollWaitMsP95: Double?
     var lateMsMean: Double?
     var lateMsP95: Double?
+    // A/B arms: -ALVRAsyncDecode (max frames in flight, 0 when synchronous) and -ALVRDecodeRealTime.
+    var decodeInFlightMax: Int
+    var decodeAsync: Int
+    var decodeRealtime: Int
 }
 
 // How the render loop got the frame it draws (see FramePacing.Choice).
@@ -206,6 +210,9 @@ final class StreamTelemetry {
     private var queueAgeMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var pollWaitMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var lateMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
+    private var decodeInFlightMax = 0
+    private var decodeAsync = false
+    private var decodeRealtime = false
     private var lastPresentedTimestampNs: UInt64? = nil
     // Distinct timestamps presented in this and the previous window. A timestamp in neither is unique, so
     // only adjacent windows dedupe (one shown two windows back counts again). Memory is two windows of frames.
@@ -311,6 +318,21 @@ final class StreamTelemetry {
         } else {
             decodeErrors += 1
         }
+        lock.unlock()
+    }
+
+    // Called on decompression session creation with the launch flags it was created with.
+    func recordDecodeMode(async: Bool, realTime: Bool) {
+        lock.lock()
+        decodeAsync = async
+        decodeRealtime = realTime
+        lock.unlock()
+    }
+
+    // Called on each asynchronous submit with the frames now in flight.
+    func recordDecodeInFlight(_ count: Int) {
+        lock.lock()
+        decodeInFlightMax = max(decodeInFlightMax, count)
         lock.unlock()
     }
 
@@ -480,6 +502,7 @@ final class StreamTelemetry {
         repeatsNoNewFrame = 0
         repeatsRetry = 0
         lateFrames = 0
+        decodeInFlightMax = 0
         decodeMs.reset()
         receiveToPresentMs.reset()
         queueAgeMs.reset()
@@ -532,7 +555,10 @@ final class StreamTelemetry {
             pollWaitMsMean: ms3(pollWaitMs.mean),
             pollWaitMsP95: ms3(pollWaitMs.percentile(0.95)),
             lateMsMean: ms3(lateMs.mean),
-            lateMsP95: ms3(lateMs.percentile(0.95))
+            lateMsP95: ms3(lateMs.percentile(0.95)),
+            decodeInFlightMax: decodeInFlightMax,
+            decodeAsync: decodeAsync ? 1 : 0,
+            decodeRealtime: decodeRealtime ? 1 : 0
         )
         resetWindow(now)
         return record
