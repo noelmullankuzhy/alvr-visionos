@@ -245,7 +245,7 @@ struct EDRGrid {
             case .fine: value = 1 + Double(index) / 24
             case .coarse: value = 0.5 + Double(index) / 10
             case .knee: value = 1.30 + Double(index) / 60
-            case .wide: value = pow(49, Double(index) / 24)
+            case .wide: value = EDRGrid.wideReference * pow(100, Double(index) / 24) // 100-10,000 nits on a 203-nit reference, as the video coarse grid
             }
             return Entry(cell: "\(String(UnicodeScalar(65 + row)!))\(column + 1)", value: Float(value))
         }
@@ -254,6 +254,9 @@ struct EDRGrid {
         ["grid": layout.rawValue, "range": range.rawValue, "surround": surround.rawValue, "mirror": mirror ? 1 : 0, "borders": borders ? 1 : 0,
          "cell": entry.cell, "value": entry.value, "immersion": immersion]
     }
+    // 100 nits on the 203-nit reference, matching the video grid's labels; the other ranges keep the dim 0.15.
+    static let wideReference = 100.0 / 203.0
+    var labelLevel: Float { range == .wide ? Float(EDRGrid.wideReference) : 0.15 }
     // Small 3x5 glyphs outside the cluster, rendered through the same raw-value pipeline.
     func labels(patches: [EDRLayout.Patch]) -> [EDRLayout.Patch] {
         guard patches.count == 25 else { return [] }
@@ -269,7 +272,7 @@ struct EDRGrid {
             return Array(glyphs[index]).enumerated().compactMap { i, bit in
                 guard bit == "1" else { return nil }
                 return EDRLayout.Patch(x: x + Double(i % 3) * pixelW, y: y + Double(i / 3) * pixelH,
-                                       width: pixelW, height: pixelH, value: 0.15)
+                                       width: pixelW, height: pixelH, value: labelLevel)
             }
         }
     }

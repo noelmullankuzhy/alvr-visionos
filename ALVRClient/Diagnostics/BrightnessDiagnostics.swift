@@ -244,7 +244,7 @@ private struct BrightnessControls: View {
         } header: {
             Text("Pattern")
         } footer: {
-            Text(layout == .match ? "Match uses 0.02 steps, or 0.10 with Coarse." : layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70. Wide: 1x–49x, ×1.18 steps, surround selectable." :
+            Text(layout == .match ? "Match uses 0.02 steps, or 0.10 with Coarse." : layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70. Wide: 100–10,000 nits as the video grid, ×1.21 steps, surround selectable." :
                     "Automatic advances every 4 seconds, or 60 seconds with Sustained.")
         }
     }
