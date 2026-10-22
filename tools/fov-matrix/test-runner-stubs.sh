@@ -5,6 +5,7 @@
 set -u
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 T=$(mktemp -d "${TMPDIR:-/tmp}/fovmatrix-stub.XXXXXX") || exit 2
+T=$(CDPATH= cd -- "$T" && pwd) || exit 2     # normalised like the runner's own paths ("//" from a TMPDIR ending in "/")
 if [ "${1:-}" = --keep ]; then echo "keeping $T"; else trap 'rm -rf "$T"' EXIT; fi
 FAILS=0
 check() { if [ "$1" = ok ]; then echo "ok   $2"; else echo "FAIL $2"; FAILS=$((FAILS + 1)); fi; }
@@ -114,7 +115,8 @@ t "! [ -e $T/data/Documents/diag/capture.request ]" "request file consumed by th
 
 echo "== server dump without meta.json"
 rm -f "$T/overlay.args"
-NOMETA=1 run "$T/ok.tsv" "$T/o10" > "$T/o10.out" 2> "$T/o10.err"; rc=$?
+# subshell: a prefix assignment before a function call persists (and is exported) under a POSIX sh
+( NOMETA=1 run "$T/ok.tsv" "$T/o10" > "$T/o10.out" 2> "$T/o10.err" ); rc=$?
 t "[ $rc = 0 ] || [ $rc = 1 ]" "no-meta run finishes (rc=$rc)"
 t "grep '^render ' $T/overlay.args | grep -q -- '--fov-scale' && ! grep '^render ' $T/overlay.args | grep -q -- '--meta'" "without meta.json the render overlay falls back to --fov-scale"
 t "grep -q 'meta.json' $T/o10/run.log" "the missing meta.json is noted in the log"
