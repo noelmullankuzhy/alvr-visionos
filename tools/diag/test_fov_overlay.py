@@ -856,6 +856,117 @@ class Spec(unittest.TestCase):
         self.assertEqual(bytes(r[0:3]), bytes([round(0.12 * 255), round(0.06 * 255), round(0.06 * 255)]))
 
 
+AVP = {'L': (1.782, 1.019, 1.019, 1.217), 'R': (1.032, 1.820, 1.033, 1.236)}   # R.E.A.L. log |tan| L,R,D,U (GOAL.md:365)
+SIM_VIEW = '1,1,0.5625,0.5625'                  # simulator drawable view |tan| (chart-matrix-20261022 m6 capture.json)
+CENTRED = '0.5,0.45,3,3,0.536,-0.159'
+
+
+def csv(values):
+    return ','.join(repr(v) for v in values)
+
+
+class AvpFrustum(Base):
+    """Debug eye tangents: the server renders the recorded AVP per-eye frustum (x fov scale, foveation shift), the
+    simulator shows its centre. Every chart line in view lands within 0.05 deg of the asymmetric prediction."""
+    SIM = ['--render', '3648x2912', '--tangents', SIM_VIEW, '--phys', '1280x720', '--logical', '1600x900']
+
+    def check_lines(self, s):
+        self.assertTrue(s['verdict'].startswith('PASS'), s['verdict_reasons'])
+        self.assertLessEqual(s['max_abs_residual_deg'], 0.05)
+        self.assertGreaterEqual(s['n_found'], 0.9 * s['n_predicted'])
+
+    def test_encoded_both_eyes_with_shift(self):
+        for eye in 'LR':
+            args = ['--render', '1824x1456', '--tangents', csv(AVP[eye]), '--fov-scale', '0.85', '--foveation', CENTRED, '--eye', eye]
+            png = self.dir / ('e%s.png' % eye)
+            self.assertEqual(self.run_main(['synth', '--kind', 'encoded', '--out-png', png] + args), 0)
+            code, j = self.measure('encoded', png, args, 'e' + eye)
+            self.check_lines(j['summary'])
+            self.assertEqual(code, 0)
+
+    def test_meta_with_avp_tangents_and_its_vertical_order(self):
+        s = 0.7
+        sig = lambda t: [-s * t[0], s * t[1], -s * t[2], s * t[3]]       # FrameRender.cpp meta: TopLeft.x, BottomRight.x, down, up
+        meta = {'tangents': [sig(AVP['L']), sig(AVP['R'])], 'renderEyeSize': [1824, 1456], 'foveation': True,
+                'centerSize': [0.5, 0.449999988], 'centerShift': [0.536, -0.159], 'edgeRatio': [3, 3], 'codedSize': [2432, 928]}
+        mp = self.dir / 'meta.json'
+        mp.write_text(json.dumps(meta))
+        for eye in 'LR':
+            png = self.dir / ('r%s.png' % eye)
+            self.assertEqual(self.run_main(['synth', '--kind', 'render', '--render', '1824x1456', '--fov-scale', str(s), '--tangents',
+                                            csv(AVP[eye]), '--eye', eye, '--out-png', png]), 0)
+            code, j = self.measure('render', png, ['--meta', mp, '--eye', eye], 'm' + eye)
+            self.check_lines(j['summary'])
+        swapped = dict(meta, tangents=[[t[0], t[1], -t[3], -t[2]] for t in meta['tangents']])   # up and down exchanged
+        mp.write_text(json.dumps(swapped))
+        code, j = self.measure('render', png, ['--meta', mp, '--eye', 'R'], 'swapped')
+        self.assertEqual(j['summary']['verdict'], 'FAIL')
+        self.assertTrue(any(r.startswith('y ') for r in j['summary']['verdict_reasons']), j['summary']['verdict_reasons'])
+
+    def capture(self, s, eye='L'):
+        d = self.dir / ('cap-%s-%s' % (s, eye))
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d, '--eye', eye, '--fov-scale', s,
+                                        '--debug-eye-tangents', csv(AVP[eye])] + self.SIM), 0)
+        return d
+
+    def run_drawable(self, d, s, eye='L', name='d'):
+        out = self.dir / (name + '.json')
+        code = self.run_main(['drawable', '--capture-dir', d, '--eye', eye, '--fov-scale', s, '--render', '3648x2912',
+                              '--foveation', CENTRED, '--out-json', out])
+        j = json.loads(out.read_text())
+        return code, j['summary'], j['lines']
+
+    def test_capture_records_the_reported_and_requested_tangents(self):
+        cap = json.loads((self.capture('0.85') / 'capture.json').read_text())
+        dbg = cap['debug_eye_tangents']
+        self.assertEqual(dbg['requested']['L'], list(AVP['L']))
+        for got, want in zip(dbg['reported']['L'], AVP['L']):
+            self.assertAlmostEqual(got, 0.85 * want, places=9)
+        self.assertEqual(dbg['fov_render_scale'], 0.85)
+        self.assertEqual(cap['slices'][0]['tangents'], [1.0, 1.0, 0.5625, 0.5625])     # the drawable's own projection
+
+    def test_drawable_lines_match_with_the_nasal_edge_in_view(self):
+        for eye in 'LR':
+            code, s, lines = self.run_drawable(self.capture('0.85', eye), '0.85', eye, 'n' + eye)
+            self.check_lines(s)
+            self.assertEqual(code, 0)
+            self.assertEqual(s['params']['stream_tangents_source'], 'capture.json debug_eye_tangents')
+            nasal = 'right' if eye == 'L' else 'left'
+            st = {k: v['status'] for k, v in s['stream_extent_deg'].items()}
+            self.assertEqual(st, dict({'left': 'out_of_view', 'right': 'out_of_view', 'up': 'out_of_view', 'down': 'out_of_view'},
+                                      **{nasal: 'measured'}), eye)
+            self.assertLessEqual(abs(s['stream_extent_deg'][nasal]['error_deg']), 0.5)
+
+    def test_out_of_view_lines_are_not_predicted(self):
+        code, s, lines = self.run_drawable(self.capture('1.0'), '1.0')
+        self.assertLessEqual(max(abs(l['angle_deg']) for l in lines if l['axis'] == 'x'), 45)
+        self.assertLessEqual(max(abs(l['angle_deg']) for l in lines if l['axis'] == 'y'), 25)
+        self.assertEqual(s['n_found'], s['n_predicted'])
+
+    def test_every_edge_out_of_view_passes_on_the_lines_with_a_note(self):
+        code, s, lines = self.run_drawable(self.capture('1.0'), '1.0')
+        self.check_lines(s)
+        self.assertEqual(code, 0)
+        self.assertEqual({v['status'] for v in s['stream_extent_deg'].values()}, {'out_of_view'})
+        self.assertIn('no stream edge in view', ' '.join(s['notes']))
+        self.assertNotIn('no stream edge in view', ' '.join(s['verdict_reasons']))
+
+    def test_reported_tangents_not_scaled_by_fov_scale_fail(self):
+        code, s, lines = self.run_drawable(self.capture('0.85'), '0.7')
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertNotEqual(code, 0)
+        self.assertIn('reported tangents', ' '.join(s['verdict_reasons']))
+
+    def test_without_the_debug_record_the_symmetric_stream_is_assumed_and_fails(self):
+        d = self.capture('1.0')
+        cap = json.loads((d / 'capture.json').read_text())
+        del cap['debug_eye_tangents']
+        (d / 'capture.json').write_text(json.dumps(cap))
+        code, s, lines = self.run_drawable(d, '1.0')
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertEqual(s['params']['stream_tangents_source'], 'fov-scale x view tangents')
+
+
 class Performance(Base):
     def test_full_size_image_under_60_s(self):
         png = self.dir / 'big.png'

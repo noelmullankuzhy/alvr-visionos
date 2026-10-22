@@ -25,7 +25,11 @@ so the stream extent is the check, per side (JSON stream_extent_deg.<side>.statu
 predicted edge lands outside the drawable (within 2 px of its border or beyond), which cannot be measured and is not a
 failure ("stream <side>: out of view (predicted .., drawable edge ..)"); unverified, when it is predicted inside but not
 detected (the stream background is not separable from the surround), which FAILs as "stream extent unverified (<sides>)".
-With every side out of view nothing is measured and the point FAILs as "no stream edge in view". capture.json pose.delta_deg {yaw, pitch, roll} (display
+With every side out of view nothing is measured and the point FAILs as "no stream edge in view". capture.json
+debug_eye_tangents (client -ALVRDebugEyeTangents: the server got per-eye |tan| L,R,D,U "reported", fov_render_scale x
+"requested", not the view) sets the stream extent; a reported/requested ratio off --fov-scale FAILs ("reported tangents
+.."), and there all sides out of view is a summary note, since the lines placed by the reported frustum carry the check.
+Chart lines beyond the drawable are not predicted. capture.json pose.delta_deg {yaw, pitch, roll} (display
 minus render, right-handed, yaw +Y, pitch +X, roll +Z, intrinsic Y-X-Z) is compensated in the predicted positions; without
 it one yaw is fitted to the x lines and a pass is labelled PASS-after-fitted-yaw. Drawable px/deg (client pixels) are
 reported apart from the stream (coded) px/deg that the sharpness and prediction use; resolvability is judged in stream px.
@@ -521,13 +525,17 @@ def rate_table(logical, physical, rmin=0.35):
     for r in rates:
         acc += r * scale
         table.append(acc)
+    table[-1] = float(physical)                 # the sum can land a hair above physical, and the image length is its ceil
     return table
 
 
-def synth_drawable(directory, w, h, logical, tangents, s, render, eye, encoding='linear', pose=None, stream=None):
-    """stream: |tan| L,R,D,U the stream covers (default s x the view tangents)."""
+def synth_drawable(directory, w, h, logical, tangents, s, render, eye, encoding='linear', pose=None, stream=None, debug=None):
+    """stream: |tan| L,R,D,U the stream covers (default s x the view tangents). debug: this eye's -ALVRDebugEyeTangents
+    |tan| L,R,D,U; the client reports s x those (the stream) and records both in capture.json debug_eye_tangents."""
     directory.mkdir(parents=True, exist_ok=True)
     left, right, down, up = tangents
+    if debug:
+        stream = tuple(s * v for v in debug)
     sl_, sr_, sd_, su_ = stream or (s * left, s * right, s * down, s * up)
     xt, yt = rate_table(logical[0], w), rate_table(logical[1], h)
     x = make_axis('h', 'drawable', -sl_, sr_, render[0], drawable=(-left, right, 0, logical[0], xt), pose=pose)
@@ -541,6 +549,9 @@ def synth_drawable(directory, w, h, logical, tangents, s, render, eye, encoding=
         'viewport': [0, 0, logical[0], logical[1]], 'tangents': [left, right, down, up],
         'rate_map': {'screen_w': logical[0], 'screen_h': logical[1], 'physical_x': xt, 'physical_y': yt, 'layer': 0}}]}
     meta['pose'] = {'delta_deg': (pose or Pose()).delta()}
+    if debug:
+        meta['debug_eye_tangents'] = {'argument': '%s:%s' % (eye, ','.join(repr(v) for v in debug)), 'fov_render_scale': s,
+                                      'requested': {eye: list(debug)}, 'reported': {eye: list(stream)}}
     if encoding == 'srgb':                      # linear (the client's raw drawable) is the absent default
         meta['encoding'] = 'srgb'
     (directory / 'capture.json').write_text(json.dumps(meta))
@@ -705,7 +716,9 @@ def analyse(pix, width, region, xaxis, yaxis, drawable=False):
                                                                ('h', 'horizontal', 'y', yaxis, y0, rel_x, h, yspan)):
         axkind = 'h' if kind == 'v' else 'v'
         specs = chart_lines(axkind, axis.lo, axis.hi, axis.n_render)
-        preds = sorted(((s, axis.px(s[1]) - off) for s in specs if 0 <= axis.px(s[1]) - off < n_axis), key=lambda sp: sp[1])
+        # drawable: a line beyond the view (or cut by its border) is out of view, not predicted at the border
+        pos, m = (axis.px_unclamped, EDGE_MARGIN_PX) if hasattr(axis, 'px_unclamped') else (axis.px, 0)
+        preds = sorted(((s, axis.px(s[1]) - off) for s in specs if m <= pos(s[1]) - off < n_axis - m), key=lambda sp: sp[1])
         prof, used = profile(pix, width, region, kind, other)
         t0, t1 = axis.band_t()
         tau_of = (lambda a: math.tan(a * D)) if axkind == 'h' else (lambda a: -math.tan(a * D))
@@ -801,7 +814,7 @@ def summarise(lines, extent, params, foveated):
     res = [abs(l['residual_deg']) for l in found]
     s = {'n_predicted': len(lines), 'n_found': len(found),
          'median_abs_residual_deg': _median(res), 'max_abs_residual_deg': max(res) if res else None,
-         'stream_extent_deg': extent, 'zones': {}, 'axes': {}}
+         'stream_extent_deg': extent, 'zones': {}, 'axes': {}, 'notes': []}
     for zone in ('band', 'edge'):
         s['zones'][zone] = zone_stats([l for l in lines if l['zone'] == zone], params.get('mode') == 'drawable')
     reasons = []
@@ -838,7 +851,10 @@ def summarise(lines, extent, params, foveated):
         # the head-locked lines cannot test s: the extent is the only check, so an unmeasured one is a failure
         missing = [side for side, e in extent.items() if e['status'] == 'unverified']
         if all(e['status'] == 'out_of_view' for e in extent.values()):
-            reasons.append('no stream edge in view')      # out-of-view sides pass only beside a measured one
+            if params.get('debug_eye_tangents'):          # the stream is the reported per-eye frustum: the lines test it
+                s['notes'].append('no stream edge in view (debug eye tangents: the lines carry the check)')
+            else:
+                reasons.append('no stream edge in view')  # out-of-view sides pass only beside a measured one
         if missing:
             lv, why = params.get('extent_levels'), ''
             if lv and not lv['separable']:
@@ -975,6 +991,8 @@ def build_parser():
     p.add_argument('--foveation', help='cx,cy,rx,ry,shx,shy or off (default off)')
     p.add_argument('--stream-tangents', help='L,R,D,U |tan| the stream really covers (default fov-scale x tangents; the client sends '
                    'larger circumscribed tangents when the views are canted)')
+    p.add_argument('--debug-eye-tangents', help='synth drawable: this eye\'s -ALVRDebugEyeTangents |tan| L,R,D,U; the stream is '
+                   'fov-scale x these and capture.json records debug_eye_tangents (drawable mode reads it)')
     p.add_argument('--meta', type=Path, help='ALVR angle-chart dump meta.json: tangents, render size, foveation, coded size')
     p.add_argument('--out-png')
     p.add_argument('--out-json')
@@ -1007,7 +1025,8 @@ def do_synth(a):
         phys, logical = size_arg(a.phys, '--phys'), size_arg(a.logical, '--logical')
         synth_drawable(a.out_dir, phys[0], phys[1], logical, tangents, a.fov_scale, render, a.eye, a.encoding,
                       Pose(*pair(a.pose_delta, float, 3, '--pose-delta')),
-                      tuple(pair(a.stream_tangents, float, 4, '--stream-tangents')) if a.stream_tangents else None)
+                      tuple(pair(a.stream_tangents, float, 4, '--stream-tangents')) if a.stream_tangents else None,
+                      tuple(pair(a.debug_eye_tangents, float, 4, '--debug-eye-tangents')) if a.debug_eye_tangents else None)
     return 0
 
 
@@ -1022,6 +1041,18 @@ def load_meta(path, eye):
                                                               m['edgeRatio'][1], m['centerShift'][0], m['centerShift'][1]))
     else:
         out['foveation'] = 'off'
+    return out
+
+
+def debug_record(cap, eye):
+    """capture.json debug_eye_tangents (client -ALVRDebugEyeTangents) -> this eye's requested and reported |tan| L,R,D,U."""
+    rec = cap['debug_eye_tangents']
+    try:
+        out = tuple(tuple(float(v) for v in rec[key][eye]) for key in ('requested', 'reported'))
+    except (KeyError, TypeError, ValueError):
+        raise ValueError('capture.json debug_eye_tangents has no requested/reported %s tangents' % eye)
+    if any(len(t) != 4 or not all(math.isfinite(v) and v > 0 for v in t) for t in out):
+        raise ValueError('capture.json debug_eye_tangents %s: need four positive |tan| L,R,D,U' % eye)
     return out
 
 
@@ -1069,9 +1100,19 @@ def run_measure(a):
         render = (w, h) if mode == 'render' else REN
     left, right, down, up = tangents
     lo_x, hi_x, lo_y, hi_y = -s * left, s * right, -s * up, s * down
+    source, notes = 'fov-scale x view tangents', []
+    debug = debug_record(cap, a.eye) if mode == 'drawable' and 'debug_eye_tangents' in cap else None
     if a.stream_tangents:                       # the stream's own |tan| L,R,D,U (already s x view): replaces s x tangents
         sl_, sr_, sd_, su_ = pair(a.stream_tangents, float, 4, '--stream-tangents')
         lo_x, hi_x, lo_y, hi_y = -sl_, sr_, -su_, sd_
+        source = '--stream-tangents'
+    elif debug:                                 # -ALVRDebugEyeTangents: the client reported these, not its view
+        requested, reported = debug
+        lo_x, hi_x, lo_y, hi_y = -reported[0], reported[1], -reported[3], reported[2]
+        source = 'capture.json debug_eye_tangents'
+        if any(abs(r - s * q) > 0.003 * s * q for q, r in zip(requested, reported)):
+            notes.append('reported tangents %s are not fov_scale %g x the debug eye tangents %s' % (
+                ','.join('%.4f' % v for v in reported), s, ','.join('%.4f' % v for v in requested)))
     fov = parse_foveation(foveation, render)
     mirror = a.eye == 'R'
     if mode == 'render':
@@ -1093,7 +1134,8 @@ def run_measure(a):
               'foveation': foveation or 'off', 'region': [x0, y0, w, h], 'image_size': [width, height]}
     if mode == 'drawable':
         params['encoding'] = encoding
-    notes = []
+        params['stream_tangents_source'] = source
+        params['debug_eye_tangents'] = debug is not None
     if mode == 'encoded':
         coded = (fov[0]['coded'], fov[1]['coded'])
         params['coded_size_predicted'] = list(coded)
@@ -1111,7 +1153,10 @@ def run_measure(a):
             lines = analyse(pix, width, region, xaxis, yaxis, True)
         params['pose'] = {'source': 'capture.json' if fitted is None else 'fitted-yaw', 'delta_deg': pose.delta()}
     edges = None
-    if mode == 'drawable':
+    predicted = extent_report(mode, xaxis, yaxis, None, region) if mode == 'drawable' else {}
+    if predicted and all(e['status'] == 'out_of_view' for e in predicted.values()):
+        params['extent_levels'] = None          # the stream fills the drawable: no surround, so no edge to look for
+    elif mode == 'drawable':
         levels = edge_levels(pix, width, region, xaxis.span(), yaxis.span())
         params['extent_levels'] = levels
         xa = xb = ya = yb = None
@@ -1163,6 +1208,8 @@ def print_summary(summary, mode, eye, s):
             print('  stream {}: measured {:.2f} deg, predicted {:.2f} deg'.format(side, e['measured_deg'], e['predicted_deg']))
         elif e.get('status') == 'out_of_view':
             print('  stream {}: out of view (predicted {:.2f} deg, drawable edge {:.2f} deg)'.format(side, e['predicted_deg'], e['drawable_edge_deg']))
+    for note in summary.get('notes', []):
+        print('  note: ' + note)
     fit = summary.get('fitted_yaw_deg')
     print('{}{}{}'.format(summary['verdict'], ''.join('; ' + r for r in summary['verdict_reasons']),
                           '' if fit is None else ' (fitted yaw %.3f deg; capture.json has no pose.delta_deg)' % fit))
