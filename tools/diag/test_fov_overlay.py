@@ -772,6 +772,124 @@ class PoseDelta(Base):
         self.assertEqual(self.run_main(['drawable', '--capture-dir', d, '--render', '912x728', '--fov-scale', '0.65']), 2)
 
 
+class SharpnessChain(Base):
+    """W29: band sharpness and PSF per client stage (render -> decoded -> expanded -> drawable), each in its own px/deg.
+    Synthetic stages carry a known Gaussian blur (cumulative FWHM in degrees) on box lines; the chain table must recover it."""
+    PSF = (0.0, 0.08, 0.10, 0.16)                     # render, decoded, expanded, drawable (cumulative)
+    ARGS = ['--render', '912x728', '--tangents', '0.35,0.35,0.28,0.28', '--foveation', '0.7,0.7,3,3,0,0',
+            '--phys', '640x560', '--logical', '880x770', '--view-tangents', '0.5,0.5,0.4,0.4']
+
+    def synth_chain(self, eye='L', psf=PSF, extra=()):
+        d = self.dir / 'point'
+        argv = ['synth', '--kind', 'chain', '--out-dir', d, '--eye', eye, '--stage-psf', ','.join(map(str, psf))] + self.ARGS
+        self.assertEqual(self.run_main(argv + list(extra)), 0)
+        return d
+
+    def chain(self, d, eye='L', name='chain'):
+        out = self.dir / (name + '.json')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = self.run_main(['chain', '--capture-dir', d / 'capture', '--meta', d / 'dump' / 'meta.json', '--eye', eye,
+                                  '--out-json', out])
+        return code, (json.loads(out.read_text()) if out.exists() else None), buf.getvalue()
+
+    def test_box_gauss_fwhm_inverts(self):
+        for w in (0.05, 0.13):
+            self.assertAlmostEqual(fo.box_gauss_fwhm(w, 0.0), w, places=9)
+            for p in (0.02, 0.08, 0.2):
+                f = fo.box_gauss_fwhm(w, p)
+                self.assertGreater(f, max(w, p) - 1e-9)
+                self.assertAlmostEqual(fo.psf_from_fwhm(f, w), p, delta=p * 0.005)
+            self.assertEqual(fo.psf_from_fwhm(w * 0.9, w), 0.0)       # narrower than the line itself: no blur measurable
+
+    def test_synth_chain_writes_capture_contract(self):
+        d = self.synth_chain()
+        cap = json.loads((d / 'capture' / 'capture.json').read_text())
+        self.assertEqual([s['eye'] for s in cap['slices']], ['L'])
+        stages = {s['stage']: s for s in cap['stages']}
+        self.assertEqual(set(stages), {'decoded', 'expanded'})
+        for s in stages.values():
+            for key in ('eye', 'png', 'width', 'height', 'pixel_format', 'sampler', 'source'):
+                self.assertIn(key, s, s['stage'])
+            self.assertTrue((d / 'capture' / s['png']).exists())
+            self.assertEqual(set(s['sampler']), {'min_filter', 'mag_filter', 'mip_filter', 'address', 'coord'})
+        self.assertEqual((stages['expanded']['width'], stages['expanded']['height']), (912, 728))
+        fx, fy = fo.parse_foveation('0.7,0.7,3,3,0,0', (912, 728))
+        self.assertEqual((stages['decoded']['width'], stages['decoded']['height']), (fx['coded'], fy['coded']))
+        self.assertEqual([r['step'] for r in cap['resample_chain']], ['decode_chroma', 'ffr_expand_and_warp', 'compositor'])
+
+    def test_chain_recovers_each_stage_psf(self):
+        d = self.synth_chain()
+        code, j, out = self.chain(d)
+        self.assertEqual(code, 0, out)
+        rows = {r['stage']: r for r in j['stages']}
+        self.assertEqual([r['stage'] for r in j['stages']], ['render', 'decoded', 'expanded', 'drawable'])
+        for stage, want in zip(('render', 'decoded', 'expanded', 'drawable'), self.PSF):
+            r = rows[stage]
+            self.assertGreaterEqual(r['n_lines'], 4, stage)
+            if want == 0:
+                self.assertLess(r['psf_deg'], 0.01, stage)
+            else:
+                self.assertAlmostEqual(r['psf_deg'], want, delta=0.1 * want, msg=(stage, r))
+        added = [math.sqrt(max(0.0, b * b - a * a)) for a, b in zip(self.PSF, self.PSF[1:])]
+        for stage, want in zip(('decoded', 'expanded', 'drawable'), added):
+            self.assertAlmostEqual(rows[stage]['added_psf_deg'], want, delta=0.15 * want, msg=(stage, rows[stage]))
+        self.assertEqual(j['dominant_stage'], 'drawable')
+
+    def test_each_stage_is_measured_in_its_own_px_per_deg(self):
+        d = self.synth_chain(psf=(0.0, 0.0, 0.0, 0.0))
+        code, j, out = self.chain(d)
+        rows = {r['stage']: r for r in j['stages']}
+        # band: the coded image is 1:1 with the render, so render, decoded and expanded share one grid
+        for stage in ('decoded', 'expanded'):
+            self.assertAlmostEqual(rows[stage]['grid_px_per_deg'], rows['render']['grid_px_per_deg'], delta=0.02 * rows['render']['grid_px_per_deg'])
+        self.assertLess(rows['drawable']['grid_px_per_deg'], 0.8 * rows['render']['grid_px_per_deg'])   # a coarser drawable
+        for r in j['stages']:
+            self.assertAlmostEqual(r['predicted_px_per_deg'], rows['render']['predicted_px_per_deg'], places=6)   # the same stream lines
+        self.assertAlmostEqual(rows['render']['measured_px_per_deg'], rows['render']['predicted_px_per_deg'], delta=0.05 * rows['render']['predicted_px_per_deg'])
+
+    def test_chain_table_is_printed(self):
+        d = self.synth_chain()
+        code, j, out = self.chain(d)
+        self.assertIn('chain eye=L', out)
+        for stage in ('render', 'decoded', 'expanded', 'drawable'):
+            self.assertRegex(out, r'(?m)^  %s ' % stage)
+        for col in ('grid px/deg', 'pred px/deg', 'meas px/deg', 'PSF deg', 'added PSF deg'):
+            self.assertIn(col, out)
+        self.assertIn('dominant: drawable', out)
+
+    def test_right_eye_without_a_drawable_slice(self):
+        d = self.synth_chain(eye='R')
+        cap = json.loads((d / 'capture' / 'capture.json').read_text())
+        cap['slices'] = []                                  # one-view simulator: only the left eye is a drawable slice
+        (d / 'capture' / 'capture.json').write_text(json.dumps(cap))
+        code, j, out = self.chain(d, eye='R')
+        self.assertEqual(code, 0, out)
+        rows = {r['stage']: r for r in j['stages']}
+        self.assertIsNone(rows['drawable']['psf_deg'])
+        self.assertIn('not captured', rows['drawable']['note'])
+        self.assertAlmostEqual(rows['expanded']['psf_deg'], self.PSF[2], delta=0.1 * self.PSF[2])
+        self.assertEqual(j['dominant_stage'], 'decoded')     # adds 0.08 deg; expanded adds sqrt(0.10^2 - 0.08^2) = 0.06
+
+    def test_capture_without_stages_still_reports_render_and_drawable(self):
+        d = self.synth_chain()
+        cap = json.loads((d / 'capture' / 'capture.json').read_text())
+        del cap['stages']
+        (d / 'capture' / 'capture.json').write_text(json.dumps(cap))
+        code, j, out = self.chain(d)
+        self.assertEqual(code, 0, out)
+        rows = {r['stage']: r for r in j['stages']}
+        self.assertIsNone(rows['decoded']['psf_deg'])
+        self.assertAlmostEqual(rows['drawable']['psf_deg'], self.PSF[3], delta=0.1 * self.PSF[3])
+        self.assertAlmostEqual(rows['drawable']['added_psf_deg'], self.PSF[3], delta=0.1 * self.PSF[3])   # against the render
+
+    def test_chain_without_render_image_exits_2(self):
+        d = self.synth_chain()
+        (d / 'dump' / 'chart-L.png').unlink()
+        code, j, out = self.chain(d)
+        self.assertEqual(code, 2)
+
+
 REAL = Path('/Users/noel/Projects/Management/goals/rdr2-vr/evidence/chart-matrix-20261022/m1/f100-asrun/dump')
 
 

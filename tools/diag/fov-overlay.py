@@ -12,7 +12,10 @@ Modes (first argument):
             covers s x the view tangents, black outside
             (assumption: when the views are canted the client sends circumscribed tangents, larger than s x view,
             RealityKit.swift:98-160 / Renderer.swift:962; pass --stream-tangents L,R,D,U to override)
-  synth     write a synthetic image (--kind render|encoded|drawable) from the same parameters, for tests
+  synth     write a synthetic image (--kind render|encoded|drawable) from the same parameters, for tests; --kind chain
+            writes a whole matrix point (dump/ and capture/ with stage images) blurred per stage by --stage-psf
+  chain     sharpness per client stage, render -> decoded -> expanded -> drawable, each in its own px/deg (--capture-dir,
+            --meta; capture.json "stages"): docs/lumen/sharpness-chain.md. Exit 0, or 2 on bad input
 
 --tangents L,R,D,U are literal |tan| of the render FOV's left/right/down/up (screen sides). Default device: left eye
 1.7321,1.0,1.1918,1.0 (temporal, nasal, down, up); the right eye is mirrored (1.0,1.7321,1.1918,1.0). The render FOV
@@ -66,6 +69,12 @@ PASS_MEDIAN_DEG, PASS_MAX_DEG, PASS_EXTENT_DEG, PASS_FOUND = 0.1, 0.5, 0.5, 0.5
 MIN_RESOLVABLE_PX = 2.0                      # lines narrower than this in the image cannot show sharpness
 EDGE_MARGIN_PX = 2                           # a predicted stream edge this close to the drawable border (or beyond it) is out of view
 SEP_MIN = 8                                 # the stream background must stand this many (sRGB) counts above the surround
+GAUSS_FWHM_SIGMA = 2 * math.sqrt(2 * math.log(2))   # FWHM / sigma of a Gaussian
+CHAIN_STAGES = ('render', 'decoded', 'expanded', 'drawable')
+# The client stream fragment shaders' colorSampler (Shaders.metal videoFrameFragmentShader_*; Metal's default address
+# mode is clamp_to_edge). DiagFrameCapture writes the same dictionary per stage into capture.json.
+STREAM_SAMPLER = {'min_filter': 'linear', 'mag_filter': 'linear', 'mip_filter': 'none', 'address': 'clamp_to_edge',
+                  'coord': 'normalized'}
 
 
 # ---- page maths (frustum-pixel-map.html, section 7) --------------------------------------------------------------
@@ -464,11 +473,35 @@ def _coverage(axis, kind, i, point):
     return frac, cover
 
 
-def synth_image(xaxis, yaxis, eye, point=False):
+def _blur_coverage(axis, kind, i, psf_deg):
+    """(stream fraction, line coverage) of pixel i sampled at its centre, the chart's box lines blurred by a Gaussian of
+    FWHM psf_deg (degrees; 0 = sharp). Coverage is quantised to 1/1024 so equal pixels share the synth caches."""
+    frac = axis.cell(i)[0]
+    if frac <= 0:
+        return 0.0, 0.0
+    tau = axis.tau(i + .5)
+    theta = math.degrees(math.atan(tau if kind == 'h' else -tau))
+    s = psf_deg / GAUSS_FWHM_SIGMA * math.sqrt(2)
+    cover = 0.0
+    for angle, t, _w, hw in chart_lines(kind, axis.lo, axis.hi, axis.n_render):
+        half, d = hw / (1 + t * t) / D, theta - angle
+        if s > 0:
+            cover += 0.5 * (math.erf((d + half) / s) - math.erf((d - half) / s))
+        elif abs(d) <= half:
+            cover += 1.0
+    return frac, round(min(1.0, cover) * 1024) / 1024
+
+
+def synth_image(xaxis, yaxis, eye, point=False, psf_deg=None):
+    """psf_deg: blur the lines by a Gaussian of that FWHM (degrees), sampled at pixel centres (sharpness chain stages)."""
     w, h = xaxis.length, yaxis.length
     bg = BG[eye]
-    cols = [_coverage(xaxis, 'h', i, point) for i in range(w)]
-    rows = [_coverage(yaxis, 'v', j, point) for j in range(h)]
+    if psf_deg is None:
+        cols = [_coverage(xaxis, 'h', i, point) for i in range(w)]
+        rows = [_coverage(yaxis, 'v', j, point) for j in range(h)]
+    else:
+        cols = [_blur_coverage(xaxis, 'h', i, psf_deg) for i in range(w)]
+        rows = [_blur_coverage(yaxis, 'v', j, psf_deg) for j in range(h)]
     cache, rowcache, out = {}, {}, bytearray()
     for fy, ch in rows:
         key = (round(fy, 6), round(ch, 6))
@@ -555,6 +588,55 @@ def synth_drawable(directory, w, h, logical, tangents, s, render, eye, encoding=
     if encoding == 'srgb':                      # linear (the client's raw drawable) is the absent default
         meta['encoding'] = 'srgb'
     (directory / 'capture.json').write_text(json.dumps(meta))
+
+
+def synth_chain(directory, eye, render, stream, foveation, view, phys, logical, psf):
+    """A matrix point as the sharpness chain reads it: dump/{meta.json, chart-<eye>.png} (the server render) and
+    capture/{capture.json, stage-decoded-<eye>.png, stage-expanded-<eye>.png, drawable PNG}.
+    stream / view: |tan| L,R,D,U of the stream and of the drawable's view; psf: cumulative Gaussian FWHM (deg) of the render,
+    decoded, expanded and drawable images. Stage and drawable PNGs are written as sRGB-encoded values (no transfer applied)."""
+    left, right, down, up = stream
+    fov = parse_foveation(foveation, render)
+    mirror = eye == 'R'
+    dump, cap = directory / 'dump', directory / 'capture'
+    dump.mkdir(parents=True, exist_ok=True)
+    cap.mkdir(parents=True, exist_ok=True)
+    meta = {'tangents': [[-left, right, -down, up]] * 2, 'renderEyeSize': list(render), 'foveation': foveation not in (None, 'off'),
+            'codedSize': [2 * fov[0]['coded'], fov[1]['coded']]}
+    if meta['foveation']:
+        cx, cy, rx, ry, shx, shy = pair(foveation, float, 6, '--foveation')
+        meta.update(centerSize=[cx, cy], edgeRatio=[rx, ry], centerShift=[shx, shy])
+    (dump / 'meta.json').write_text(json.dumps(meta))
+
+    def axes(mode, drawable=None):
+        return (make_axis('h', mode, -left, right, render[0], fov=fov[0], mirror=mirror, drawable=drawable and drawable[0]),
+                make_axis('v', mode, -up, down, render[1], fov=fov[1], drawable=drawable and drawable[1]))
+
+    def write(path, xy, blur, point=False):
+        x, y = xy
+        pix = synth_image(x, y, eye, point=True) if point else synth_image(x, y, eye, psf_deg=blur)
+        vc.write_png(path, x.length, y.length, bytes(pix))
+        return x.length, y.length
+
+    write(dump / ('chart-%s.png' % eye), axes('render'), psf[0], point=psf[0] <= 0)
+    stages = []
+    for stage, mode, blur in (('decoded', 'encoded', psf[1]), ('expanded', 'render', psf[2])):
+        png = 'stage-%s-%s.png' % (stage, eye)
+        w, h = write(cap / png, axes(mode), blur)
+        stages.append({'stage': stage, 'eye': eye, 'png': png, 'width': w, 'height': h, 'pixel_format': 'rgba8Unorm_srgb',
+                       'encoding': 'srgb', 'sampler': dict(STREAM_SAMPLER), 'source': {'synth': True, 'ffr': stage == 'expanded'}})
+    vl, vr, vd, vu = view
+    xt, yt = rate_table(logical[0], phys[0]), rate_table(logical[1], phys[1])
+    w, h = write(cap / 'drawable-0-texture-0-slice-0.png', axes('drawable', ((-vl, vr, 0, logical[0], xt), (-vu, vd, 0, logical[1], yt))), psf[3])
+    capture = {'corner_chart': {'mode': 'Off', 'ring_percents': []}, 'trigger': {'reason': 'synth'}, 'encoding': 'srgb',
+               'pose': {'delta_deg': Pose().delta()}, 'stages': stages,
+               'resample_chain': [{'step': 'decode_chroma', 'sampler': dict(STREAM_SAMPLER)},
+                                  {'step': 'ffr_expand_and_warp', 'sampler': dict(STREAM_SAMPLER)},
+                                  {'step': 'compositor', 'sampler': None}],
+               'slices': [{'eye': eye, 'view': 0, 'slice': 0, 'png': 'drawable-0-texture-0-slice-0.png', 'width': w, 'height': h,
+                           'viewport': [0, 0, logical[0], logical[1]], 'tangents': [vl, vr, vd, vu],
+                           'rate_map': {'screen_w': logical[0], 'screen_h': logical[1], 'physical_x': xt, 'physical_y': yt, 'layer': 0}}]}
+    (cap / 'capture.json').write_text(json.dumps(capture))
 
 
 # ---- measurement --------------------------------------------------------------------------------------------------
@@ -866,6 +948,171 @@ def summarise(lines, extent, params, foveated):
     return s
 
 
+# ---- sharpness chain (render -> decoded -> expanded -> drawable) ---------------------------------------------------
+
+def box_gauss_fwhm(w, p):
+    """FWHM of a box of width w convolved with a Gaussian of FWHM p (any one unit)."""
+    if p <= 0:
+        return w
+    if w <= 0:
+        return p
+    s = p / GAUSS_FWHM_SIGMA * math.sqrt(2)
+    f = lambda x: math.erf((x + w / 2) / s) - math.erf((x - w / 2) / s)
+    half, lo, hi = f(0) / 2, 0.0, w / 2 + 3 * p
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if f(mid) > half else (lo, mid)
+    return lo + hi
+
+
+def psf_from_fwhm(fwhm, w):
+    """Gaussian PSF FWHM that widens a box line of width w to the measured fwhm (0 when it is not wider). Exact for a box
+    line and a Gaussian blur, where the quadrature sqrt(fwhm^2 - w^2) of zone_stats is not (a line blurred by less than
+    its own width keeps nearly its width)."""
+    if fwhm is None or fwhm <= w:
+        return 0.0
+    lo, hi = 0.0, fwhm
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if box_gauss_fwhm(w, mid) < fwhm else (lo, mid)
+    return (lo + hi) / 2
+
+
+def chain_summary(stage_lines, notes):
+    """stage_lines: {stage: analyse() lines}. Each stage is judged on the band lines it shares with every other measured
+    stage (by axis and angle), in its own pixels: grid = that image's px/deg, pred = the stream's coded px/deg (the page
+    prediction), meas = pred x nominal / FWHM, PSF = the Gaussian blur on the box line (psf_from_fwhm), added = this stage's
+    PSF over the previous measured stage's, in quadrature. The dominant stage adds the most."""
+    usable = {}
+    for stage, lines in stage_lines.items():
+        usable[stage] = {(l['axis'], l['angle_deg']): l for l in lines
+                         if l['zone'] == 'band' and l['fwhm_deg'] is not None and l['nominal_width_deg'] > 0}
+    measured = [s for s in CHAIN_STAGES if usable.get(s)]
+    common = set.intersection(*(set(usable[s]) for s in measured)) if measured else set()
+    shared = len(common) >= 3
+    rows, prev = [], None
+    for stage in CHAIN_STAGES:
+        row = {'stage': stage, 'n_lines': 0, 'grid_px_per_deg': None, 'predicted_px_per_deg': None, 'measured_px_per_deg': None,
+               'psf_deg': None, 'added_psf_deg': None, 'note': notes.get(stage, '')}
+        if not usable.get(stage):
+            row['note'] = row['note'] or ('no band line measured' if stage in stage_lines else 'not captured')
+            rows.append(row)
+            continue
+        ls = [usable[stage][k] for k in sorted(common)] if shared else list(usable[stage].values())
+        psf = _median(psf_from_fwhm(l['fwhm_deg'], l['nominal_width_deg']) for l in ls)
+        row.update(n_lines=len(ls), grid_px_per_deg=_median(l['local_px_per_deg'] for l in ls),
+                   predicted_px_per_deg=_median(l['predicted_px_per_deg'] for l in ls),
+                   measured_px_per_deg=_median(l['predicted_px_per_deg'] * l['nominal_width_deg'] / l['fwhm_deg'] for l in ls),
+                   psf_deg=psf, added_psf_deg=math.sqrt(max(0.0, psf * psf - (prev or 0.0) ** 2)))
+        if not shared:
+            row['note'] = (row['note'] + '; ' if row['note'] else '') + 'own line set (fewer than 3 lines shared by every stage)'
+        rows.append(row)
+        prev = psf
+    added = [r for r in rows if r['added_psf_deg']]
+    dominant = max(added, key=lambda r: r['added_psf_deg'])['stage'] if added else None
+    return {'stages': rows, 'dominant_stage': dominant, 'n_common_lines': len(common)}
+
+
+def chain_axes(mode, lo_x, hi_x, lo_y, hi_y, render, fov, mirror, drawable=None, pose=None):
+    return (make_axis('h', mode, lo_x, hi_x, render[0], fov=fov[0], mirror=mirror, drawable=drawable and drawable[0], pose=pose),
+            make_axis('v', mode, lo_y, hi_y, render[1], fov=fov[1], drawable=drawable and drawable[1], pose=pose))
+
+
+def read_stage_png(path, encoding):
+    width, height, pix = vc.read_png(path)
+    if encoding not in ('srgb', 'linear'):
+        raise ValueError('%s: encoding must be srgb or linear, got %r' % (path.name, encoding))
+    return width, height, (srgb_encode(pix) if encoding == 'linear' else pix)
+
+
+def run_chain(a):
+    """The chain table for one eye of a matrix point: render (the server dump's chart PNG) and the client's decoded,
+    expanded and drawable images from one capture (capture.json "stages" and "slices")."""
+    if not a.capture_dir:
+        raise ValueError('chain needs --capture-dir')
+    cap = json.loads((a.capture_dir / 'capture.json').read_text())
+    meta = load_meta(a.meta, a.eye) if a.meta else None
+    render = size_arg(a.render, '--render') if a.render else (meta['render'] if meta else REN)
+    foveation = a.foveation if a.foveation is not None else (meta['foveation'] if meta else None)
+    fov = parse_foveation(foveation, render)
+    if a.stream_tangents:
+        left, right, down, up = pair(a.stream_tangents, float, 4, '--stream-tangents')
+    elif meta:
+        left, right, down, up = meta['tangents']          # the server's render FOV: already s x view
+    else:
+        left, right, down, up = (a.fov_scale * v for v in device_tangents(a.eye, a.tangents))
+    lo_x, hi_x, lo_y, hi_y = -left, right, -up, down
+    mirror = a.eye == 'R'
+    image = a.image or (a.meta.parent / ('chart-%s.png' % a.eye) if a.meta else None)
+    if image is None or not image.exists():
+        raise ValueError('chain needs the render image (--image, or chart-%s.png beside --meta)' % a.eye)
+    stage_lines, notes, images = {}, {}, {}
+    width, height, pix = vc.read_png(image)
+    if (width, height) != tuple(render):
+        notes['render'] = 'image %dx%d, render %dx%d' % (width, height, render[0], render[1])
+    stage_lines['render'] = analyse(pix, width, (0, 0, width, height), *chain_axes('render', lo_x, hi_x, lo_y, hi_y, render, fov, mirror))
+    images['render'] = str(image)
+    for st in cap.get('stages', []):
+        if st.get('eye') != a.eye or st.get('stage') not in ('decoded', 'expanded'):
+            continue
+        stage = st['stage']
+        width, height, pix = read_stage_png(a.capture_dir / st['png'], st.get('encoding', 'srgb'))
+        want = (fov[0]['coded'], fov[1]['coded']) if stage == 'decoded' else tuple(render)
+        if (width, height) != want:
+            notes[stage] = 'image %dx%d, predicted %dx%d' % (width, height, want[0], want[1])
+        mode = 'encoded' if stage == 'decoded' else 'render'
+        stage_lines[stage] = analyse(pix, width, (0, 0, width, height), *chain_axes(mode, lo_x, hi_x, lo_y, hi_y, render, fov, mirror))
+        images[stage] = st['png']
+    sl = next((x for x in cap.get('slices', []) if x.get('eye') == a.eye), None)
+    if sl is not None:
+        width, height, pix = read_stage_png(a.capture_dir / sl['png'], cap.get('encoding', sl.get('encoding', 'linear')))
+        vl, vr, vd, vu = sl['tangents']
+        vx, vy, vw, vh = sl['viewport']
+        xt, yt = vc.tables(sl)
+        tables = ((-vl, vr, vx, vw, xt), (-vu, vd, vy, vh, yt))
+        pose = pose_from_capture(cap, sl)
+        region = (0, 0, width, height)
+        lines = analyse(pix, width, region, *chain_axes('drawable', lo_x, hi_x, lo_y, hi_y, render, fov, mirror, tables, pose), True)
+        if pose is None:                        # as drawable mode: fit one yaw to the x lines
+            yaw = _median(l['residual_deg'] for l in lines if l['axis'] == 'x' and l['residual_deg'] is not None) or 0.0
+            lines = analyse(pix, width, region, *chain_axes('drawable', lo_x, hi_x, lo_y, hi_y, render, fov, mirror, tables, Pose(yaw)), True)
+            notes['drawable'] = 'fitted yaw %.3f deg (capture.json has no pose.delta_deg)' % yaw
+        stage_lines['drawable'] = lines
+        images['drawable'] = sl['png']
+    summary = chain_summary(stage_lines, notes)
+    for row in summary['stages']:
+        row['image'] = images.get(row['stage'])
+    summary.update(eye=a.eye, params={'render': list(render), 'foveation': foveation or 'off', 'stream_tangents_LRDU': [left, right, down, up],
+                                      'resample_chain': cap.get('resample_chain')})
+    if a.out_json:
+        Path(a.out_json).write_text(json.dumps(dict(summary, lines=stage_lines), indent=1))
+    print_chain(summary)
+    return 0
+
+
+def print_chain(summary):
+    def f(v, fmt):
+        return 'n/a' if v is None else fmt % v
+    print('chain eye={}: {} band lines shared by every measured stage'.format(summary['eye'], summary['n_common_lines']))
+    print('  {:<9} {:>11} {:>11} {:>11} {:>6} {:>8} {:>13} {:>5}  {}'.format(
+        'stage', 'grid px/deg', 'pred px/deg', 'meas px/deg', 'ratio', 'PSF deg', 'added PSF deg', 'lines', 'image / note'))
+    for r in summary['stages']:
+        if r['psf_deg'] is None:
+            print('  {:<9} {}'.format(r['stage'], r['note']))
+            continue
+        ratio = r['measured_px_per_deg'] / r['predicted_px_per_deg'] if r['predicted_px_per_deg'] else None
+        print('  {:<9} {:>11} {:>11} {:>11} {:>6} {:>8} {:>13} {:>5}  {}{}'.format(
+            r['stage'], f(r['grid_px_per_deg'], '%.1f'), f(r['predicted_px_per_deg'], '%.1f'), f(r['measured_px_per_deg'], '%.1f'),
+            f(ratio, '%.2f'), f(r['psf_deg'], '%.4f'), f(r['added_psf_deg'], '%.4f'), r['n_lines'], r.get('image') or '',
+            ' (%s)' % r['note'] if r['note'] else ''))
+    dom = summary['dominant_stage']
+    if dom:
+        r = next(x for x in summary['stages'] if x['stage'] == dom)
+        print('dominant: {} (adds {:.4f} deg of {:.4f} deg PSF)'.format(dom, r['added_psf_deg'], r['psf_deg']))
+    else:
+        print('dominant: none (no stage adds blur)')
+
+
 # ---- overlay ------------------------------------------------------------------------------------------------------
 
 CYAN, YELLOW, ORANGE, WHITE8, RED = (0, 200, 255), (255, 255, 0), (255, 140, 0), (255, 255, 255), (255, 0, 0)
@@ -980,7 +1227,7 @@ def parse_foveation(text, render):
 
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('mode', choices=['render', 'encoded', 'drawable', 'synth'])
+    p.add_argument('mode', choices=['render', 'encoded', 'drawable', 'synth', 'chain'])
     p.add_argument('--image', type=Path)
     p.add_argument('--capture-dir', type=Path)
     p.add_argument('--eye', choices=['L', 'R'], default='L')
@@ -996,12 +1243,16 @@ def build_parser():
     p.add_argument('--meta', type=Path, help='ALVR angle-chart dump meta.json: tangents, render size, foveation, coded size')
     p.add_argument('--out-png')
     p.add_argument('--out-json')
-    p.add_argument('--kind', choices=['render', 'encoded', 'drawable'], help='synth: which image to write')
+    p.add_argument('--kind', choices=['render', 'encoded', 'drawable', 'chain'], help='synth: which image to write (chain: a whole '
+                   'matrix point, dump/ and capture/, under --out-dir)')
     p.add_argument('--out-dir', type=Path, help='synth drawable: capture directory to write')
     p.add_argument('--encoding', choices=['linear', 'srgb'], default='linear', help='synth drawable: pixel transfer to write')
     p.add_argument('--pose-delta', default='0,0,0', help='synth drawable: yaw,pitch,roll degrees (display minus render) to bake in and record')
     p.add_argument('--phys', default='2432x2368', help='synth drawable: physical texture size')
     p.add_argument('--logical', default='6261x5023', help='synth drawable: logical screen size')
+    p.add_argument('--stage-psf', default='0,0,0,0', help='synth chain: Gaussian FWHM deg of the render, decoded, expanded and '
+                   'drawable images (cumulative)')
+    p.add_argument('--view-tangents', help='synth chain: L,R,D,U |tan| of the drawable view (default the stream tangents)')
     return p
 
 
@@ -1021,6 +1272,12 @@ def do_synth(a):
         fov = parse_foveation(a.foveation, render)
         pix, w, h = synth_encoded(render[0], render[1], tangents, a.fov_scale, a.eye, fov)
         vc.write_png(a.out_png, w, h, bytes(pix))
+    elif a.kind == 'chain':
+        stream = tuple(pair(a.stream_tangents, float, 4, '--stream-tangents')) if a.stream_tangents else \
+            tuple(a.fov_scale * v for v in tangents)
+        view = tuple(pair(a.view_tangents, float, 4, '--view-tangents')) if a.view_tangents else stream
+        synth_chain(a.out_dir, a.eye, render, stream, a.foveation, view, size_arg(a.phys, '--phys'),
+                    size_arg(a.logical, '--logical'), pair(a.stage_psf, float, 4, '--stage-psf'))
     else:
         phys, logical = size_arg(a.phys, '--phys'), size_arg(a.logical, '--logical')
         synth_drawable(a.out_dir, phys[0], phys[1], logical, tangents, a.fov_scale, render, a.eye, a.encoding,
@@ -1221,11 +1478,13 @@ def main(argv=None):
         if a.mode == 'synth':
             if not a.kind:
                 raise ValueError('synth needs --kind')
-            if a.kind == 'drawable' and not a.out_dir:
-                raise ValueError('synth drawable needs --out-dir')
-            if a.kind != 'drawable' and not a.out_png:
+            if a.kind in ('drawable', 'chain') and not a.out_dir:
+                raise ValueError('synth %s needs --out-dir' % a.kind)
+            if a.kind not in ('drawable', 'chain') and not a.out_png:
                 raise ValueError('synth %s needs --out-png' % a.kind)
             return do_synth(a)
+        if a.mode == 'chain':
+            return run_chain(a)
         return run_measure(a)
     except (ValueError, KeyError, OSError, ZeroDivisionError, struct.error, zlib.error) as error:
         print('fov-overlay: ' + str(error), file=sys.stderr)
