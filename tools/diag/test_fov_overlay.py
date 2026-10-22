@@ -463,23 +463,6 @@ class Fix2(Base):
             self.assertEqual(code, 0, (eye, j['summary']['verdict_reasons']))
             self.assertLess(j['summary']['axes']['y']['max_abs_residual_deg'], 0.5)
 
-    def test_stream_edges_with_lifted_surround(self):
-        extra = ['--render', '912x728', '--fov-scale', '0.65', '--phys', '1216x1184']
-        d = self.dir / 'cap'
-        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + extra), 0)
-        cap = json.loads((d / 'capture.json').read_text())
-        sl = cap['slices'][0]
-        w, h, pix = fo.vc.read_png(d / sl['png'])
-        lifted = bytearray(pix)
-        for k in range(0, len(lifted), 4):
-            if max(lifted[k:k + 3]) == 0:
-                lifted[k:k + 3] = b'\x0a\x0a\x0a'
-        fo.vc.write_png(d / sl['png'], w, h, bytes(lifted))
-        out = self.dir / 'lift.json'
-        self.run_main(['drawable', '--capture-dir', d, '--out-json', out] + extra)
-        j = json.loads(out.read_text())
-        self.assertEqual(j['summary']['verdict'], 'PASS', j['summary']['verdict_reasons'])
-
     def test_foveation_enabled_at_c1_pads(self):
         a = fo.fov_axis(1.0, 0.0, 3.0, 1824)
         self.assertEqual(a['coded'] % 32, 0)
@@ -501,6 +484,89 @@ class Fix2(Base):
         j = json.loads(out.read_text())
         self.assertEqual(j['summary']['verdict'], 'PASS', j['summary']['verdict_reasons'])
 
+
+
+class DrawableExtent(Base):
+    """Drawable mode is a valid check only when the stream extent is measured (r3 blocker 1) on sRGB-encoded pixels (W16)."""
+    EXTRA = ['--render', '912x728', '--fov-scale', '0.65', '--phys', '1216x1184']
+    BLACK, BG_L = bytes([0, 0, 0, 255]), bytes([15, 15, 31, 255])
+
+    def capture(self, extra=None, repaint=(), encoding=None):
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + list(extra or self.EXTRA)), 0)
+        cap = json.loads((d / 'capture.json').read_text())
+        if encoding is not None:
+            cap['encoding'] = encoding
+        (d / 'capture.json').write_text(json.dumps(cap))
+        png = d / cap['slices'][0]['png']
+        w, h, pix = fo.vc.read_png(png)
+        pix = bytes(pix)
+        for a, b in repaint:
+            pix = pix.replace(a, b)
+        fo.vc.write_png(png, w, h, pix)
+        return d
+
+    def run_drawable(self, d, s='0.65', name='d'):
+        out = self.dir / (name + '.json')
+        code = self.run_main(['drawable', '--capture-dir', d, '--out-json', out, '--render', '912x728', '--fov-scale', s])
+        return code, json.loads(out.read_text())['summary']
+
+    def measured(self, s):
+        return {k: v['measured_deg'] for k, v in s['stream_extent_deg'].items()}
+
+    def test_lifted_surround_extents_are_measured_and_wrong_s_fails(self):
+        d = self.capture(repaint=[(self.BLACK, bytes([10, 10, 10, 255]))])
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'PASS', s['verdict_reasons'])
+        self.assertEqual(code, 0)
+        for side, v in self.measured(s).items():
+            self.assertIsNotNone(v, side)
+            self.assertLessEqual(abs(s['stream_extent_deg'][side]['error_deg']), 0.5, side)
+        for wrong in ('0.6', '0.7'):
+            code, s = self.run_drawable(d, wrong, 'w' + wrong)
+            self.assertEqual(s['verdict'], 'FAIL', wrong)
+            self.assertNotEqual(code, 0)
+            self.assertTrue(all(v is not None for v in self.measured(s).values()), (wrong, self.measured(s)))
+            self.assertIn('stream extent', ' '.join(s['verdict_reasons']))
+
+    def test_background_not_separable_is_unverified(self):
+        d = self.capture(repaint=[(self.BLACK, self.BG_L)])
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+        self.assertTrue(all(v is None for v in self.measured(s).values()))
+        self.assertNotEqual(code, 0)
+
+    def test_extent_touching_the_crop_is_unverified(self):
+        d = self.capture(['--render', '912x728', '--fov-scale', '1.2', '--phys', '1216x1184'])
+        code, s = self.run_drawable(d, '1.2')
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+
+    def test_linear_capture_is_srgb_encoded_before_measuring(self):
+        dim = [(self.BG_L, bytes([2, 2, 4, 255]))]       # a dim chart background as a linear-light capture holds it
+        for enc in (None, 'linear'):
+            d = self.capture(repaint=dim, encoding=enc)
+            code, s = self.run_drawable(d)
+            self.assertEqual(s['verdict'], 'PASS', (enc, s['verdict_reasons']))
+            self.assertTrue(all(v is not None for v in self.measured(s).values()), enc)
+            self.assertEqual(s['params']['encoding'], 'linear')
+        d = self.capture(repaint=dim, encoding='srgb')   # the same counts declared sRGB are used as is: 4 counts, no separation
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+        self.assertEqual(s['params']['encoding'], 'srgb')
+
+    def test_srgb_capture_round_trip(self):
+        d = self.capture(self.EXTRA + ['--encoding', 'srgb'])
+        self.assertEqual(json.loads((d / 'capture.json').read_text())['encoding'], 'srgb')
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'PASS', s['verdict_reasons'])
+        self.assertTrue(all(v is not None for v in self.measured(s).values()))
+
+    def test_bad_encoding_exits_2(self):
+        d = self.capture(encoding='gamma')
+        self.assertEqual(self.run_main(['drawable', '--capture-dir', d, '--render', '912x728', '--fov-scale', '0.65']), 2)
 
 
 REAL = Path('/Users/noel/Projects/Management/goals/rdr2-vr/evidence/chart-matrix-20261022/m1/f100-asrun/dump')
