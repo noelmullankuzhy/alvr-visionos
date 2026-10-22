@@ -982,14 +982,15 @@ class EventHandler: ObservableObject {
                 // render threads read only these; a setting changed mid-stream applies to the next stream.
                 let foveation = Settings.getAlvrSettings().map { FFR.calculateFoveationVars(alvrEvent: started, foveationSettings: $0.video.foveated_encoding) }
                 let whiteOverride = UserDefaults.standard.double(forKey: HDRPipeline.referenceWhiteDefaultsKey)
-                let referenceWhite = HDRPipeline.referenceWhiteNits(defaultsValue: whiteOverride)
+                let serverWhite = Settings.getAlvrSettings()?.video.encoder_config?.hdr?.reference_white_nits
+                let (referenceWhite, whiteSource) = HDRPipeline.resolveReferenceWhite(defaultsValue: whiteOverride, serverValue: serverWhite)
                 let videoStream = EventHandler.videoStreams.streamStarted(
                     hdrEnabled: ALVRClientApp.gStore.settings.hdrPQ,
                     output: VideoHandler.colourOutput,
                     encodingGamma: started.encoding_gamma,
                     referenceWhiteNits: referenceWhite,
                     payload: foveation)
-                let line = "HDRDISPLAY ref_white=\(referenceWhite) ref_src=\(whiteOverride >= 1 ? "override" : "default")"
+                let line = "HDRDISPLAY ref_white=\(referenceWhite) source=\(whiteSource)"
                 alvr_log(AlvrLogLevel(ALVR_LOG_LEVEL_INFO.rawValue), line)
                 print("ALVRCOLOUR stream=\(videoStream.generation) hdr_setting=\(videoStream.hdrEnabled) foveation=\(foveation != nil)")
                 // Choose this stream's interaction profile once from the emulation mode (fixed for the stream), declare it, then open the gate.
