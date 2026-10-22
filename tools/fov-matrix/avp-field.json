@@ -20,6 +20,7 @@
   "crop": {
     "inset_deg": 15,
     "margin_deg": 2,
+    "band_T": {"temporal_deg": 30, "up_deg": 25, "down_deg": 30},
     "model": "superellipse(2,3,1.5,4)",
     "source": "ALVRClient/Diagnostics/BoundaryDotsLensModel.swift (tools/diag/lens_model.py): the model lens's inset rectangle, each device frustum edge angle minus inset_deg (BoundaryDotsOutline.defaultInsetDeg); CropFov.defaultMarginDeg"
   }

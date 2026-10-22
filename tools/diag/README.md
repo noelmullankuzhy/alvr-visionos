@@ -702,7 +702,7 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    or `measured outline`), **pinch and hold with the left hand and drag right/left**:
    horizontal hand travel in the head frame changes the value, **1 cm = 1°**, right =
    outline outward in every style (lens and rect: inset down; measured: offset up),
-   snapped to 0.5°, relative to the value at the grab. The lens inset per eye is what
+   snapped to 0.5°, relative to the value at the grab. The lens inset (one value for both eyes) is what
    *Crop FOV to outline* sends on the next stream (`docs/lumen/crop-fov.md`).
    Release keeps the value; a cancelled pinch restores it; selecting a cursor mid-slide
    ends the slide at its value. Every 0.5° step of a slide logs a `dots_outline` line

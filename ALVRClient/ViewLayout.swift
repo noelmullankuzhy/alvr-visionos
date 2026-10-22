@@ -42,16 +42,17 @@ enum ViewLayout {
     }
 
     // DIAG fov_sent fields for one eye's Fov as sent to the server: degrees, ALVR signs; where the tangents came from
-    // (frustum, crop or debug; CropFov.choose), the crop margin and model lens inset (offset_deg), and the center_shift that puts the
+    // (frustum, crop or debug; CropFov.choose), the crop margin, the model lens inset in force (inset_deg; 0 without crop), the measured-style offset (offset_deg;
+    // 0 for the lens), and the center_shift that puts the
     // foveation band on the eye axis of the sent frame next to the session's (docs/lumen/crop-fov.md).
     static func fovSentFields(eye: String, left: Float, right: Float, up: Float, down: Float, source: String = "frustum",
-                              marginDeg: Double? = nil, offsetDeg: Double? = nil, axisCenterShift: SIMD2<Double>? = nil,
+                              marginDeg: Double? = nil, insetDeg: Double = 0, offsetDeg: Double? = nil, axisCenterShift: SIMD2<Double>? = nil,
                               sessionCenterShift: SIMD2<Double>? = nil) -> KeyValuePairs<String, Any> {
         func deg(_ rad: Float) -> String { String(format: "%.2f", Double(rad) * 180 / Double.pi) }
         func compact(_ value: Double?) -> String { value.map { String(format: "%g", $0) } ?? "off" }
         func shift(_ s: SIMD2<Double>?) -> String { s.map { String(format: "%.3f,%.3f", $0.x, $0.y) } ?? "off" }
         return ["eye": eye, "up": deg(up), "down": deg(down), "left": deg(left), "right": deg(right), "units": "deg",
-                "source": source, "margin_deg": compact(marginDeg), "offset_deg": compact(offsetDeg),
+                "source": source, "margin_deg": compact(marginDeg), "inset_deg": compact(insetDeg), "offset_deg": compact(offsetDeg),
                 "axis_center_shift": shift(axisCenterShift), "session_center_shift": shift(sessionCenterShift)]
     }
 

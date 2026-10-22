@@ -36,7 +36,7 @@ enum FovPackingTests {
         // debug), the crop margin and the center_shift that centres the band on the axis vs the session's.
         let fields = ViewLayout.fovSentFields(eye: "L", left: l.left, right: l.right, up: l.up, down: l.down)
         let dict = Dictionary(fields.map { ($0.key, "\($0.value)") }, uniquingKeysWith: { a, _ in a })
-        expectEqual(fields.map { $0.key }, ["eye", "up", "down", "left", "right", "units", "source", "margin_deg", "offset_deg",
+        expectEqual(fields.map { $0.key }, ["eye", "up", "down", "left", "right", "units", "source", "margin_deg", "inset_deg", "offset_deg",
                                             "axis_center_shift", "session_center_shift"], "fov_sent key order")
         expectEqual(dict["eye"], "L", "eye")
         expectEqual(dict["up"], "45.00", "up deg")
@@ -46,16 +46,18 @@ enum FovPackingTests {
         expectEqual(dict["units"], "deg", "units")
         expectEqual(dict["source"], "frustum", "default source")
         expectEqual(dict["margin_deg"], "off", "no margin without crop")
+        expectEqual(dict["inset_deg"], "0", "no lens inset without crop")
         expectEqual(dict["offset_deg"], "off", "no offset without crop")
         expectEqual(dict["axis_center_shift"], "off", "no shift without foveation")
         expectEqual(dict["session_center_shift"], "off", "no session shift without foveation")
         let crop = ViewLayout.fovSentFields(eye: "R", left: l.left, right: l.right, up: l.up, down: l.down, source: "crop",
-                                            marginDeg: 2, offsetDeg: -1.5, axisCenterShift: [0.140988, -0.030553],
+                                            marginDeg: 2, insetDeg: 15, offsetDeg: 0, axisCenterShift: [0.140988, -0.030553],
                                             sessionCenterShift: [0.536, -0.159])
         let cropDict = Dictionary(crop.map { ($0.key, "\($0.value)") }, uniquingKeysWith: { a, _ in a })
         expectEqual(cropDict["source"], "crop", "crop source")
         expectEqual(cropDict["margin_deg"], "2", "margin")
-        expectEqual(cropDict["offset_deg"], "-1.5", "offset")
+        expectEqual(cropDict["inset_deg"], "15", "lens inset in force")
+        expectEqual(cropDict["offset_deg"], "0", "measured-style offset is 0 for the lens")
         expectEqual(cropDict["axis_center_shift"], "0.141,-0.031", "axis shift, three decimals")
         expectEqual(cropDict["session_center_shift"], "0.536,-0.159", "session shift")
 
