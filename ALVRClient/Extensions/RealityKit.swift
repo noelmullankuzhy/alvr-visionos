@@ -160,6 +160,8 @@ public extension LayerRenderer.Drawable {
         return (fov_orth_corrected, simd_float4(tan(-fov_orth_corrected.left), tan(fov_orth_corrected.right), tan(fov_orth_corrected.up), tan(-fov_orth_corrected.down)), viewTransform.translationOnly())
     }
     
+    // Tangent magnitudes (left, right, bottom, top) on visionOS 2+, the app's deployment target. The visionOS 1
+    // fallback, cp_view_get_tangents, is (left, right, top, bottom) (docs/lumen/fov-updown.md).
     func gimmeTangents(viewIndex: Int) -> simd_float4 {
         if #available(visionOS 2.0, *) {
             let mat = self.computeProjection(viewIndex: viewIndex)
