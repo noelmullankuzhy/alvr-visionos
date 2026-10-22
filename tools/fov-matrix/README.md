@@ -32,6 +32,15 @@ deletes it and captures the drawables it is presenting; `trigger.reason` = `requ
 probe (ws, as e4) while waiting up to 45 s (`--capture-timeout`; writing a capture took ~10 s on the simulator) for a new capture dir -> pull capture dir, screenshot, server
 dump (tar over base64) -> `fov-overlay.py` drawable + render/encoded per dump PNG -> stats (encode ms/bitrate from
 GraphStatistics, client fps/decode from ALVRSTATS) -> restore. The trap (installed before the first PC change, armed before the backup runs, restore exactly once) restores on error/Ctrl-C/SIGTERM/SIGHUP. Every run tags its PC backup with a nonce (`session.orig.nonce`) and only restores a backup carrying its own nonce: a stale or foreign backup is left untouched (loud message, use `--restore`). The app's `capture.request` is cleared before each launch.
+capture.json colour and pose fields (streaming captures): `encoding: "srgb"` = the drawable PNGs hold sRGB-encoded values
+(a linear `rgba16Float` drawable gets the sRGB transfer function on RGB, alpha stays linear; `*_srgb` formats are already
+encoded and copied as is; primaries are the drawable's, untagged), so a dim chart background is visible; `source_pixel_format`
+= the Metal pixel format of the drawable. `pose` = `{render, display, delta_deg, sim_yaw_dither_rad}`: `render` = the head pose
+the server rendered the captured frame for (the frame's view params), `display` = the pose the drawable was presented with, each
+`{yaw_deg, pitch_deg, roll_deg, t}` (`t` seconds on the layer clock); `delta_deg` = display minus render, per axis wrapped to
+(-180, 180]. Convention: right-handed, yaw about +Y, pitch about +X, roll about +Z, intrinsic Y-X-Z (R = Ry*Rx*Rz), degrees.
+`sim_yaw_dither_rad` = the FakeHeadPose yaw ((seq mod 1024) x 1e-5 rad) sent with that frame's pose (simulator only, else null);
+idle captures have no render pose and carry no `pose` key.
 Files per point: `sets.txt pc-*.sh/.log console.log events.jsonl stats.json screenshot.png capture/ dump/ overlay/ ERROR`.
 
 `summary.tsv`: name, verdict, median_deg, max_deg, extent_err_deg, centre_px_deg (measured/predicted), fps, bitrate_mbps,

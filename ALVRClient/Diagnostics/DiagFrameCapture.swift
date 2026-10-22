@@ -22,6 +22,9 @@ enum DiagFrameCapture {
         let slices: Int
         let rateTables: [[String: Any]]
     }
+    typealias PoseRecord = (render: DiagCapturePose.Angles, display: DiagCapturePose.Angles, simYawDitherRad: Double?)
+    // binary16 bit pattern -> sRGB-encoded byte (a linear drawable is encoded through this table).
+    private static let srgbByteForHalf: [UInt8] = (0...UInt16.max).map { DiagCaptureEncoding.srgbByte(Float(Float16(bitPattern: $0))) }
     private static let queue = DispatchQueue(label: "uk.lumenio.alvr.capture", qos: .utility)
 
     static func rateTables(map: MTLRasterizationRateMap?, layer: Int, width: Int, height: Int) -> [String: Any] {
@@ -50,7 +53,23 @@ enum DiagFrameCapture {
         guard CGImageDestinationFinalize(destination) else { throw NSError(domain: "DiagCapturePNG", code: 2) }
     }
 
-    static func submit(buffer: MTLCommandBuffer, targets: [Target], directory: URL, metadata: [String: Any], completion: @escaping (Bool) -> Void) {
+    static func formatName(_ format: MTLPixelFormat) -> String {
+        switch format {
+        case .rgba16Float: return "rgba16Float"
+        case .rgba8Unorm: return "rgba8Unorm"
+        case .bgra8Unorm: return "bgra8Unorm"
+        case .rgba8Unorm_srgb: return "rgba8Unorm_srgb"
+        case .bgra8Unorm_srgb: return "bgra8Unorm_srgb"
+        default: return "format_\(format.rawValue)"
+        }
+    }
+
+    // PNG values are sRGB-encoded: rgba16Float is linear extended-range (HDRPipeline), so RGB gets the sRGB transfer function
+    // (alpha stays linear); the *_srgb formats already store encoded bytes (the GPU encodes on write) and are copied as is.
+    // Plain rgba8Unorm/bgra8Unorm carry whatever the shader wrote and are copied as is. Other formats are refused.
+    // `pose`: render/display head pose of the stream frame this capture presents (nil on idle captures: no render pose).
+    static func submit(buffer: MTLCommandBuffer, targets: [Target], directory: URL, metadata: [String: Any], pose: PoseRecord? = nil,
+                       completion: @escaping (Bool) -> Void) {
         let start = ProcessInfo.processInfo.systemUptime
         let tMs = Diag.monotonicMs()
         let utc = ISO8601DateFormatter().string(from: Date())
@@ -58,7 +77,7 @@ enum DiagFrameCapture {
         // Allocate all buffers before encoding any copies. One in-flight capture bounds memory.
         for target in targets {
             let texture = target.texture
-            guard texture.pixelFormat == .rgba16Float || texture.pixelFormat == .rgba8Unorm || texture.pixelFormat == .bgra8Unorm else {
+            guard [.rgba16Float, .rgba8Unorm, .bgra8Unorm, .rgba8Unorm_srgb, .bgra8Unorm_srgb].contains(texture.pixelFormat) else {
                 Diag.log("capture", ["error": "unsupported_pixel_format", "format": texture.pixelFormat.rawValue])
                 completion(false); return
             }
@@ -104,7 +123,8 @@ enum DiagFrameCapture {
                         for slice in 0..<read.slices {
                             let pointer = read.buffer.contents().advanced(by: slice * read.imageBytes)
                             var rgba = [UInt8](repeating: 0, count: texture.width * texture.height * 4)
-                            let w = texture.width, half = texture.pixelFormat == .rgba16Float, bgra = texture.pixelFormat == .bgra8Unorm
+                            let w = texture.width, half = texture.pixelFormat == .rgba16Float
+                            let bgra = texture.pixelFormat == .bgra8Unorm || texture.pixelFormat == .bgra8Unorm_srgb
                             rgba.withUnsafeMutableBufferPointer { out in
                                 for y in 0..<texture.height {
                                     let row = pointer.advanced(by: y * read.rowBytes)
@@ -112,8 +132,12 @@ enum DiagFrameCapture {
                                     if half {
                                         let src = row.assumingMemoryBound(to: UInt16.self)
                                         for i in 0..<(w * 4) {
-                                            let f = Float(Float16(bitPattern: src[i]))
-                                            out[base + i] = UInt8((min(1, max(0, f.isNaN ? 0 : f)) * 255).rounded())
+                                            if i % 4 == 3 {
+                                                let f = Float(Float16(bitPattern: src[i]))
+                                                out[base + i] = UInt8((min(1, max(0, f.isNaN ? 0 : f)) * 255).rounded())
+                                            } else {
+                                                out[base + i] = srgbByteForHalf[Int(src[i])]
+                                            }
                                         }
                                     } else {
                                         let src = row.assumingMemoryBound(to: UInt8.self)
@@ -136,7 +160,7 @@ enum DiagFrameCapture {
                                 entry["drawable_index"] = target.drawableIndex
                                 entry["texture_index"] = target.textureIndex
                                 entry["png"] = name; entry["width"] = texture.width; entry["height"] = texture.height
-                                entry["pixel_format"] = texture.pixelFormat == .rgba16Float ? "rgba16Float" : texture.pixelFormat == .rgba8Unorm ? "rgba8Unorm" : "bgra8Unorm"
+                                entry["pixel_format"] = formatName(texture.pixelFormat)
                                 entry["pixel_format_raw"] = texture.pixelFormat.rawValue
                                 entry["rate_map"] = read.rateTables[slice]
                                 slices.append(entry)
@@ -146,6 +170,12 @@ enum DiagFrameCapture {
                     var json = metadata
                     json["utc"] = utc; json["t_ms"] = tMs; json["slices"] = slices
                     json["ms_encode_blit"] = encodedMs
+                    let sourceFormat = formatName(reads[0].target.texture.pixelFormat)
+                    if let pose {
+                        DiagCapturePose.annotate(&json, sourcePixelFormat: sourceFormat, render: pose.render, display: pose.display, simYawDitherRad: pose.simYawDitherRad)
+                    } else {
+                        DiagCapturePose.annotateEncoding(&json, sourcePixelFormat: sourceFormat)
+                    }
                     let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
                     try data.write(to: directory.appendingPathComponent("capture.json"), options: .atomic)
                     bytes += data.count
@@ -197,7 +227,9 @@ final class DiagFrameCaptureSession {
     }
 
     // `streamFrame`: stream content was composited into these drawables this frame (captures them as presented).
-    func encode(buffer: MTLCommandBuffer, drawables: [LayerRenderer.Drawable], idle: Bool, streamFrame: Bool = false, chart: CornerChartRenderer?) {
+    // `pose`: render/display head pose of the stream frame being presented (DiagCapturePose); nil when idle.
+    func encode(buffer: MTLCommandBuffer, drawables: [LayerRenderer.Drawable], idle: Bool, streamFrame: Bool = false,
+                pose: DiagFrameCapture.PoseRecord? = nil, chart: CornerChartRenderer?) {
         DiagCaptureRequests.shared.setAcceptsMarks(idle)
         let request: DiagCaptureRequests.Request
         switch gate.next(nowMs: Diag.monotonicMs(), idle: idle, streamFrame: streamFrame) {
@@ -235,7 +267,8 @@ final class DiagFrameCaptureSession {
                                      "eye": request.eye as Any? ?? NSNull(), "pct": request.pct as Any? ?? NSNull(),
                                      "pos_deg": request.positionDegrees as Any? ?? NSNull()]
         DiagFrameCapture.submit(buffer: buffer, targets: targets, directory: directory,
-                                metadata: ["corner_chart": chartState, "trigger": trigger]) { [gate] ok in
+                                metadata: ["corner_chart": chartState, "trigger": trigger],
+                                pose: streamFrame ? pose : nil) { [gate] ok in
             if !ok { Diag.log("capture_trigger", ["step": "skipped", "reason": request.reason, "why": "capture_failed_see_capture_error"]) }
             gate.finished()
         }

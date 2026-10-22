@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/DiagFrameCapture.swift ALVRClient/Diagnostics/CornerChart.swift
+// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/DiagFrameCapture.swift ALVRClient/Diagnostics/DiagCapturePose.swift ALVRClient/Diagnostics/CornerChart.swift
 // METAL: ALVRClient/Shaders.metal
 import Foundation
 import Metal

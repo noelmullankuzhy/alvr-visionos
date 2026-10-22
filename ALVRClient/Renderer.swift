@@ -1166,6 +1166,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         // Diagnostics: the video frame actually encoded this frame (nil: idle, or rejected by beginRenderStreamingFrame).
         var diagSourceId: UInt64? = nil
         var diagStreamFrame = false   // stream content composited this frame (streaming capture trigger)
+        var diagPose: DiagFrameCapture.PoseRecord? = nil   // render vs display head pose of that frame (capture.json "pose")
         for drawable in drawables {
             drawable.deviceAnchor = deviceAnchor
             
@@ -1199,6 +1200,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 if let encoder = beginRenderStreamingFrame(0, commandBuffer: commandBuffer, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor, drawable: drawable) {
                     diagSourceId = Diag.capture(enabled: diagProbe != nil, queuedFrame?.timestamp) ?? nil
                     diagStreamFrame = true
+                    if diagFrameCapture != nil, let frame = queuedFrame {
+                        let dither = WorldTracker.shared.simYawDither(timestampNs: frame.timestamp).map { Double($0) }
+                        diagPose = (render: DiagCapturePose.angles(matrix: framePose, t: Double(frame.timestamp) / Double(NSEC_PER_SEC)),
+                                    display: DiagCapturePose.angles(matrix: simdDeviceAnchor, t: vsyncTime), simYawDitherRad: dither)
+                    }
                     renderStreamingFrame(0, commandBuffer: commandBuffer, renderEncoder: encoder, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
                     endRenderStreamingFrame(renderEncoder: encoder)
                 }
@@ -1237,7 +1243,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         }
         diagFrameCapture?.encode(buffer: commandBuffer, drawables: drawables,
                                  idle: !renderingStreaming && !EventHandler.shared.streamingActive,
-                                 streamFrame: diagStreamFrame, chart: cornerChart)
+                                 streamFrame: diagStreamFrame, pose: diagPose, chart: cornerChart)
         for drawable in drawables {
             drawable.encodePresent(commandBuffer: commandBuffer)
         }
