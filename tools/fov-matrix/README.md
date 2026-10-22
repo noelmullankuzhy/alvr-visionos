@@ -58,7 +58,14 @@ idle captures have no render pose and carry no `pose` key.
 Files per point: `sets.txt pc-*.sh/.log console.log events.jsonl stats.json screenshot.png capture/ dump/ overlay/ ERROR`.
 
 `summary.tsv`: name, verdict, median_deg, max_deg, extent_err_deg, centre_px_deg (measured/predicted), fps, bitrate_mbps,
-encode_ms, verdict_render, verdict_encoded, notes, encode_ms_p95, encode_over_budget. rdr2 mode skips the overlay unless `--overlay` (no chart in the image).
+encode_ms, verdict_render, verdict_encoded, notes, encode_ms_p95, encode_over_budget, centre_mtf50_cpd, nose_mtf50_cpd,
+temple_mtf50_cpd, up_mtf50_cpd, down_mtf50_cpd, display_ceiling_cpd. rdr2 mode skips the overlay unless `--overlay` (no chart in the image).
+
+The `*_mtf50_cpd` columns are the stream's own sharpness: `stream_mtf.py` measures edge MTF50 on the angle chart's lines in
+the capture's expanded stage image (mean of the two eyes; `n/a` without a capture, `<x` an upper bound, `>x` above
+Nyquist). `display_ceiling_cpd` is the W33 client-drawn chart's ceiling from `avp-field.json` (`w33_ceiling_cpd`). See
+docs/lumen/sharpness-chain.md "Stream MTF50 vs display ceiling". A row with a capture takes about 35 s more (pure Python
+PNG decode). Per edge, with the curves: `python3 tools/fov-matrix/stream_mtf.py POINT_DIR --curves out.tsv`.
 
 ## Streaming capture trace
 

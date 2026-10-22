@@ -179,9 +179,9 @@ for k in quality_preset='{"variant":"P4"}' multi_pass='{"variant":"Disabled"}' s
   t "grep -qF 'set $NVK.$k' $T/o11/st/pc-apply.log && grep -qF '$NVK.$k' $T/o11/st/sets.txt" "encoder key reaches the session apply call: $k"
 done
 t "grep -q '^written' $T/o11/st/pc-apply.log" "encoder keys applied strictly to the stub session shape"
-t "grep '^st	' $T/o11.out | grep -q '	20.00	0.100\$'" "p95 (20 ms) and over-budget fraction (0.100) from the stub GraphStatistics"
+t "grep '^st	' $T/o11.out | grep -q '	20.00	0.100	n/a	n/a	n/a	n/a	n/a	17\$'" "p95 (20 ms) and over-budget fraction (0.100) from the stub GraphStatistics"
 t "grep '^st	' $T/o11.out | grep -q '	9.00	'" "median encode ms unchanged"
-t "head -1 $T/o11.out | grep -q 'notes	encode_ms_p95	encode_over_budget\$'" "new summary columns are last"
+t "head -1 $T/o11.out | grep -q 'notes	encode_ms_p95	encode_over_budget	centre_mtf50_cpd	nose_mtf50_cpd	temple_mtf50_cpd	up_mtf50_cpd	down_mtf50_cpd	display_ceiling_cpd\$'" "new summary columns are last"
 
 echo "== debug eye tangents reach the client launch"
 AVP='L:1.7321,1,1.1918,1;R:1,1.7321,1.1918,1'

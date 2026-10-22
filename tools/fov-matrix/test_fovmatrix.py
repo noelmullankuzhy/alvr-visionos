@@ -570,7 +570,12 @@ class RowTest(unittest.TestCase):
             self.assertEqual(r['verdict_encoded'], 'n/a')
             self.assertEqual((r['encode_ms_p95'], r['encode_over_budget']), ('12.35', '0.062'))
             # appended: the old columns keep their place
-            self.assertEqual(fm.SUMMARY_COLUMNS[-3:], ['notes', 'encode_ms_p95', 'encode_over_budget'])
+            self.assertEqual(fm.SUMMARY_COLUMNS[11:14], ['notes', 'encode_ms_p95', 'encode_over_budget'])
+            self.assertEqual(fm.SUMMARY_COLUMNS[14:], ['centre_mtf50_cpd', 'nose_mtf50_cpd', 'temple_mtf50_cpd', 'up_mtf50_cpd',
+                                                       'down_mtf50_cpd', 'display_ceiling_cpd'])
+            # no capture: the stream MTF columns are n/a; the display ceiling is the W33 constant from avp-field.json
+            self.assertEqual([r[k] for k in fm.SUMMARY_COLUMNS[14:19]], ['n/a'] * 5)
+            self.assertEqual(r['display_ceiling_cpd'], '17')
 
     def test_no_overlay_and_error_marker(self):
         with tempfile.TemporaryDirectory() as d:
@@ -588,6 +593,187 @@ class RowTest(unittest.TestCase):
             self.make(d, overlay={'summary': {'verdict': 'PASS'}}, with_stats=False)
             r = dict(zip(fm.SUMMARY_COLUMNS, fm.summary_row('a', d).split('\t')))
             self.assertEqual((r['median_deg'], r['extent_err_deg'], r['centre_px_deg'], r['fps']), ('n/a',) * 4)
+
+
+_sm = importlib.util.spec_from_file_location('stream_mtf', os.path.join(HERE, 'stream_mtf.py'))
+SM = importlib.util.module_from_spec(_sm)
+_sm.loader.exec_module(SM)
+FIXTURES = os.path.join(HERE, 'fixtures')
+
+
+def phi(x):
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def gauss_f50(sigma_px):
+    """Independent expectation: a Gaussian edge sampled at pixel centres and differenced has MTF G(f) x sinc(f)
+    (the difference is a 1 px box); the first f where it falls to 0.5, by bisection."""
+    def m(f):
+        s = math.sin(math.pi * f) / (math.pi * f) if f else 1.0
+        return math.exp(-2 * math.pi ** 2 * sigma_px ** 2 * f * f) * s
+    lo, hi = 0.0, 0.5
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if m(mid) > 0.5 else (lo, mid)
+    return lo
+
+
+class SynthLines:
+    """Analytic luminance: background b, vertical box lines of the chart's width at the given angles (edges at the
+    exact render-grid positions), blurred by a Gaussian of sigma px across x. No horizontal lines."""
+
+    def __init__(self, grid, angles, sigma_px, b=0.064, peak=0.715):
+        self.grid, self.sigma, self.b, self.peak = grid, sigma_px, b, peak
+        self.boxes = []
+        for a in angles:
+            c, w = grid.col(a) + 0.5, SM.line_width_px(a)   # pixel-edge coordinates: pixel i spans [i, i + 1]
+            self.boxes.append((round(c - w / 2), round(c - w / 2) + w))
+
+    def contains(self, x, y):
+        return 0 <= x < self.grid.width and 0 <= y < self.grid.height
+
+    def lum(self, x, y):
+        v = self.b
+        for x0, x1 in self.boxes:
+            if self.sigma <= 0:
+                cover = 1.0 if x0 <= x < x1 else 0.0
+            else:
+                cover = phi((x + 0.5 - x0) / self.sigma) - phi((x + 0.5 - x1) / self.sigma)
+            v += (self.peak - self.b) * cover
+        return v
+
+
+def srgb8(v):
+    v = max(0.0, min(1.0, v))
+    return int(round((12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055) * 255))
+
+
+class StreamMtfTest(unittest.TestCase):
+    GRID = ((-1.7321, 1.0, -1.1918, 1.0), 3648, 2912)   # a100 left eye render grid (meta.json tangents L, R, D, U)
+
+    def grid(self):
+        return SM.Grid(*self.GRID)
+
+    def test_line_widths_follow_the_chart_spec(self):
+        self.assertEqual([SM.line_width_px(a) for a in (0, 5, 10, 15, -15, 20, 30, 45)], [7, 3, 3, 5, 5, 3, 5, 5])
+
+    def test_px_per_deg_on_the_render_grid(self):
+        g = self.grid()
+        self.assertAlmostEqual(g.px_per_deg(0), 3648 / 2.7321 * math.pi / 180, places=6)   # 23.30 at the axis
+        self.assertAlmostEqual(g.px_per_deg(15) / g.px_per_deg(0), 1 / math.cos(15 * math.pi / 180) ** 2, places=9)
+        self.assertAlmostEqual(g.col(0), 1.7321 / 2.7321 * 3648 - 0.5, places=6)
+        self.assertAlmostEqual(g.row(0), 1 / 2.1918 * 2912 - 0.5, places=6)
+
+    def test_gaussian_edge_gives_the_expected_mtf50(self):
+        # within the lines' range (sigma from ~0.55 px, below which the pixel grid aliases, up to ~0.8 px on the 5 px
+        # lines and ~1.1 px on the 7 px one): within 2 %
+        g = self.grid()
+        for fwhm_deg, angles in ((0.06, (0, 15, -15)), (0.08, (0, 15, -15)), (0.11, (0,))):
+            for a in angles:
+                sigma = fwhm_deg / 2.3548 * g.px_per_deg(a)
+                r = SM.measure_edge(g, SynthLines(g, [a], sigma), a, 0)
+                want = gauss_f50(sigma) * g.px_per_deg(a)
+                self.assertAlmostEqual(r['cpd'], want, delta=0.02 * want, msg='fwhm %g a %g: %s vs %s' % (fwhm_deg, a, r['cpd'], want))
+                self.assertFalse(r['truncated'], 'fwhm %g a %g' % (fwhm_deg, a))
+        # more blur, lower MTF50
+        s = [SM.measure_edge(g, SynthLines(g, [0], f / 2.3548 * g.px_per_deg(0)), 0, 0)['cpd'] for f in (0.06, 0.08, 0.11)]
+        self.assertTrue(s[0] > s[1] > s[2], s)
+
+    def test_edge_ending_on_the_plateau_is_complete(self):
+        # a100-asrun R, 0 deg line (22 Oct): the rise ends one step before the line middle, then 4 px flat at the line
+        # level; each edge's LSF runs into the plateau, nothing is cut
+        prof = [0.076] * 12 + [0.074, 0.341, 0.496, 0.693, 0.715, 0.715, 0.715, 0.715, 0.232, 0.086] + [0.075] * 11
+        rising, falling = SM.edge_lsfs(prof, 7)
+        self.assertIn(round(0.022 / 0.641, 3), [round(v, 3) for v in rising])    # the last step into the plateau
+        self.assertTrue(all(v >= -1e-9 for v in falling))
+        self.assertFalse(SM.truncated(prof))
+        # a line that never reaches the chart's line level (green, linear luminance 0.7152): its edges overlap
+        self.assertTrue(SM.truncated([0.076] * 12 + [0.2, 0.45, 0.6, 0.45, 0.2] + [0.076] * 12))
+
+    def test_blur_wider_than_the_line_is_an_upper_bound(self):
+        g = self.grid()
+        sigma = 0.2 / 2.3548 * g.px_per_deg(15)                      # 2.1 px on a 5 px line: the edges overlap
+        r = SM.measure_edge(g, SynthLines(g, [15], sigma), 15, 0)
+        self.assertTrue(r['truncated'])
+        self.assertGreater(r['cpd'], gauss_f50(sigma) * g.px_per_deg(15))   # the cut tail raises the MTF
+        self.assertTrue(SM.combine({'L': {'nose': r}}, 'nose').startswith('<'))
+
+    def test_pixel_exact_edge_is_above_nyquist(self):
+        # the server's own chart (no anti-aliasing) measures 1.0 at every frequency: '>' Nyquist
+        g = self.grid()
+        r = SM.measure_edge(g, SynthLines(g, [0], 0), 0, 0)
+        self.assertIsNone(r['f50_cyc_px'])
+        self.assertTrue(all(abs(m - 1) < 1e-9 for _, m, _, _ in r['curve']))
+        self.assertEqual(SM.combine({'L': {'centre': r}}, 'centre'), '>11.7')
+
+    def test_no_line_or_out_of_image_is_none(self):
+        g = self.grid()
+        self.assertIsNone(SM.measure_edge(g, SynthLines(g, [], 1.0), 0, 0), 'flat background: no edge')
+        crop = SM.PngImage(4, 4, bytes(64), 0, 0)
+        self.assertIsNone(SM.measure_edge(g, crop, 0, 0), 'line outside the image')
+
+    def test_positions_mirror_per_eye(self):
+        g = self.grid()
+        img = SynthLines(g, [0, 15, -15], 1.0)
+        left, right = SM.measure_eye(g, img, 'L'), SM.measure_eye(g, img, 'R')
+        self.assertEqual([left[p]['a_deg'] for p in ('centre', 'nose', 'temple', 'up', 'down')], [0, 15, -15, 0, 0])
+        self.assertEqual([right[p]['a_deg'] for p in ('nose', 'temple')], [-15, 15])
+        self.assertEqual([left[p]['e0_deg'] for p in ('centre', 'up', 'down')], [0, 15, -15])
+        # rows skip the horizontal lines: none within 6 px (+ half width) of e = 0 or 15
+        rows = SM.sample_rows(g, img, 15)
+        self.assertTrue(rows and all(abs(y - g.row(15)) > 2.5 + 6 for y in rows))
+        self.assertTrue(all(abs(y - g.row(15)) <= 4 * g.px_per_deg(0) * 1.2 for y in rows))
+
+    def test_combine(self):
+        r = lambda cpd, nyq=11.65: {'cpd': cpd, 'nyquist_cpd': nyq}
+        self.assertEqual(SM.combine({'L': {'centre': r(7.0)}, 'R': {'centre': r(6.0)}}, 'centre'), '6.5')
+        self.assertEqual(SM.combine({'L': {'centre': r(7.0)}, 'R': {'centre': None}}, 'centre'), '7.0')
+        self.assertEqual(SM.combine({'L': {'centre': None}}, 'centre'), 'n/a')
+        self.assertEqual(SM.combine({}, 'centre'), 'n/a')
+
+    def test_device_capture_fixture(self):
+        # a crop of the 22 Oct a100-asrun left expanded stage around the 0 deg line: the method's number is pinned
+        with open(os.path.join(FIXTURES, 'mtf-a100-asrun-L-centre.json')) as f:
+            fx = json.load(f)
+        w, h, pix = SM.fo.vc.read_png(os.path.join(FIXTURES, 'mtf-a100-asrun-L-centre.png'))
+        g = SM.Grid(fx['tangents_LRDU'], *fx['grid'])
+        r = SM.measure_edge(g, SM.PngImage(w, h, pix, *fx['origin']), fx['a_deg'], fx['e0_deg'])
+        self.assertAlmostEqual(r['cpd'], fx['mtf50_cpd'], delta=0.3)
+        self.assertTrue(5 < r['cpd'] < r['nyquist_cpd'], r['cpd'])
+        self.assertLess(os.path.getsize(os.path.join(FIXTURES, 'mtf-a100-asrun-L-centre.png')), 200 * 1024)
+
+    def test_point_dir_row(self):
+        # a small point: expanded stage for L (lines at 0 and +-15 deg, Gaussian sigma 0.7 px) + dump meta.json
+        tang, n, sigma = (-1.0, 1.0, -1.0, 1.0), 1200, 0.7
+        g = SM.Grid(tang, n, n)
+        img = SynthLines(g, [0, 15, -15], sigma)
+        # grey pixels: the luminance is the linear value itself; lines are vertical, so one row repeats
+        line = b''.join(bytes((srgb8(img.lum(x, 0)),) * 3 + (255,)) for x in range(n))
+        pix = line * n
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'capture'))
+            os.makedirs(os.path.join(d, 'dump'))
+            SM.fo.vc.write_png(os.path.join(d, 'capture', 'stage-expanded-L.png'), n, n, bytes(pix))
+            wj(os.path.join(d, 'capture', 'capture.json'), {'stages': [
+                {'stage': 'decoded', 'eye': 'L', 'png': 'missing.png', 'encoding': 'srgb'},
+                {'stage': 'expanded', 'eye': 'L', 'png': 'stage-expanded-L.png', 'encoding': 'srgb'}]})
+            wj(os.path.join(d, 'dump', 'meta.json'), {'tangents': [list(tang), list(tang)], 'renderEyeSize': [n, n]})
+            r = dict(zip(fm.SUMMARY_COLUMNS, fm.summary_row('p', d).split('\t')))
+            want = gauss_f50(sigma)
+            for col, a in (('centre_mtf50_cpd', 0), ('nose_mtf50_cpd', 15), ('temple_mtf50_cpd', 15), ('up_mtf50_cpd', 0),
+                           ('down_mtf50_cpd', 0)):
+                self.assertAlmostEqual(float(r[col]), want * g.px_per_deg(a), delta=0.3, msg='%s %s' % (col, r[col]))
+            self.assertEqual(r['display_ceiling_cpd'], '17')
+            # a capture without stages (the pre-W46 corner-chart capture): n/a, no crash
+            wj(os.path.join(d, 'capture', 'capture.json'), {'corner_chart': {'mode': 'Off'}})
+            r = dict(zip(fm.SUMMARY_COLUMNS, fm.summary_row('p', d).split('\t')))
+            self.assertEqual(r['centre_mtf50_cpd'], 'n/a')
+
+    def test_display_ceiling_in_avp_field(self):
+        with open(os.path.join(HERE, 'avp-field.json')) as f:
+            field = json.load(f)
+        self.assertEqual(field['w33_ceiling_cpd'], 17)
+        self.assertIn('20 aliased', field['w33_ceiling_note'])
 
 
 class MiscTest(unittest.TestCase):
