@@ -27,27 +27,45 @@ Exit 0 = every point clean, 1 = some point had problems (`<out>/<point>/ERROR`),
 stop app/hold/SteamVR -> apply settings from the *backup* (never from the previous point) -> chart flag `dump` (chart mode)
 or `off` (rdr2) -> `alvr-run2.py dashboard` + manual client IP -> client settings (fovRenderScale, streamFullImmersion,
 captureDiagnosticFrames) -> launch with `SIMCTL_CHILD_ALVR_DIAG=1` -> (rdr2: `hdr-game-run.sh start`) -> wait for decoded
-frames -> settle -> server stats probe (ws, as e4) while waiting for a client capture -> pull capture dir, screenshot, server
+frames -> settle -> write `Documents/diag/capture.request` into the simulator app container (the streaming client takes it,
+deletes it and captures the drawables it is presenting; `trigger.reason` = `request_file` in capture.json) -> server stats
+probe (ws, as e4) while waiting up to 45 s (`--capture-timeout`; writing a capture took ~10 s on the simulator) for a new capture dir -> pull capture dir, screenshot, server
 dump (tar over base64) -> `fov-overlay.py` drawable + render/encoded per dump PNG -> stats (encode ms/bitrate from
-GraphStatistics, client fps/decode from ALVRSTATS) -> restore. The trap restores on error/Ctrl-C/SIGTERM.
+GraphStatistics, client fps/decode from ALVRSTATS) -> restore. The trap (installed before the first PC change, armed before the backup runs, restore exactly once) restores on error/Ctrl-C/SIGTERM/SIGHUP. Every run tags its PC backup with a nonce (`session.orig.nonce`) and only restores a backup carrying its own nonce: a stale or foreign backup is left untouched (loud message, use `--restore`). The app's `capture.request` is cleared before each launch.
 Files per point: `sets.txt pc-*.sh/.log console.log events.jsonl stats.json screenshot.png capture/ dump/ overlay/ ERROR`.
 
 `summary.tsv`: name, verdict, median_deg, max_deg, extent_err_deg, centre_px_deg (measured/predicted), fps, bitrate_mbps,
 encode_ms, verdict_render, verdict_encoded, notes. rdr2 mode skips the overlay unless `--overlay` (no chart in the image).
+
+## Streaming capture trace
+
+The client logs one `DIAG capture_trigger step=...` line per step in `Documents/diag/diag-*.log`: `session_started` (poll timer
+running, directory polled), `request_seen` (file found and deleted), `waiting why=previous_capture_in_flight|no_stream_frame`,
+`request_taken` (reason, on which frame), `submitted`, `written` (or `skipped`); the existing `capture` line adds `reason`,
+`ms_gpu_done`, `ms_to_write`. The runner only accepts a capture whose `trigger.reason` is `request_file` or `after_ms`: an
+idle `start_timer` capture (e.g. taken while the simulator's stream dropped) is ignored.
+
+## Simulator bitrate
+
+The simulator shows grey frames above about 120 Mbps, so for simulator runs use `points-chart-sim.tsv`: the same 10 points as
+`points-chart.tsv` with bitrate 100 Mbps (`points-chart.tsv` keeps 500 Mbps for a real headset).
 
 ## Tests
 
 ```sh
 /usr/bin/python3 -m unittest tools/fov-matrix/test_fovmatrix.py tools/fov-matrix/test_pc_session.py
 /opt/homebrew/bin/python3 -m unittest tools/fov-matrix/test_fovmatrix.py tools/fov-matrix/test_pc_session.py
-sh tools/fov-matrix/test-runner-stubs.sh      # runner with stub ssh/xcrun: happy, failing point, SIGTERM, stale backup
+sh tools/fov-matrix/test-runner-stubs.sh      # runner with stub ssh/xcrun: happy (capture on request), failing point, SIGTERM inside the backup call, SIGTERM/SIGHUP after apply, stale backup
 ```
 
 ## Assumptions to check on the first live run
 
-1. **Client captures only while idle.** `Renderer.swift` passes `idle: !renderingStreaming && !streamingActive` to
-   `DiagFrameCaptureSession`, so on develop no capture appears while streaming; the runner then records a loud
-   `capture:` error (screenshot kept) and the drawable overlay is skipped. A client change (or another trigger) is needed.
+1. **Streaming capture needs this client change.** The client polls `capture.request` once per second (off the render
+   thread) and captures the composited drawables of the next presented stream frame; one capture in flight, no GPU wait.
+   Needs Diagnostics on (`ALVR_DIAG=1` is set by the runner) and `captureDiagnosticFrames` (set by the runner). Without it
+   the runner records a loud `capture:` error (screenshot kept) and skips the drawable overlay. Manual alternative:
+   `ALVR_DIAG_CAPTURE_AFTER_MS=N` takes one automatic capture N ms after the first presented stream frame
+   (`trigger.reason` = `after_ms`; once per stream: re-armed when the stream stops).
 2. `fov-overlay.py` CLI: assumed `fov-overlay.py <mode> --capture-dir|--image ... --eye --fov-scale --render --foveation
    --out-png --out-json` (positional mode; `FOV_OVERLAY_MODE_ARG=--mode` switches). Drawable runs once without `--eye` with
    `--fov-scale` only. Summary extraction reads `verdict`, `median_abs_residual_deg`, `max_abs_residual_deg`,
