@@ -8,8 +8,8 @@ visible field, fov scales, foveation sizes). Replace the visible field there (e.
 
 Variants: asrun (fixed size, no shift); axis (fixed size, band centred on the eye axis); centred (fixed size, band centred
 on the visible field); wider (band spans the whole visible field, centred on it); off; crop (points rows a100-crop-C/-A
-only: the frame is the model lens's inset rectangle + margin, the client's "Crop FOV to outline", band on its eye axis);
-crop-T (row a100-crop-T: the crop-C frame and render, the band flush with the nasal edge and reaching crop.band_T deg temporal/up/down). Each candidate's render is the
+only: the frame is the model lens's inset rectangle + margin, crop-C at the client's 1:1 render request, the client's "Crop FOV to outline", band on its eye axis);
+crop-T (row a100-crop-T: the crop-C frame and render (the 1:1 size, render_scale = its width / 3648), the band flush with the nasal edge and reaching crop.band_T deg temporal/up/down). Each candidate's render is the
 largest at the 3648:2912 aspect whose foveated coded size fits the per-eye budget; px/deg is fov-overlay.py's page
 prediction (render px per degree over the foveation squeeze). Standard library only; `--field FILE` overrides the file."""
 import importlib.util
@@ -104,6 +104,24 @@ def crop_tan(p, eye, inset=None, margin=None):
 def crop_eyes(p):
     """The sent |tan| per eye, rounded as written to eye_tangents."""
     return {e: [round(v, 4) for v in crop_tan(p, e)] for e in 'LR'}
+
+
+def round_up_32(v):
+    """Up to the next multiple of 32; one already on a multiple stays (CropFov.roundUp32)."""
+    return int(math.ceil(v / 32 - 1e-9)) * 32
+
+
+def one_to_one(p, eyes=None):
+    """Per-eye render (w, h) at which one render pixel is one logical grid pixel on the crop frame (CropFov.oneToOne /
+    recommendedViewResolution): the grid density (frustum_tan_LRDU.viewport px over the device frustum's tangent width and
+    height, 2291.7 px per tangent unit) times the sent frame's |tan| spans, each side rounded up to a multiple of 32, the larger
+    of the two eyes. `eyes`: per-eye |tan| L,R,D,U (default crop_tan, unrounded)."""
+    f = p['frustum_tan_LRDU']
+    vw, vh = f['viewport']
+    dx, dy = vw / (f['L'][0] + f['L'][1]), vh / (f['L'][2] + f['L'][3])
+    eyes = eyes or {e: crop_tan(p, e) for e in 'LR'}
+    return (max(round_up_32(dx * (t[0] + t[1])) for t in eyes.values()),
+            max(round_up_32(dy * (t[2] + t[3])) for t in eyes.values()))
 
 
 def crop_shift(tans, c):
@@ -237,13 +255,19 @@ def recommend(rows):
 
 
 def crop_rows(p):
-    """a100-crop-C/-A (and -T): the crop frame at budget C/A's render (the axis rows' foveation sizes, band on the cropped axis) and
-    the centre px/deg against the full frustum's at the same render."""
+    """a100-crop-C/-A (and -T): the crop frame, band on the cropped axis, and the centre px/deg against the full frustum's at the
+    same render. crop-C (and -T) render at the 1:1 size (one_to_one: 3968x3232 at inset 15 + 2.5 deg), which is what the client
+    asks the server for; crop-A at budget A's render (3648x2912). The coded size is reported against budget C."""
     tans, fv = crop_eyes(p), derive(p, 1.0, 'crop')
     axis = derive(p, 1.0, 'axis')
     rows = {}
     for bname in ('C', 'A'):
-        w, h, cw, ch = max_render(fv, BUDGETS[bname])
+        if bname == 'C':
+            w, h = one_to_one(p)
+            ax, ay = axes_for(fv, w, h)
+            cw, ch = ax['coded'], ay['coded']
+        else:
+            w, h, cw, ch = max_render(fv, BUDGETS[bname])
         det = {e: eye_detail(p, e, 1.0, fv, w, h, tans=tans[e]) for e in 'LR'}
         full = {e: eye_detail(p, e, 1.0, axis, w, h) for e in 'LR'}
         f = p['frustum_tan_LRDU']['L']
@@ -284,8 +308,8 @@ def points(p):
                'margin; eye_tangents = what the client sends.' % (c['inset_deg'], c['margin_deg']))
     for name, r in crop_rows(p).items():
         crop_eyes_text = 'L:%s;R:%s' % tuple(','.join('%g' % v for v in r['tans'][k]) for k in 'LR')
-        out.append('# %s: predicted centre %.1f px/deg (frustum %.1f at the same render, x%.2f h / x%.2f v)' % (
-            name, r['centre'], r['frustum_centre'], r['ratio'][0], r['ratio'][1]) + (
+        out.append('# %s: render %dx%d; predicted centre %.1f px/deg (frustum %.1f at the same render, x%.2f h / x%.2f v)' % (
+            name, r['render'][0], r['render'][1], r['centre'], r['frustum_centre'], r['ratio'][0], r['ratio'][1]) + (
             '; coded %dx%d vs budget C %dx%d' % (r['coded'] + BUDGETS['C']) if name.endswith('-T') else ''))
         out.append('%s\t1\t%g\t%s\t%g\t%g\teye_tangents=%s' % (name, round(r['render'][0] / ASPECT[0], 4), fvtext(r['fv']),
                                                              pt['bitrate_mbps'], pt['fps'], crop_eyes_text))

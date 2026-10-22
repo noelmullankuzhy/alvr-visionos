@@ -968,6 +968,13 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 // The frame quad is drawn on the sent tangents (uniforms.tangents) under the device projection.
                 let debugEyes = DebugEyeTangents.current
                 let cropInset = CropFov.inset
+                // The logical grid (rate map screen size, else the view's viewport) over the device frustum: px per tangent unit.
+                // The connect-time recommendation uses the last measured grid (reference device's until then); recommended= in
+                // fov_sent shows what was sent, render_1to1= what the frame sent now needs.
+                let viewport = mainDrawable.views[eyeViews[0]].textureMap.viewport
+                let screen = mainDrawable.rasterizationRateMaps.first?.screenSize
+                CropFov.recordGrid(screenWidth: screen?.width ?? Int(viewport.width), screenHeight: screen?.height ?? Int(viewport.height),
+                                   device: tangentsLeft)
                 let sent = CropFov.choose(device: [tangentsLeft, tangentsRight], debug: debugEyes?.tangents,
                                           crop: settings.cropFovToOutline, insetDeg: cropInset, marginDeg: settings.cropMarginDeg)
                 let leftAngles = ViewLayout.fovAngles(tangents: sent.tangents[0], scale: settings.fovRenderScale)
@@ -985,12 +992,16 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 let axisShift = foveation.map { CropFov.centerShift(left: sentGimme[0], right: sentGimme[1],
                                                                      centerSize: [Double($0.centerSizeX), Double($0.centerSizeY)]) }
                 let sessionShift = foveation.map { SIMD2<Double>(Double($0.centerShiftX), Double($0.centerShiftY)) }
+                let sentSizes = sent.tangents.map { CropFov.oneToOne(density: CropFov.grid.density, sent: $0) }
+                let render1to1 = (sentSizes.map(\.width).max() ?? 0, sentSizes.map(\.height).max() ?? 0)
+                let recommended = EventHandler.shared.recommendedViewResolution.map { ($0.width, $0.height) }
                 for (eye, fov) in [("L", leftFovCorrected), ("R", rightFovCorrected)] {
                     let crop = sent.source == "crop"
                     Diag.log("fov_sent", ViewLayout.fovSentFields(eye: eye, left: fov.left, right: fov.right, up: fov.up, down: fov.down,
                                                                   source: sent.source, marginDeg: crop ? settings.cropMarginDeg : nil,
                                                                   insetDeg: crop ? cropInset : 0, offsetDeg: crop ? 0 : nil,
-                                                                  axisCenterShift: axisShift, sessionCenterShift: sessionShift))
+                                                                  axisCenterShift: axisShift, sessionCenterShift: sessionShift,
+                                                                  render1to1: crop ? render1to1 : nil, recommended: recommended))
                 }
 
                 EventHandler.shared.viewFovs = [leftFovCorrected, rightFovCorrected]

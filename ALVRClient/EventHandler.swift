@@ -181,6 +181,9 @@ class EventHandler: ObservableObject {
     var audioIsOff = false
     var needsEncoderReset = true
     var encodingGamma: Float = 1.0
+    // The per-eye view size sent as default_view_width/height at the last alvr_initialize (fov_sent recommended=); nil before it.
+    // Set in initializeAlvr, read by the render thread for the log only.
+    var recommendedViewResolution: (width: Int, height: Int)?
     var enableHdr = false
     // Guarded by frameQueueLock (event, render and decoder threads).
     var streamBootstrap = StreamBootstrap()
@@ -207,7 +210,16 @@ class EventHandler: ObservableObject {
                 refreshRates = [120, 100, 96, 90]
             }
 
-            let capabilities = AlvrClientCapabilities(default_view_width: UInt32(renderWidth*2), default_view_height: UInt32(renderHeight*2), refresh_rates: refreshRates, refresh_rates_count: UInt64(refreshRates.count), foveated_encoding: true, encoder_high_profile: true, encoder_10_bits: true, encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1), prefer_10bit: true, prefer_full_range: true, preferred_encoding_gamma: 1.5, prefer_hdr: ALVRClientApp.gStore.settings.hdrPQ)
+            // "Crop FOV to outline": ask for the 1:1 render size of the frame the crop will send (CropFov.oneToOne), at the grid
+            // density measured from the layer, else the reference device's; crop off keeps the default size. Fixed per stream.
+            let settings = ALVRClientApp.gStore.settings
+            let recommended = CropFov.recommendedViewResolution(
+                crop: settings.cropFovToOutline, device: CropFov.referenceDevice, density: CropFov.grid.density,
+                insetDeg: CropFov.inset, marginDeg: settings.cropMarginDeg, fallback: (renderWidth * 2, renderHeight * 2))
+            recommendedViewResolution = recommended
+            print("Recommended view resolution", recommended.width, "x", recommended.height)
+
+            let capabilities = AlvrClientCapabilities(default_view_width: UInt32(recommended.width), default_view_height: UInt32(recommended.height), refresh_rates: refreshRates, refresh_rates_count: UInt64(refreshRates.count), foveated_encoding: true, encoder_high_profile: true, encoder_10_bits: true, encoder_av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1), prefer_10bit: true, prefer_full_range: true, preferred_encoding_gamma: 1.5, prefer_hdr: ALVRClientApp.gStore.settings.hdrPQ)
             if let filter = ClientLogging.defaultFilter(environment: ProcessInfo.processInfo.environment) {
                 setenv("RUST_LOG", filter, 0)
             }

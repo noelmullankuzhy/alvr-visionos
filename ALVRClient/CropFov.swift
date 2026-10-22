@@ -8,7 +8,7 @@ import simd
 /// frame on the sent box (Renderer uniforms.tangents) and the rest of the drawable stays black. docs/lumen/crop-fov.md.
 /// Tangents are gimmeTangents magnitudes, slots (left, right, bottom, top).
 enum CropFov {
-    static let defaultMarginDeg = 2.0
+    static let defaultMarginDeg = 2.5
     /// GlobalSettings.cropFovToOutline default: on, so the lens style streams the cropped box; off sends the device frustum.
     static let defaultEnabled = true
     /// No sent edge reaches 90 deg (tan blows up) or goes below the eye axis.
@@ -27,6 +27,42 @@ enum CropFov {
         }
         return simd_float4(widened(box.left, device.x), widened(box.right, device.y),
                            widened(box.down, device.z), widened(box.up, device.w))
+    }
+
+    /// The Vision Pro's logical grid at render quality 1.0 (rate map screen size, 22 Oct device log) and its per-eye device
+    /// frustum (left, right, bottom, top |tan|): 6261x5023 over 2.7321 x 2.1918 tangent units is 2291.7 px per unit. The
+    /// grid until the layer has been measured (`recordGrid`) and the test fixture.
+    static let referenceScreen = (width: 6261, height: 5023)
+    static let referenceDevice = [simd_float4(1.7321, 1.0, 1.1918, 1.0), simd_float4(1.0, 1.7321, 1.1918, 1.0)]
+
+    /// Pixels per tangent unit of the logical grid, per axis: the grid's width and height over the device frustum's
+    /// tangent width (left + right) and height (bottom + top). Zero on a degenerate frustum.
+    static func gridDensity(screenWidth: Int, screenHeight: Int, device: simd_float4) -> SIMD2<Double> {
+        let w = Double(device.x) + Double(device.y), h = Double(device.z) + Double(device.w)
+        guard w > 0, h > 0 else { return [0, 0] }
+        return [Double(screenWidth) / w, Double(screenHeight) / h]
+    }
+
+    /// Up to the next multiple of 32 (a value already on one stays).
+    static func roundUp32(_ value: Double) -> Int {
+        Int((value / 32 - 1e-9).rounded(.up)) * 32
+    }
+
+    /// The render size at which one render pixel is one logical grid pixel on the sent frame: its tangent spans times the
+    /// grid density, each side rounded up to a multiple of 32. docs/lumen/crop-fov.md.
+    static func oneToOne(density: SIMD2<Double>, sent: simd_float4) -> (width: Int, height: Int) {
+        (roundUp32(density.x * (Double(sent.x) + Double(sent.y))), roundUp32(density.y * (Double(sent.z) + Double(sent.w))))
+    }
+
+    /// The per-eye view size the client recommends at connect (AlvrClientCapabilities.default_view_width/height): with
+    /// crop on, the larger 1:1 size of the two sent eyes per side; with crop off, `fallback` (the unchanged default).
+    static func recommendedViewResolution(crop: Bool, device: [simd_float4], density: SIMD2<Double>, insetDeg: Double,
+                                          marginDeg: Double, fallback: (width: Int, height: Int)) -> (width: Int, height: Int) {
+        guard crop else { return fallback }
+        let sent = choose(device: device, debug: nil, crop: true, insetDeg: insetDeg, marginDeg: marginDeg).tangents
+        let sizes = sent.map { oneToOne(density: density, sent: $0) }
+        let width = sizes.map(\.width).max() ?? 0, height = sizes.map(\.height).max() ?? 0
+        return width > 0 && height > 0 ? (width, height) : fallback
     }
 
     /// ALVR center_shift_x/y that puts the 1:1 band's centre on the eye axis (tan 0) of the sent boxes. The band spans
@@ -72,6 +108,34 @@ enum CropFov {
         guard deg.isFinite else { return }
         lock.lock()
         stored = deg
+        lock.unlock()
+    }
+
+    /// The logical grid density measured from the layer's drawable (`recordGrid`); `measured` is false until then, and the
+    /// density is the reference device's.
+    private static var storedGrid: (density: SIMD2<Double>, measured: Bool)?
+
+    static var grid: (density: SIMD2<Double>, measured: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedGrid ?? (gridDensity(screenWidth: referenceScreen.width, screenHeight: referenceScreen.height,
+                                          device: referenceDevice[0]), false)
+    }
+
+    /// Record the drawable's logical grid (rate map screen size, else the view viewport) and the device frustum it was
+    /// measured on; a zero size or a degenerate frustum is ignored.
+    static func recordGrid(screenWidth: Int, screenHeight: Int, device: simd_float4) {
+        guard screenWidth > 0, screenHeight > 0 else { return }
+        let density = gridDensity(screenWidth: screenWidth, screenHeight: screenHeight, device: device)
+        guard density.x > 0, density.y > 0 else { return }
+        lock.lock()
+        storedGrid = (density, true)
+        lock.unlock()
+    }
+
+    static func resetGrid() {
+        lock.lock()
+        storedGrid = nil
         lock.unlock()
     }
 
