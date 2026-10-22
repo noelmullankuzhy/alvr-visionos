@@ -55,6 +55,17 @@ struct GlobalSettings: Codable {
     // Two windows with the decoded left and right eye images and per-eye counters (EyeDecodeWindows.swift).
     var eyeDecodeWindows: Bool = GlobalSettings.eyeDecodeWindowsDefault
 
+    // Launch-argument options with a settings control (LaunchFlags.swift); a launch argument still wins. Read once at stream /
+    // session start, so a change applies at the next connect. 0 = automatic for the two HDR numbers.
+    var asyncDecode: Bool = false
+    var deadlineSelect: Bool = false
+    var decodeRealTime: Bool = false
+    var displayP3Output: Bool = false
+    var hdrHeadroom: Double = 0
+    var hdrReferenceWhiteNits: Double = 0
+    var eyeBadges: Bool = false
+    var hdrProbe: Bool = false
+
     // On in the simulator, where there is no headset to judge decoding by; off on device.
     static let eyeDecodeWindowsDefault: Bool = {
 #if targetEnvironment(simulator)
@@ -105,6 +116,14 @@ struct GlobalSettings: Codable {
         self.cropMarginDeg = try container.decodeIfPresent(Double.self, forKey: .cropMarginDeg) ?? self.cropMarginDeg
         self.goldenFrameSet = try container.decodeIfPresent(String.self, forKey: .goldenFrameSet) ?? self.goldenFrameSet
         self.eyeDecodeWindows = try container.decodeIfPresent(Bool.self, forKey: .eyeDecodeWindows) ?? self.eyeDecodeWindows
+        self.asyncDecode = try container.decodeIfPresent(Bool.self, forKey: .asyncDecode) ?? self.asyncDecode
+        self.deadlineSelect = try container.decodeIfPresent(Bool.self, forKey: .deadlineSelect) ?? self.deadlineSelect
+        self.decodeRealTime = try container.decodeIfPresent(Bool.self, forKey: .decodeRealTime) ?? self.decodeRealTime
+        self.displayP3Output = try container.decodeIfPresent(Bool.self, forKey: .displayP3Output) ?? self.displayP3Output
+        self.hdrHeadroom = try container.decodeIfPresent(Double.self, forKey: .hdrHeadroom) ?? self.hdrHeadroom
+        self.hdrReferenceWhiteNits = try container.decodeIfPresent(Double.self, forKey: .hdrReferenceWhiteNits) ?? self.hdrReferenceWhiteNits
+        self.eyeBadges = try container.decodeIfPresent(Bool.self, forKey: .eyeBadges) ?? self.eyeBadges
+        self.hdrProbe = try container.decodeIfPresent(Bool.self, forKey: .hdrProbe) ?? self.hdrProbe
     }
 }
 

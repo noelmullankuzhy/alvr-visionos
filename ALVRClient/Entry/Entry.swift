@@ -7,8 +7,6 @@ import SwiftUI
 import UIKit
 
 struct Entry: View {
-    @AppStorage(HDRPipeline.probeKey) private var hdrProbeEnabled = false
-    @AppStorage(EyeBadgeFlag.defaultsKey) private var eyeBadgesEnabled = false
     @ObservedObject var eventHandler = EventHandler.shared
     @EnvironmentObject var gStore: GlobalSettingsStore
     @Environment(\.scenePhase) private var scenePhase
@@ -69,6 +67,37 @@ struct Entry: View {
     
     func applyStreamHz() {
         VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
+    }
+
+    // Settings control for an option that also has a launch argument: the argument wins and disables the control.
+    @ViewBuilder
+    private func flagToggle(_ title: String, _ note: String, key: String, _ value: Binding<Bool>, apply: @escaping () -> Void = {}) -> some View {
+        let overridden = LaunchFlags.isOverridden(key)
+        Toggle(isOn: Binding(get: { LaunchFlags.bool(key, setting: value.wrappedValue) }, set: { value.wrappedValue = $0 })) {
+            Text(title)
+            Text(overridden ? "Set by launch argument." : note)
+                .font(.system(size: 10))
+        }
+        .toggleStyle(.switch)
+        .disabled(overridden)
+        .onChange(of: value.wrappedValue) {
+            saveAction()
+            apply()
+        }
+    }
+
+    // 0 = automatic.
+    @ViewBuilder
+    private func flagStepper(_ title: String, _ unit: String, _ note: String, key: String, _ value: Binding<Double>, in range: ClosedRange<Double>, step: Double) -> some View {
+        let overridden = LaunchFlags.isOverridden(key)
+        let shown = LaunchFlags.double(key, setting: value.wrappedValue)
+        Stepper(value: Binding(get: { shown }, set: { value.wrappedValue = $0 }), in: range, step: step) {
+            Text("\(title): \(shown == 0 ? "automatic" : String(format: "%g", shown) + unit)")
+            Text(overridden ? "Set by launch argument." : note)
+                .font(.system(size: 10))
+        }
+        .disabled(overridden)
+        .onChange(of: value.wrappedValue) { saveAction() }
     }
 
     var body: some View {
@@ -374,14 +403,29 @@ struct Entry: View {
                             saveAction()
                         }
 
-                        Toggle(isOn: $hdrProbeEnabled) {
-                            Text("HDR probe (log)")
-                            Text("Logs decoded HDR samples while streaming. ALVR_HDR_PROBE in the launch environment overrides this setting.")
-                                .font(.system(size: 10))
+                        Text("Stream").font(.headline)
+                        flagToggle("Async decode", "Pipelined hardware decode, two frames in flight. Applies after an app restart.",
+                                   key: DecodeInFlight.asyncDefaultsKey, $gStore.settings.asyncDecode)
+                        flagToggle("Deadline frame select", "Picks the frame against the display deadline instead of a 5 ms poll. Applies the next time the immersive space opens.",
+                                   key: FramePacing.defaultsKey, $gStore.settings.deadlineSelect)
+                        flagToggle("Decode real-time", "Asks the decoder for real-time priority. Applies at the next connect.",
+                                   key: DecodeInFlight.realTimeDefaultsKey, $gStore.settings.decodeRealTime)
+                        Text("Colour").font(.headline)
+                        flagToggle("Display P3 output", "Converts SDR to Display P3 instead of extended sRGB. Applies after an app restart.",
+                                   key: ColourOutput.displayP3DefaultsKey, $gStore.settings.displayP3Output)
+                        Text("HDR").font(.headline)
+                        flagStepper("Headroom override", "x", "0 = automatic. Applies the next time the immersive space opens.",
+                                    key: HDRPipeline.headroomDefaultsKey, $gStore.settings.hdrHeadroom, in: 0...4, step: 0.1)
+                        flagStepper("Reference white", " nits", "0 = the stream's value. Applies at the next connect.",
+                                    key: HDRPipeline.referenceWhiteDefaultsKey, $gStore.settings.hdrReferenceWhiteNits, in: 0...1000, step: 10)
+                        Text("Diagnostics").font(.headline)
+                        flagToggle("HDR probe (log)", "Logs decoded HDR samples while streaming. ALVR_HDR_PROBE in the launch environment also overrides this.",
+                                   key: HDRPipeline.probeKey, $gStore.settings.hdrProbe) {
+                            HDRProbe.updateEnabled(defaultsValue: LaunchFlags.bool(HDRPipeline.probeKey, setting: gStore.settings.hdrProbe))
                         }
-                        .toggleStyle(.switch)
-                        .onChange(of: hdrProbeEnabled) {
-                            HDRProbe.updateEnabled(defaultsValue: hdrProbeEnabled)
+                        flagToggle("Eye badges (L/R)", "Shows per-eye labels in the Metal renderer. Applies immediately.",
+                                   key: EyeBadgeFlag.defaultsKey, $gStore.settings.eyeBadges) {
+                            EyeBadgeFlag.shared.update(defaultsValue: LaunchFlags.bool(EyeBadgeFlag.defaultsKey, setting: gStore.settings.eyeBadges))
                         }
 
                         Toggle(isOn: $gStore.settings.showPerformanceHud) {
@@ -402,16 +446,6 @@ struct Entry: View {
                         .toggleStyle(.switch)
                         .onChange(of: gStore.settings.diagnostics) {
                             saveAction()
-                        }
-
-                        Toggle(isOn: $eyeBadgesEnabled) {
-                            Text("Eye badges (L/R)")
-                            Text("Shows per-eye labels in the Metal renderer. Applies immediately.")
-                                .font(.system(size: 10))
-                        }
-                        .toggleStyle(.switch)
-                        .onChange(of: eyeBadgesEnabled) {
-                            EyeBadgeFlag.shared.update(defaultsValue: eyeBadgesEnabled)
                         }
 
                         Toggle("Render quality sweep", isOn: $gStore.settings.renderQualitySweep)

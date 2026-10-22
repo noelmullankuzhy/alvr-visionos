@@ -230,3 +230,7 @@ struct EntryControls: View {
 
     }
 }
+
+extension EyeBadgeFlag {
+    static let shared = EyeBadgeFlag(defaultsValue: LaunchFlags.bool(defaultsKey, setting: ALVRClientApp.gStore.settings.eyeBadges))
+}

@@ -23,7 +23,7 @@ import simd
 final class HDRProbe {
     private static let flag = HDRProbeFlag(
         environment: ProcessInfo.processInfo.environment,
-        defaultsValue: UserDefaults.standard.object(forKey: HDRPipeline.probeKey) == nil ? nil : UserDefaults.standard.bool(forKey: HDRPipeline.probeKey))
+        defaultsValue: LaunchFlags.bool(HDRPipeline.probeKey, setting: ALVRClientApp.gStore.settings.hdrProbe))
     static let shared = HDRProbe()
 
     static var enabled: Bool { flag.enabled }
