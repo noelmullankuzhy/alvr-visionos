@@ -194,6 +194,19 @@ enum BoundaryDotsOutline {
     }
 }
 
+/// Confirmed/unconfirmed state last painted per layout dot, so a refresh re-assigns
+/// materials only for dots whose state changed (not on slider or cursor steps).
+struct BoundaryDotsDotStates {
+    private var shown: [Bool]?
+
+    mutating func changes(_ session: BoundaryDotsSession) -> [Int] {
+        let states = BoundaryDots.layout.map(session.isConfirmed)
+        defer { shown = states }
+        guard let shown else { return Array(states.indices) }
+        return states.indices.filter { states[$0] != shown[$0] }
+    }
+}
+
 /// Latest `m5_view` tangents of drawable 0 (view 0 = L, view 1 = R) in this app session, written from the
 /// Diag queue and read on the main actor; the device defaults stand in until a Metal session has run.
 enum BoundaryDotsTangents {
@@ -356,15 +369,17 @@ enum BoundaryDotsSliderUpdate: Equatable {
 }
 
 /// The inset counterpart of `BoundaryDotsDrag`: one left-hand slide at a time, keyed by
-/// spatial event ID, grabbed only while `enabled` (no cursor, a single eye). Once grabbed
-/// it runs to release or cancel; an inset changed elsewhere (eye switch) re-anchors it and
-/// a cancelled slide restores its starting inset.
+/// spatial event ID, grabbed only while `enabled` (no cursor, a single eye). An inset changed
+/// elsewhere re-anchors it and a cancelled slide restores its starting inset. Losing `enabled`
+/// mid-slide (a cursor selected) ends it at its value: the pinch stays consumed until release,
+/// so it neither moves the inset again nor becomes a cursor drag.
 struct BoundaryDotsSlider<ID: Hashable> {
     private struct Grab {
         let id: ID
         var origin: SIMD3<Double>
         var start: Double
         var current: Double
+        var ended = false
     }
     private var grab: Grab?
     var active: Bool { grab != nil }
@@ -379,6 +394,10 @@ struct BoundaryDotsSlider<ID: Hashable> {
             return nil
         }
         guard active.id == id else { return nil }
+        guard !active.ended, enabled else {
+            if phase == .active { active.ended = true; grab = active } else { grab = nil }
+            return nil
+        }
         guard phase != .cancelled else {
             grab = nil
             return active.current != active.start && inset == active.current ? .move(active.start) : nil

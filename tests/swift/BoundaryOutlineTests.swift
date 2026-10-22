@@ -67,6 +67,13 @@ enum BoundaryOutlineTests {
         let area15 = left.areaFraction(insetDeg: 15)
         expect(area15 > 0.3 && area15 < 0.6, "inset 15 area fraction plausible: \(area15)")
         expect(left.areaFraction(insetDeg: 20) < area15, "more inset, less area")
+        // Hand check, L device frustum (l=1.7321, r=1, b=1.1918, t=1) at inset 15. Vertices: rays every 5 deg plus
+        // the corner rays 45, 150.0007, 214.5306, 309.9989; radius rho = tan(edge_ecc - 15), e.g. ray 0: tan(45-15)=0.57735.
+        // Polygon area by fan sectors, 1/2 * sum(rho_i * rho_i+1 * sin(dphi_i)), grouped by the quadrant of phi_i:
+        //   [0,90) 0.341113 + [90,180) 0.576945 + [180,270) 0.685372 + [270,360) 0.409327 = 2.012757
+        // Frustum area (l+r)(b+t) = 2.7321 * 2.1918 = 5.988217; fraction 2.012757 / 5.988217 = 0.336120.
+        near(area15, 2.012757 / 5.988217, "L inset 15 area fraction by hand", tolerance: 1e-6)
+        near(area15, 0.336120, "L inset 15 area fraction", tolerance: 1e-6)
 
         // Clamping: limits and outline never go below 0 deg; inset snaps to 0.5 and stays in 0...30.
         let narrow = BoundaryDotsFrustum(left: 0.2, right: 0.2, bottom: 0.2, top: 0.2)
@@ -149,8 +156,37 @@ enum BoundaryOutlineTests {
         expectEqual(feed(8, origin + [0.05, 0, 0]), nil, "second pinch ignored")
         expectEqual(feed(8, origin, .ended), nil)
         expectEqual(feed(7, origin + [0.04, 0, 0], hand: nil), .move(21), "id keeps the slide")
-        expectEqual(feed(7, origin + [0.04, 0, 0], .ended, enabled: false), .release(from: 20, to: 21),
-                    "a slide continues to release even if a cursor appears")
+        // A cursor selected mid-slide (enabled false) ends the slide at its value; the pinch stays
+        // consumed so it cannot start a cursor drag or move the inset again.
+        expectEqual(feed(7, origin + [0.06, 0, 0], enabled: false), nil, "cursor selected: the slider cannot fire")
+        expectEqual(inset, 21, "value at the selection is kept")
+        expect(slider.active, "the pinch stays with the ended slide until release")
+        expectEqual(feed(7, origin + [-0.05, 0, 0], enabled: true), nil, "no resume after the cursor is cleared mid-pinch")
+        expectEqual(feed(7, origin + [-0.05, 0, 0], .cancelled, enabled: false), nil, "cancel after the end restores nothing")
+        expect(!slider.active, "released")
+        expectEqual(inset, 21)
+        expectEqual(feed(9, origin), nil)
+        expectEqual(feed(9, origin + [0.02, 0, 0]), .move(23))
+        expectEqual(feed(9, origin + [0.03, 0, 0], enabled: false), nil)
+        expectEqual(feed(9, origin + [0.03, 0, 0], .ended, enabled: false), nil, "ended slide has nothing to release")
+        expectEqual(inset, 23)
+
+        // Dot materials: only dots whose confirmed state changed are re-assigned; a slider step changes none.
+        var materials = BoundaryDotsDotStates()
+        var marked = BoundaryDotsSession()
+        expectEqual(materials.changes(marked).count, BoundaryDots.layout.count, "first refresh paints every dot")
+        expectEqual(materials.changes(marked), [], "no change, no material")
+        marked.eye = .left
+        marked.inset = 22
+        expectEqual(materials.changes(marked), [], "a slider step touches no dot material")
+        let marker = BoundaryDot(rayDeg: 15, eccDeg: 30)
+        _ = marked.select(marker)
+        expectEqual(materials.changes(marked), [], "a cursor is not a material change")
+        _ = marked.confirm()
+        let index = BoundaryDots.layout.firstIndex(of: marker)!
+        expectEqual(materials.changes(marked), [index], "a confirm repaints one dot")
+        marked.eye = .right
+        expectEqual(materials.changes(marked), [index], "an eye switch repaints that eye's differences")
 
         // Session: one inset per eye, deselect, outline log line.
         var session = BoundaryDotsSession()

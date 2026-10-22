@@ -19,6 +19,8 @@ private final class BoundaryDotsScene {
     private let insetEntity = ModelEntity()
     private let limitsEntity = ModelEntity()
     private var outlineShown: (eye: BoundaryDotsEye, inset: Double, frustum: BoundaryDotsFrustum)?
+    private var dotStates = BoundaryDotsDotStates()
+    private var statusShown: String?
     private var eyeEntities: [BoundaryDotsEye: ModelEntity] = [:]
     private var started = false
     private var finished = false
@@ -191,8 +193,10 @@ private final class BoundaryDotsScene {
                                      headRotation: rotation, inset: session.inset,
                                      enabled: session.cursor == nil && session.eye != .both) {
                 case .move(let inset)?, .release(_, let inset)?:
+                    // A slider step changes only the outline and its labels: no dot materials.
                     session.inset = inset
-                    refresh()
+                    refreshOutline()
+                    refreshStatus()
                 case nil:
                     break
                 }
@@ -240,19 +244,28 @@ private final class BoundaryDotsScene {
     }
 
     private func refresh() {
-        for (index, dot) in BoundaryDots.layout.enumerated() { updateDot(index, dot) }
+        for index in dotStates.changes(session) { updateDot(index, BoundaryDots.layout[index]) }
         for (eye, button) in eyeEntities { button.model?.materials = [eye == session.eye ? white : dim] }
         cursorEntity.isEnabled = session.cursor != nil
-        var text = "\(session.eye.rawValue)  select a ray" + (session.eye == .both ? "" : "  |  left drag: outline")
         if let dot = session.cursor {
             let direction = SIMD3<Float>(dot.direction)
             cursorEntity.position = direction * 9.95
             cursorEntity.orientation = simd_quatf(from: [0, 0, 1], to: -direction)
+        }
+        refreshOutline()
+        refreshStatus()
+    }
+
+    /// Rebuilds the status text mesh only when its text changes.
+    private func refreshStatus() {
+        var text = "\(session.eye.rawValue)  select a ray" + (session.eye == .both ? "" : "  |  left drag: outline")
+        if let dot = session.cursor {
             text = String(format: "%@  ray %g  ecc %g  |  left drag: cursor, pinch cross for outline",
                           session.eye.rawValue, dot.rayDeg, dot.eccDeg)
         }
         text += "  [\(session.outermost(session.eye).count) rays done]"
-        refreshOutline()
+        guard text != statusShown else { return }
+        statusShown = text
         statusEntity.model = ModelComponent(mesh: .generateText(text, extrusionDepth: 0.001,
                                           font: .systemFont(ofSize: 0.065)),
                                           materials: [UnlitMaterial(color: UIColor(white: 0.3, alpha: 1))])

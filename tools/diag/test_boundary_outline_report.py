@@ -51,6 +51,13 @@ class BoundaryOutlineReportTests(unittest.TestCase):
         self.assertTrue(all(e == 0 for _, e in report.outline_points(30, (0.2, 0.2, 0.2, 0.2))))
         self.assertAlmostEqual(report.outline_ecc(0, 15, LEFT), 30)
         self.assertLess(report.outline_area_frac(20, LEFT), report.outline_area_frac(15, LEFT))
+        # Hand check, L device frustum (l=1.7321, r=1, b=1.1918, t=1) at inset 15. Vertices: rays every 5 deg plus
+        # the corner rays 45, 150.0007, 214.5306, 309.9989; radius rho = tan(edge_ecc - 15), e.g. ray 0: tan(45-15)=0.57735.
+        # Polygon area by fan sectors, 1/2 * sum(rho_i * rho_i+1 * sin(dphi_i)), grouped by the quadrant of phi_i:
+        #   [0,90) 0.341113 + [90,180) 0.576945 + [180,270) 0.685372 + [270,360) 0.409327 = 2.012757
+        # Frustum area (l+r)(b+t) = 2.7321 * 2.1918 = 5.988217; fraction 2.012757 / 5.988217 = 0.336120.
+        self.assertAlmostEqual(report.outline_area_frac(15, LEFT), 2.012757 / 5.988217, places=6)
+        self.assertAlmostEqual(report.outline_area_frac(15, LEFT), 0.336120, places=6)
 
     def test_outline_rows_with_area_and_dot_deviation(self):
         rows = report.dots_outlines(self.records(LOG))
