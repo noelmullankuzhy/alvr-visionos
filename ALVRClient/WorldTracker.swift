@@ -3291,7 +3291,9 @@ class WorldTracker {
         // The simulated head is static: make each sample's orientation unique so the server matches frames to their
         // own timestamps (FakeHeadPose.swift). Applied after the velocities so they stay those of the real pose.
         var sentHeadPose = headPose
-        sentHeadPose.orientation = AlvrQuat(FakeHeadPose.dithered(headPose.orientation.asQuatf(), sequence: nextFakeHeadPoseSequence()))
+        let ditherSequence = nextFakeHeadPoseSequence()
+        sentHeadPose.orientation = AlvrQuat(FakeHeadPose.dithered(headPose.orientation.asQuatf(), sequence: ditherSequence))
+        noteSimYawDither(timestampNs: UInt64(reportedTargetTimestamp * Double(NSEC_PER_SEC)), yawRadians: FakeHeadPose.yaw(sequence: ditherSequence))
 #else
         let sentHeadPose = headPose
 #endif
@@ -3512,6 +3514,23 @@ class WorldTracker {
         }
     }
     
+    // Simulator diagnostics: the FakeHeadPose yaw sent for each tracking timestamp, so a frame's capture.json can say how much
+    // of its render-vs-display yaw delta is the dither. The server returns frames tagged with the sent timestamp.
+    private var simYawDitherByTimestamp: [UInt64: Float] = [:]
+    private var simYawDitherOrder: [UInt64] = []
+    func noteSimYawDither(timestampNs: UInt64, yawRadians: Float) {
+        fakeHeadPoseLock.lock()
+        defer { fakeHeadPoseLock.unlock() }
+        if simYawDitherByTimestamp.updateValue(yawRadians, forKey: timestampNs) == nil { simYawDitherOrder.append(timestampNs) }
+        if simYawDitherOrder.count > 1024 { simYawDitherByTimestamp.removeValue(forKey: simYawDitherOrder.removeFirst()) }
+    }
+    // nil when the frame's timestamp was not sent with a dither (device builds, or aged out).
+    func simYawDither(timestampNs: UInt64) -> Float? {
+        fakeHeadPoseLock.lock()
+        defer { fakeHeadPoseLock.unlock() }
+        return simYawDitherByTimestamp[timestampNs]
+    }
+
     func nextFakeHeadPoseSequence() -> UInt64 {
         fakeHeadPoseLock.lock()
         defer { fakeHeadPoseLock.unlock() }

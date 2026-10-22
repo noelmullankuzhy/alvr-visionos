@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		D65CA0010000000000000001 /* DiagFrameCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65CA0010000000000000002 /* DiagFrameCapture.swift */; };
+		D65CA001000000000000F001 /* DiagCapturePose.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65CA001000000000000F002 /* DiagCapturePose.swift */; };
 		D3DEC0DE0000000000000005 /* VideoDecoderOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3DEC0DE0000000000000105 /* VideoDecoderOutput.swift */; };
 		D3DEC0DE0000000000000004 /* DiagBenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3DEC0DE0000000000000104 /* DiagBenchView.swift */; };
 		D3DEC0DE0000000000000003 /* DiagNetSink.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3DEC0DE0000000000000103 /* DiagNetSink.swift */; };
@@ -133,6 +134,7 @@
 
 /* Begin PBXFileReference section */
 		D65CA0010000000000000002 /* DiagFrameCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagFrameCapture.swift; sourceTree = "<group>"; };
+		D65CA001000000000000F002 /* DiagCapturePose.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagCapturePose.swift; sourceTree = "<group>"; };
 		D3DEC0DE0000000000000105 /* VideoDecoderOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDecoderOutput.swift; sourceTree = "<group>"; };
 		D3DEC0DE0000000000000104 /* DiagBenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagBenchView.swift; sourceTree = "<group>"; };
 		D3DEC0DE0000000000000103 /* DiagNetSink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagNetSink.swift; sourceTree = "<group>"; };
@@ -329,6 +331,7 @@
 				D66000000000000000000041 /* RQPipeline.swift */,
 				D66000000000000000000001 /* MaxSweep.swift */,
 				D65CA0010000000000000002 /* DiagFrameCapture.swift */,
+				D65CA001000000000000F002 /* DiagCapturePose.swift */,
 				D65D5E022C00000100650002 /* DiagEyeRenderer.swift */,
 				D65D5E022C00000100650001 /* DiagEye.swift */,
 				D65D0E022C00000100650004 /* DiagProbes.swift */,
@@ -581,6 +584,7 @@
 				D66000000000000000000042 /* RQPipeline.swift in Sources */,
 				D66000000000000000000002 /* MaxSweep.swift in Sources */,
 				D65CA0010000000000000001 /* DiagFrameCapture.swift in Sources */,
+				D65CA001000000000000F001 /* DiagCapturePose.swift in Sources */,
 				D65D5E012C00000100650002 /* DiagEyeRenderer.swift in Sources */,
 				D65D5E012C00000100650001 /* DiagEye.swift in Sources */,
 				D65D0E012C00000100650003 /* DiagProbes.swift in Sources */,
