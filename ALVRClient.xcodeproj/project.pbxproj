@@ -41,6 +41,9 @@
 		D65D0E012C00000100650007 /* CornerChartRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D0E022C00000100650008 /* CornerChartRenderer.swift */; };
 		D65D0E012C000001006531F1 /* ResolutionChart.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D0E022C000001006531F2 /* ResolutionChart.swift */; };
 		D65D0E012C000001006531F3 /* ResolutionChartRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D0E022C000001006531F4 /* ResolutionChartRenderer.swift */; };
+		D65D0E012C000001006531F5 /* GoldenFrame.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D0E022C000001006531F6 /* GoldenFrame.swift */; };
+		D65D0E012C000001006531F7 /* GoldenFrameRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D0E022C000001006531F8 /* GoldenFrameRenderer.swift */; };
+		D65D0E012C000001006531F9 /* StreamReprojection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D0E022C000001006531FA /* StreamReprojection.swift */; };
 		D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */ = {isa = PBXBuildFile; fileRef = D68FA8082B742F6F0052B7FF /* FFR.swift */; };
 		E702FBDC2B899B8700EE75D0 /* GlobalSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */; };
 		A17A0E012C0000010011AA01 /* AutoEnterPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */; };
@@ -181,6 +184,9 @@
 		D65D0E022C00000100650008 /* CornerChartRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/CornerChartRenderer.swift; sourceTree = "<group>"; };
 		D65D0E022C000001006531F2 /* ResolutionChart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/ResolutionChart.swift; sourceTree = "<group>"; };
 		D65D0E022C000001006531F4 /* ResolutionChartRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/ResolutionChartRenderer.swift; sourceTree = "<group>"; };
+		D65D0E022C000001006531F6 /* GoldenFrame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/GoldenFrame.swift; sourceTree = "<group>"; };
+		D65D0E022C000001006531F8 /* GoldenFrameRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/GoldenFrameRenderer.swift; sourceTree = "<group>"; };
+		D65D0E022C000001006531FA /* StreamReprojection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamReprojection.swift; sourceTree = "<group>"; };
 		D68FA8082B742F6F0052B7FF /* FFR.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFR.swift; sourceTree = "<group>"; };
 		E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalSettings.swift; sourceTree = "<group>"; };
 		A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoEnterPolicy.swift; sourceTree = "<group>"; };
@@ -355,6 +361,9 @@
 				D65D0E022C00000100650008 /* CornerChartRenderer.swift */,
 				D65D0E022C000001006531F2 /* ResolutionChart.swift */,
 				D65D0E022C000001006531F4 /* ResolutionChartRenderer.swift */,
+				D65D0E022C000001006531F6 /* GoldenFrame.swift */,
+				D65D0E022C000001006531F8 /* GoldenFrameRenderer.swift */,
+				D65D0E022C000001006531FA /* StreamReprojection.swift */,
 				D68FA8082B742F6F0052B7FF /* FFR.swift */,
 				E702FBDB2B899B8300EE75D0 /* GlobalSettings.swift */,
 				A17A0E022C0000010011AA02 /* AutoEnterPolicy.swift */,
@@ -615,6 +624,9 @@
 				D65D0E012C00000100650007 /* CornerChartRenderer.swift in Sources */,
 				D65D0E012C000001006531F1 /* ResolutionChart.swift in Sources */,
 				D65D0E012C000001006531F3 /* ResolutionChartRenderer.swift in Sources */,
+				D65D0E012C000001006531F5 /* GoldenFrame.swift in Sources */,
+				D65D0E012C000001006531F7 /* GoldenFrameRenderer.swift in Sources */,
+				D65D0E012C000001006531F9 /* StreamReprojection.swift in Sources */,
 				D68FA8092B742F6F0052B7FF /* FFR.swift in Sources */,
 				9ED257172B8062A2008DC22F /* Settings.swift in Sources */,
 				C5E590362B6379ED00328ED6 /* Renderer.swift in Sources */,

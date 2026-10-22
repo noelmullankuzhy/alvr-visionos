@@ -165,7 +165,7 @@ enum CornerChart {
     private static let segments: [Character: String] = [
         "0": "abcdef", "1": "bc", "2": "abdeg", "3": "abcdg", "4": "bcfg", "5": "acdfg", "6": "acdefg", "7": "abc",
         "8": "abcdefg", "9": "abcdfg", "L": "def", "r": "eg", "d": "bcdeg", "o": "cdeg", "n": "ceg", "E": "adefg",
-        "-": "g", ".": "p"]
+        "-": "g", ".": "p", "U": "bcdef", "H": "bcefg", "A": "abcefg", "q": "abcfg", "O": "abcdef", "C": "adef", "P": "abefg"]
 
     static func text(_ s: String, in rect: Rect, vertical: Bool, color: SIMD4<Float>) -> [Quad] {
         let n = Double(s.count)

@@ -49,6 +49,9 @@ struct GlobalSettings: Codable {
     // FOV instead of the device frustum; read when the view config is sent (stream start).
     var cropFovToOutline: Bool = false
     var cropMarginDeg: Double = CropFov.defaultMarginDeg
+    // Golden frame set (GoldenFrame.swift): a Documents/diag/golden/<set> directory name, or Off; Diagnostics only, both
+    // charts off; read at renderer start.
+    var goldenFrameSet: String = GoldenFrameSetting.off
     // Two windows with the decoded left and right eye images and per-eye counters (EyeDecodeWindows.swift).
     var eyeDecodeWindows: Bool = GlobalSettings.eyeDecodeWindowsDefault
 
@@ -100,6 +103,7 @@ struct GlobalSettings: Codable {
         self.resolutionFoveation = try container.decodeIfPresent(Bool.self, forKey: .resolutionFoveation) ?? self.resolutionFoveation
         self.cropFovToOutline = try container.decodeIfPresent(Bool.self, forKey: .cropFovToOutline) ?? self.cropFovToOutline
         self.cropMarginDeg = try container.decodeIfPresent(Double.self, forKey: .cropMarginDeg) ?? self.cropMarginDeg
+        self.goldenFrameSet = try container.decodeIfPresent(String.self, forKey: .goldenFrameSet) ?? self.goldenFrameSet
         self.eyeDecodeWindows = try container.decodeIfPresent(Bool.self, forKey: .eyeDecodeWindows) ?? self.eyeDecodeWindows
     }
 }

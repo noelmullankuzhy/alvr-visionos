@@ -54,6 +54,7 @@ class MetalClientSystem {
             for event in eventCollection {
                 self.renderer.cornerChart?.spatialEvent(event)
                 self.renderer.resolutionChart?.spatialEvent(event)
+                self.renderer.goldenFrame?.spatialEvent(event)
                 if !self.renderer.renderOwnership.offlineDiagnostics {
                     RealityKitClientView.handleSpatialEvent(nil, event)
                 }
