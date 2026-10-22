@@ -615,7 +615,8 @@ def local_scale(axis, tau_of_deg, a_deg, h=0.25):
     return abs(axis.px(tau_of_deg(a_deg + h)) - axis.px(tau_of_deg(a_deg - h))) / (2 * h)
 
 
-def analyse(pix, width, region, xaxis, yaxis):
+def analyse(pix, width, region, xaxis, yaxis, drawable=False):
+    """drawable: sharpness is judged in stream (coded) px, not in the client drawable's px, which outnumber them."""
     x0, y0, w, h = region
     xspan, yspan = xaxis.span(), yaxis.span()
     rel_x = (max(0.0, xspan[0] - x0) + 2, min(w, xspan[1] - x0) - 2)
@@ -646,6 +647,7 @@ def analyse(pix, width, region, xaxis, yaxis):
             rec = {'kind': name, 'axis': axname, 'angle_deg': angle, 'predicted_px': p + off, 'measured_px': None,
                    'residual_px': None, 'residual_deg': None, 'fwhm_px': None, 'fwhm_deg': None, 'contrast': None,
                    'zone': zone, 'nominal_width_deg': nominal, 'nominal_width_px': nominal * scale,
+                   'nominal_width_stream_px': nominal * page,
                    'predicted_px_per_deg': page, 'local_px_per_deg': scale, 'resolvable': False,
                    'psf_deg': None, 'sharpness_px_per_deg': None}
             if found:
@@ -656,7 +658,7 @@ def analyse(pix, width, region, xaxis, yaxis):
                 if found['fwhm'] is not None:
                     rec['fwhm_px'] = found['fwhm']
                     rec['fwhm_deg'] = found['fwhm'] / scale
-                    if rec['nominal_width_px'] >= MIN_RESOLVABLE_PX:
+                    if (rec['nominal_width_stream_px'] if drawable else rec['nominal_width_px']) >= MIN_RESOLVABLE_PX:
                         # the line's own width comes out in quadrature; what is left is the pipeline's blur
                         rec['resolvable'] = True
                         rec['psf_deg'] = math.sqrt(max(0.0, rec['fwhm_deg'] ** 2 - nominal ** 2))
@@ -682,10 +684,12 @@ def _median(values):
     return statistics.median(values) if values else None
 
 
-def zone_stats(zl):
+def zone_stats(zl, drawable=False):
+    """drawable: the client drawable's own px/deg is reported apart (its pixels are not the stream's coded pixels)."""
     rs = [l for l in zl if l['resolvable']]
     psf = _median(l['psf_deg'] for l in rs)
     return {
+        'drawable_px_per_deg': _median(l['local_px_per_deg'] for l in zl) if drawable else None,
         'n_predicted': len(zl), 'n_found': sum(1 for l in zl if l['measured_px'] is not None), 'n_resolvable': len(rs),
         'median_fwhm_deg': _median(l['fwhm_deg'] for l in rs),
         'median_nominal_deg': _median(l['nominal_width_deg'] for l in rs),
@@ -694,7 +698,9 @@ def zone_stats(zl):
         'resolved_px_per_deg': 1 / psf if psf else None,
         # page prediction x nominal / FWHM: falls as the lines blur out; equals the prediction when sharp
         'sharpness_px_per_deg': _median(l['sharpness_px_per_deg'] for l in rs),
-        'predicted_px_per_deg': _median(l['predicted_px_per_deg'] for l in zl)}
+        # the same lines as the measurement (W16: median over resolvable lines vs median prediction over all of them)
+        'predicted_px_per_deg': _median(l['predicted_px_per_deg'] for l in rs),
+        'predicted_px_per_deg_all': _median(l['predicted_px_per_deg'] for l in zl)}
 
 
 def summarise(lines, extent, params, foveated):
@@ -705,7 +711,7 @@ def summarise(lines, extent, params, foveated):
          'median_abs_residual_deg': _median(res), 'max_abs_residual_deg': max(res) if res else None,
          'stream_extent_deg': extent, 'zones': {}, 'axes': {}}
     for zone in ('band', 'edge'):
-        s['zones'][zone] = zone_stats([l for l in lines if l['zone'] == zone])
+        s['zones'][zone] = zone_stats([l for l in lines if l['zone'] == zone], params.get('mode') == 'drawable')
     reasons = []
     for ax in ('x', 'y'):
         al = [l for l in lines if l['axis'] == ax]
@@ -994,7 +1000,7 @@ def run_measure(a):
             params['coded_size_note'] = 'region differs from predicted coded size'
         if meta and coded != (meta['coded'][0] // 2, meta['coded'][1]):
             notes.append('coded size predicted %dx%d per eye, meta says %dx%d for both' % (coded[0], coded[1], meta['coded'][0], meta['coded'][1]))
-    lines = analyse(pix, width, region, xaxis, yaxis)
+    lines = analyse(pix, width, region, xaxis, yaxis, mode == 'drawable')
     edges = None
     if mode == 'drawable':
         levels = edge_levels(pix, width, region, xaxis.span(), yaxis.span())
@@ -1033,9 +1039,12 @@ def print_summary(summary, mode, eye, s):
         z = summary['zones'][zone]
         if not z['n_predicted']:
             continue
-        print('  {}: found {}/{}, resolvable {}, sharpness {} px/deg (predicted {}), PSF {} deg, resolved (1/PSF, per deg) {}'.format(
-            zone, z['n_found'], z['n_predicted'], z['n_resolvable'], f(z['sharpness_px_per_deg'], '%.1f'),
+        unit = 'stream px/deg' if z['drawable_px_per_deg'] is not None else 'px/deg'
+        print('  {}: found {}/{}, resolvable {}, sharpness {} {} (predicted {}), PSF {} deg, resolved (1/PSF, per deg) {}'.format(
+            zone, z['n_found'], z['n_predicted'], z['n_resolvable'], f(z['sharpness_px_per_deg'], '%.1f'), unit,
             f(z['predicted_px_per_deg'], '%.1f'), f(z['psf_deg'], '%.4f'), f(z['resolved_px_per_deg'], '%.1f')))
+        if z['drawable_px_per_deg'] is not None:
+            print('    client: drawable px/deg {} (not comparable with the stream figures)'.format(f(z['drawable_px_per_deg'], '%.1f')))
     for side, e in summary['stream_extent_deg'].items():
         if e['measured_deg'] is not None:
             print('  stream {}: measured {:.2f} deg, predicted {:.2f} deg'.format(side, e['measured_deg'], e['predicted_deg']))
