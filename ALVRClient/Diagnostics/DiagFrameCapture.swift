@@ -273,8 +273,12 @@ final class DiagFrameCaptureSession {
         let trigger: [String: Any] = ["reason": request.reason,
                                      "eye": request.eye as Any? ?? NSNull(), "pct": request.pct as Any? ?? NSNull(),
                                      "pos_deg": request.positionDegrees as Any? ?? NSNull()]
+        var metadata: [String: Any] = ["corner_chart": chartState, "trigger": trigger]
+        if let debugEyes = EventHandler.shared.debugEyeTangentsRecord {
+            metadata["debug_eye_tangents"] = debugEyes   // the per-eye FOV the server got; slices keep the drawable's own
+        }
         DiagFrameCapture.submit(buffer: buffer, targets: targets, directory: directory,
-                                metadata: ["corner_chart": chartState, "trigger": trigger],
+                                metadata: metadata,
                                 pose: streamFrame ? pose : nil) { [gate] ok in
             if !ok { Diag.log("capture_trigger", ["step": "skipped", "reason": request.reason, "why": "capture_failed_see_capture_error"]) }
             gate.finished()
