@@ -964,17 +964,33 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 let transformRight = eyeTransforms[1]
                 // gimmeTangents is (left, right, bottom, top): up comes from .w (docs/lumen/fov-updown.md).
                 // -ALVRDebugEyeTangents (off unless given): pack those per-eye tangents instead; realViewTangents stays the drawable's.
+                // Otherwise "Crop FOV to outline" packs the lens outline's bbox + margin (CropFov, docs/lumen/crop-fov.md).
+                // The frame quad is drawn on the sent tangents (uniforms.tangents) under the device projection.
                 let debugEyes = DebugEyeTangents.current
-                let leftAngles = ViewLayout.fovAngles(tangents: debugEyes?.tangents[0] ?? tangentsLeft, scale: settings.fovRenderScale)
-                let rightAngles = debugEyes.map { ViewLayout.fovAngles(tangents: $0.tangents[1], scale: settings.fovRenderScale) }
-                    ?? (mainDrawable.views.count > 1 ? ViewLayout.fovAngles(tangents: tangentsRight, scale: settings.fovRenderScale) : leftAngles)
+                let cropOffsets = CropFov.offsets
+                let sent = CropFov.choose(device: [tangentsLeft, tangentsRight], debug: debugEyes?.tangents,
+                                          crop: settings.cropFovToOutline, offsets: cropOffsets, marginDeg: settings.cropMarginDeg)
+                let leftAngles = ViewLayout.fovAngles(tangents: sent.tangents[0], scale: settings.fovRenderScale)
+                let rightAngles = debugEyes != nil || mainDrawable.views.count > 1
+                    ? ViewLayout.fovAngles(tangents: sent.tangents[1], scale: settings.fovRenderScale) : leftAngles
                 let leftFov = AlvrFov(left: leftAngles.left, right: leftAngles.right, up: leftAngles.up, down: leftAngles.down)
                 let rightFov = AlvrFov(left: rightAngles.left, right: rightAngles.right, up: rightAngles.up, down: rightAngles.down)
 
                 let (leftFovCorrected, tangentsLeftCorrected, transformLeftCorrected) = mainDrawable._cantedViewToProportionalCircumscribedOrthogonal(fov: leftFov, viewTransform: transformLeft, fovPostScale: 1.0)
                 let (rightFovCorrected, tangentsRightCorrected, transformRightCorrected) = mainDrawable._cantedViewToProportionalCircumscribedOrthogonal(fov: rightFov, viewTransform: transformRight, fovPostScale: 1.0)
-                for (eye, fov) in [("L", leftFovCorrected), ("R", rightFovCorrected)] {
-                    Diag.log("fov_sent", ViewLayout.fovSentFields(eye: eye, left: fov.left, right: fov.right, up: fov.up, down: fov.down))
+                // The band centre on the sent frame's eye axis, for the session's centre size; the server takes the
+                // shift from its session settings only, so the log shows both.
+                let foveation = Settings.getAlvrSettings()?.video.foveated_encoding
+                let sentGimme = [leftFovCorrected, rightFovCorrected].map { simd_float4(tan(-$0.left), tan($0.right), tan(-$0.down), tan($0.up)) }
+                let axisShift = foveation.map { CropFov.centerShift(left: sentGimme[0], right: sentGimme[1],
+                                                                     centerSize: [Double($0.centerSizeX), Double($0.centerSizeY)]) }
+                let sessionShift = foveation.map { SIMD2<Double>(Double($0.centerShiftX), Double($0.centerShiftY)) }
+                for (index, (eye, fov)) in [("L", leftFovCorrected), ("R", rightFovCorrected)].enumerated() {
+                    let crop = sent.source == "crop"
+                    Diag.log("fov_sent", ViewLayout.fovSentFields(eye: eye, left: fov.left, right: fov.right, up: fov.up, down: fov.down,
+                                                                  source: sent.source, marginDeg: crop ? settings.cropMarginDeg : nil,
+                                                                  offsetDeg: crop ? cropOffsets[index] : nil,
+                                                                  axisCenterShift: axisShift, sessionCenterShift: sessionShift))
                 }
 
                 EventHandler.shared.viewFovs = [leftFovCorrected, rightFovCorrected]

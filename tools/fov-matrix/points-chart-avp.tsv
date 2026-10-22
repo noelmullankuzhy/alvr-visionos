@@ -14,3 +14,8 @@ a070-wider	0.7	1	0.805,0.882,2.5,2.5,0.485,-0.461	100	90	eye_tangents=L:1.7321,1
 a100-axis-C	1	1.1447	0.5,0.45,3,3,0.536,-0.159	100	90	eye_tangents=L:1.7321,1,1.1918,1;R:1,1.7321,1.1918,1
 a100-axis-A	1	1	0.5,0.45,3,3,0.536,-0.159	100	90	eye_tangents=L:1.7321,1,1.1918,1;R:1,1.7321,1.1918,1
 a100-wider-A	1	0.8246	0.563,0.618,2.5,2.5,0.335,-0.168	100	90	eye_tangents=L:1.7321,1,1.1918,1;R:1,1.7321,1.1918,1
+# Crop FOV to outline (ALVRClient/CropFov.swift, docs/lumen/crop-fov.md): lens outline bbox, offset 0, + 2 deg margin; eye_tangents = what the client sends.
+# a100-crop-C: predicted centre 41.1 px/deg (frustum 26.5 at the same render, x1.54 h / x1.62 v)
+a100-crop-C	1	1.1447	0.5,0.45,3,3,0.141,-0.031	100	90	eye_tangents=L:0.9494,0.8243,0.6873,0.6646;R:0.8243,0.9494,0.6873,0.6646
+# a100-crop-A: predicted centre 35.9 px/deg (frustum 23.2 at the same render, x1.54 h / x1.62 v)
+a100-crop-A	1	1	0.5,0.45,3,3,0.141,-0.031	100	90	eye_tangents=L:0.9494,0.8243,0.6873,0.6646;R:0.8243,0.9494,0.6873,0.6646

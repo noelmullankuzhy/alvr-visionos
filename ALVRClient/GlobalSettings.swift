@@ -45,6 +45,10 @@ struct GlobalSettings: Codable {
     // no stream; read at renderer start / layer configuration.
     var resolutionChart: String = CornerChartMode.off.rawValue
     var resolutionFoveation: Bool = true
+    // Crop FOV to outline (CropFov.swift, docs/lumen/crop-fov.md): report the lens outline's bbox + margin as each eye's
+    // FOV instead of the device frustum; read when the view config is sent (stream start).
+    var cropFovToOutline: Bool = false
+    var cropMarginDeg: Double = CropFov.defaultMarginDeg
     // Two windows with the decoded left and right eye images and per-eye counters (EyeDecodeWindows.swift).
     var eyeDecodeWindows: Bool = GlobalSettings.eyeDecodeWindowsDefault
 
@@ -94,6 +98,8 @@ struct GlobalSettings: Codable {
         self.cornerChart = try container.decodeIfPresent(String.self, forKey: .cornerChart) ?? self.cornerChart
         self.resolutionChart = try container.decodeIfPresent(String.self, forKey: .resolutionChart) ?? self.resolutionChart
         self.resolutionFoveation = try container.decodeIfPresent(Bool.self, forKey: .resolutionFoveation) ?? self.resolutionFoveation
+        self.cropFovToOutline = try container.decodeIfPresent(Bool.self, forKey: .cropFovToOutline) ?? self.cropFovToOutline
+        self.cropMarginDeg = try container.decodeIfPresent(Double.self, forKey: .cropMarginDeg) ?? self.cropMarginDeg
         self.eyeDecodeWindows = try container.decodeIfPresent(Bool.self, forKey: .eyeDecodeWindows) ?? self.eyeDecodeWindows
     }
 }

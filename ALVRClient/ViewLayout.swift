@@ -41,10 +41,29 @@ enum ViewLayout {
         return (left: -a.x, right: a.y, up: a.w, down: -a.z)
     }
 
-    // DIAG fov_sent fields for one eye's Fov as sent to the server: degrees, ALVR signs.
-    static func fovSentFields(eye: String, left: Float, right: Float, up: Float, down: Float) -> KeyValuePairs<String, Any> {
+    // DIAG fov_sent fields for one eye's Fov as sent to the server: degrees, ALVR signs; where the tangents came from
+    // (frustum, crop or debug; CropFov.choose), the crop margin and lens offset, and the center_shift that puts the
+    // foveation band on the eye axis of the sent frame next to the session's (docs/lumen/crop-fov.md).
+    static func fovSentFields(eye: String, left: Float, right: Float, up: Float, down: Float, source: String = "frustum",
+                              marginDeg: Double? = nil, offsetDeg: Double? = nil, axisCenterShift: SIMD2<Double>? = nil,
+                              sessionCenterShift: SIMD2<Double>? = nil) -> KeyValuePairs<String, Any> {
         func deg(_ rad: Float) -> String { String(format: "%.2f", Double(rad) * 180 / Double.pi) }
-        return ["eye": eye, "up": deg(up), "down": deg(down), "left": deg(left), "right": deg(right), "units": "deg"]
+        func compact(_ value: Double?) -> String { value.map { String(format: "%g", $0) } ?? "off" }
+        func shift(_ s: SIMD2<Double>?) -> String { s.map { String(format: "%.3f,%.3f", $0.x, $0.y) } ?? "off" }
+        return ["eye": eye, "up": deg(up), "down": deg(down), "left": deg(left), "right": deg(right), "units": "deg",
+                "source": source, "margin_deg": compact(marginDeg), "offset_deg": compact(offsetDeg),
+                "axis_center_shift": shift(axisCenterShift), "session_center_shift": shift(sessionCenterShift)]
+    }
+
+    // The video quad's |tan| (left, right, up, down) from a sent Fov: Renderer puts these in Uniforms.tangents.
+    static func uniformTangents(left: Float, right: Float, up: Float, down: Float) -> simd_float4 {
+        simd_float4(tan(-left), tan(right), tan(up), tan(-down))
+    }
+
+    // The frame quad videoFrameVertexShaderCommon builds from Uniforms.tangents (Shaders.metal:205-216), as signed
+    // tangent-plane extents at depth 1: x from -[0] to [1], y from -[3] to [2].
+    static func videoQuadRect(uniformTangents t: simd_float4) -> (left: Float, right: Float, bottom: Float, top: Float) {
+        (left: -t[0], right: t[1], bottom: -t[3], top: t[2])
     }
 
     private static func offsetX(_ x: Float) -> simd_float4x4 {
