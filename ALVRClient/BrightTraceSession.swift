@@ -141,7 +141,7 @@ final class BrightTraceSession {
         sink.write(record.line())
         let nowMs = HDRProbeClock.monotonicMs()
         if let jump = detector.check(record, nowMs: nowMs) {
-            summary.addJump()
+            summary.addJump(eyes: jump.eyes)
             emit(jump.line(tMs: record.tMs))
         }
         if let line = summary.take(nowMs: nowMs, tMs: record.tMs) { emit(line) }

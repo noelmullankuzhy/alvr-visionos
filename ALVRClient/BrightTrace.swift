@@ -19,9 +19,11 @@ enum BrightTrace {
     static let gridSize = 16
     // Fixed sample points: four grid cells (column, row), so they cost no extra reads.
     static let fixedCells = [(4, 4), (11, 4), (4, 11), (11, 11)]
-    // Jump: exponent between consecutive new frames moves by more than this while the input mean moves by less than
-    // jumpInputStableRatio (relative).
+    // Jump, per eye between consecutive presented frames (repeats included) while the input mean moves by less than
+    // jumpInputStableRatio (relative): the exponent moves by more than jumpExponentDelta, or the gain (output mean over
+    // input mean) by more than jumpLogGainDelta in natural log (about 10%). Mirrored in tools/brighttrace.py.
     static let jumpExponentDelta = 0.08
+    static let jumpLogGainDelta = 0.1
     static let jumpInputStableRatio = 0.03
     static let jumpsPerSecond = 5
     // Linear values at or below this are excluded from the fit (black borders, outside the video quad).
@@ -89,6 +91,15 @@ enum BrightTrace {
         return clusters.map { $0.reduce(0, +) / Double($0.count) }
     }
 
+    // Whether one eye's gain or exponent stepped from `a` to `b` with a stable input.
+    static func stepped(_ a: BrightTraceEye, _ b: BrightTraceEye) -> Bool {
+        guard let ia = a.inputMean, let ib = b.inputMean, let ga = a.gain, let gb = b.gain,
+              abs(ia - ib) / max(ia, ib) < jumpInputStableRatio else { return false }
+        if abs(log(gb / ga)) > jumpLogGainDelta { return true }
+        guard let ea = a.fit?.slope, let eb = b.fit?.slope else { return false }
+        return abs(eb - ea) > jumpExponentDelta
+    }
+
     // 4 significant digits, for the record grids.
     static func rounded(_ v: Double) -> Double {
         guard v != 0, v.isFinite else { return v }
@@ -142,6 +153,12 @@ struct BrightTraceEye {
         fit = input.flatMap { i in output.flatMap { BrightTrace.exponent(input: i, output: $0) } }
     }
 
+    // Output mean over input mean; nil when either is at or below the floor.
+    var gain: Double? {
+        guard let i = inputMean, let o = outputMean, i > BrightTrace.lumaFloor, o > BrightTrace.lumaFloor else { return nil }
+        return o / i
+    }
+
     func json() -> [String: Any?] {
         ["eye": eye, "in": input?.map(BrightTrace.rounded), "out": output?.map(BrightTrace.rounded),
          "in_fixed": input.map(BrightTrace.fixed), "out_fixed": output.map(BrightTrace.fixed),
@@ -190,40 +207,40 @@ struct BrightTraceState {
     }
 }
 
-// Exponent step between consecutive new frames with a stable input mean, per eye; at most jumpsPerSecond reported.
+// Gain or exponent step per eye (matched by name) between consecutive presented frames, repeats included
+// (BrightTrace.stepped); at most jumpsPerSecond reported.
 struct BrightTraceJumpDetector {
     struct Jump {
-        let eye: String
         let before: BrightTraceRecord
         let after: BrightTraceRecord
-        let deltaExponent: Double
+        let eyes: [String]   // the eyes that stepped
 
+        // Compact for log forwarding: the changed fields and, per eye, the means, gain and exponent before>after.
         func line(tMs: Int) -> String {
-            "BRIGHTTRACE JUMP t_ms=\(tMs) eye=\(eye) d_exp=\(BrightTrace.format(deltaExponent)) before=\(before.line()) after=\(after.line())"
+            let f = BrightTrace.format
+            let perEye = after.eyes.map { b -> String in
+                let a = before.eyes.first { $0.eye == b.eye }
+                return "\(b.eye)=in:\(f(a?.inputMean))>\(f(b.inputMean)),out:\(f(a?.outputMean))>\(f(b.outputMean))"
+                    + ",gain:\(f(a?.gain))>\(f(b.gain)),exp:\(f(a?.fit?.slope))>\(f(b.fit?.slope))"
+            }
+            return "BRIGHTTRACE JUMP t_ms=\(tMs) seq=\(before.seq)>\(after.seq) ts_ns=\(before.timestampNs)>\(after.timestampNs)"
+                + " eyes=\(eyes.joined(separator: ",")) changed=\(after.changed.isEmpty ? "none" : after.changed.joined(separator: ","))"
+                + " " + perEye.joined(separator: " ")
         }
     }
-    private var lastNew: BrightTraceRecord?
+    private var previous: BrightTraceRecord?
     private var emittedMs: [Int] = []
     private(set) var suppressed = 0
 
     mutating func check(_ record: BrightTraceRecord, nowMs: Int) -> Jump? {
-        guard let before = lastNew else { lastNew = record; return nil }
-        guard before.timestampNs != record.timestampNs else { return nil }
-        lastNew = record
-        var best: Jump?
-        for (a, b) in zip(before.eyes, record.eyes) {
-            guard let ea = a.fit?.slope, let eb = b.fit?.slope, let ia = a.inputMean, let ib = b.inputMean, max(ia, ib) > 0,
-                  abs(ia - ib) / max(ia, ib) < BrightTrace.jumpInputStableRatio else { continue }
-            let delta = eb - ea
-            if abs(delta) > BrightTrace.jumpExponentDelta, abs(delta) > abs(best?.deltaExponent ?? 0) {
-                best = Jump(eye: b.eye, before: before, after: record, deltaExponent: delta)
-            }
-        }
-        guard let best else { return nil }
+        defer { previous = record }
+        guard let before = previous else { return nil }
+        let eyes = record.eyes.filter { b in before.eyes.first { $0.eye == b.eye }.map { BrightTrace.stepped($0, b) } ?? false }.map(\.eye)
+        guard !eyes.isEmpty else { return nil }
         emittedMs.removeAll { nowMs - $0 >= 1000 || nowMs < $0 }
         guard emittedMs.count < BrightTrace.jumpsPerSecond else { suppressed += 1; return nil }
         emittedMs.append(nowMs)
-        return best
+        return Jump(before: before, after: record, eyes: eyes)
     }
 }
 
@@ -232,6 +249,8 @@ struct BrightTraceSummary {
     private var startMs: Int?
     private var frames = 0, new = 0, generations = 0, attachments = 0, jumps = 0
     private var inputs: [Double] = [], outputs: [Double] = [], exponents: [Double] = []
+    // Per eye: exponents, log gains (fit intercepts) and jumps.
+    private var eyeExponents: [String: [Double]] = [:], eyeLogGains: [String: [Double]] = [:], eyeJumps: [String: Int] = [:]
     private var variants = Set<String>()
 
     mutating func add(_ r: BrightTraceRecord) {
@@ -243,20 +262,30 @@ struct BrightTraceSummary {
         for eye in r.eyes {
             if let v = eye.inputMean { inputs.append(v) }
             if let v = eye.outputMean { outputs.append(v) }
-            if let v = eye.fit?.slope { exponents.append(v) }
+            if let v = eye.fit?.slope { exponents.append(v); eyeExponents[eye.eye, default: []].append(v) }
+            if let v = eye.fit?.logGain { eyeLogGains[eye.eye, default: []].append(v) }
+            if eyeJumps[eye.eye] == nil { eyeJumps[eye.eye] = 0 }
         }
     }
 
-    mutating func addJump() { jumps += 1 }
+    mutating func addJump(eyes: [String]) {
+        jumps += 1
+        for eye in eyes { eyeJumps[eye, default: 0] += 1 }
+    }
 
     mutating func take(nowMs: Int, tMs: Int) -> String? {
         guard let start = startMs else { startMs = nowMs; return nil }
         guard nowMs - start >= BrightTrace.summaryIntervalMs || nowMs < start else { return nil }
         let f = BrightTrace.format
+        // Output levels of an eye: exponent clusters or gain clusters, whichever is more.
+        let eyes = eyeJumps.keys.sorted()
+        let levels = eyes.map { max(BrightTrace.levels(eyeExponents[$0] ?? []).count, BrightTrace.levels(eyeLogGains[$0] ?? []).count) }
         let line = "BRIGHTTRACE t_ms=\(tMs) frames=\(frames) new=\(new) repeat=\(frames - new)"
             + " in_min=\(f(inputs.min())) in_max=\(f(inputs.max())) out_min=\(f(outputs.min())) out_max=\(f(outputs.max()))"
-            + " exp_min=\(f(exponents.min())) exp_max=\(f(exponents.max())) levels=\(BrightTrace.levels(exponents).count)"
+            + " exp_min=\(f(exponents.min())) exp_max=\(f(exponents.max())) levels=\(levels.max() ?? 0)"
+            + zip(eyes, levels).map { " levels_\($0)=\($1)" }.joined()
             + " gen_changes=\(generations) variants=\(variants.sorted().joined(separator: ",")) attach_changes=\(attachments) jumps=\(jumps)"
+            + eyes.map { " jumps_\($0)=\(eyeJumps[$0] ?? 0)" }.joined()
         self = BrightTraceSummary()
         startMs = nowMs
         return line

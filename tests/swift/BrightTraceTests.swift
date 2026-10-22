@@ -59,17 +59,32 @@ private func testLevels() {
     expect(close(two.first, 1.0, 1e-9) && close(two.last, 1.27, 1e-9), "cluster centres are means")
 }
 
-private func eye(_ name: String = "L", input: Double, k: Double) -> BrightTraceEye {
+private func eye(_ name: String = "L", input: Double, k: Double, gain: Double = 1) -> BrightTraceEye {
     let grid = (0..<256).map { input * (0.2 + Double($0) / 320) }
-    return BrightTraceEye(eye: name, input: grid, output: grid.map { pow($0, k) })
+    return BrightTraceEye(eye: name, input: grid, output: grid.map { gain * pow($0, k) })
 }
 
-private func record(_ seq: Int, ts: UInt64, input: Double = 0.5, k: Double = 1, fields: [String: String] = [:]) -> BrightTraceRecord {
+private func record(_ seq: Int, ts: UInt64, input: Double = 0.5, k: Double = 1, fields: [String: String] = [:],
+                    eyes: [BrightTraceEye]? = nil) -> BrightTraceRecord {
     var base = ["path": "metal", "pipeline": "biplanar", "binding": "explicit10", "transfer": "pq", "cv_transfer": "SMPTE_ST_2084_PQ",
                 "drawable_format": "rgba16Float", "decode": "sync"]
     base.merge(fields) { $1 }
     return BrightTraceRecord(seq: seq, tMs: 1_000 + seq * 11, renderStartS: Double(seq) / 90, presentS: Double(seq) / 90 + 0.02,
-                             timestampNs: ts, fields: base, overlayAlpha: 0, eyes: [eye(input: input, k: k)])
+                             timestampNs: ts, fields: base, overlayAlpha: 0, eyes: eyes ?? [eye(input: input, k: k)])
+}
+
+// Both eyes; the right one with its own exponent and gain.
+private func stereo(_ seq: Int, ts: UInt64, rightK: Double = 1, rightGain: Double = 1) -> BrightTraceRecord {
+    record(seq, ts: ts, eyes: [eye("L", input: 0.5, k: 1), eye("R", input: 0.5, k: rightK, gain: rightGain)])
+}
+
+// Eyes reported per frame, the first frame excluded; frames 300 ms apart (under the rate limit).
+private func jumpEyes(_ records: [BrightTraceRecord]) -> [[String]] {
+    var detector = BrightTraceJumpDetector()
+    return records.enumerated().compactMap { i, r in
+        let jump = detector.check(r, nowMs: i * 300)
+        return i == 0 ? nil : jump?.eyes ?? []
+    }
 }
 
 private func testStateAnnotation() {
@@ -96,10 +111,18 @@ private func testJumpDetector() {
     expect(detector.check(record(1, ts: 1, k: 1), nowMs: 0) == nil, "first frame: nothing to compare")
     expect(detector.check(record(2, ts: 2, k: 1.02), nowMs: 11) == nil, "small exponent change")
     let jump = detector.check(record(3, ts: 3, k: 1.27), nowMs: 22)
-    expect(jump?.eye == "L" && jump?.before.seq == 2 && jump?.after.seq == 3, "exponent step with stable input: jump")
-    expect(close(jump?.deltaExponent, 0.25, 1e-6), "delta exponent reported")
-    expect(detector.check(record(4, ts: 3, k: 1.0), nowMs: 33) == nil, "repeat frames are not compared")
+    expect(jump?.eyes == ["L"] && jump?.before.seq == 2 && jump?.after.seq == 3, "exponent step with stable input: jump")
+    expect(detector.check(record(4, ts: 3, k: 1.0), nowMs: 33)?.eyes == ["L"], "repeat frames are compared too")
     expect(detector.check(record(5, ts: 5, input: 0.9, k: 1.0), nowMs: 44) == nil, "input change: not a jump")
+    expect(detector.check(record(6, ts: 6, input: 0.9, eyes: [eye(input: 0.9, k: 1, gain: 1.05)]), nowMs: 55) == nil, "5% gain: not a jump")
+    // Right eye only: gain alternating 1 / 0.5 with a steady input, every frame new.
+    let gain = jumpEyes((0..<10).map { stereo($0, ts: UInt64($0), rightGain: $0 % 2 == 0 ? 1 : 0.5) })
+    expectEqual(gain, Array(repeating: ["R"], count: 9), "right-only gain alternation: a right-eye jump every frame")
+    // Right eye only: exponent alternating on repeated timestamps (new 1.0, repeat 1.27).
+    let repeats = jumpEyes((0..<10).map { stereo($0, ts: UInt64($0 / 2), rightK: $0 % 2 == 0 ? 1 : 1.27) })
+    expectEqual(repeats, Array(repeating: ["R"], count: 9), "right-only exponent alternation on repeats: a right-eye jump every frame")
+    let stable = jumpEyes((0..<10).map { stereo($0, ts: UInt64($0 / 2)) })
+    expectEqual(stable, Array(repeating: [], count: 9), "both eyes stable: no jumps")
     // Rate limit: at most jumpsPerSecond in any 1 s window.
     var limited = BrightTraceJumpDetector()
     var emitted = 0
@@ -120,16 +143,23 @@ private func testSummary() {
         state.annotate(&r)
         summary.add(r)
     }
-    summary.addJump()
+    summary.addJump(eyes: ["L"])
     expect(summary.take(nowMs: 500, tMs: 6) == nil, "inside the interval")
     guard let line = summary.take(nowMs: 1_000, tMs: 1_234) else { return expect(false, "line after 1 s") }
-    for part in ["BRIGHTTRACE t_ms=1234 ", "frames=4", "new=2", "repeat=2", "levels=2", "gen_changes=1", "jumps=1",
+    for part in ["BRIGHTTRACE t_ms=1234 ", "frames=4", "new=2", "repeat=2", "levels=2", "levels_L=2", "gen_changes=1", "jumps=1", "jumps_L=1",
                  "variants=biplanar/explicit10,secret/explicit10", "attach_changes=0", "exp_min=1 ", "exp_max=1.27 "] {
         expect(line.contains(part), "summary has \(part): \(line)")
     }
     expect(summary.take(nowMs: 1_500, tMs: 1_700) == nil, "window restarted")
     guard let empty = summary.take(nowMs: 2_000, tMs: 1_800) else { return expect(false, "empty window still reported") }
     expect(empty.contains("frames=0") && empty.contains("in_min=na"), "empty window: zero counts, na values")
+    // Gain levels count per eye: the right eye alternating 1 / 0.5 has two levels at one exponent.
+    for i in 0..<4 { summary.add(stereo(i, ts: UInt64(i), rightGain: i % 2 == 0 ? 1 : 0.5)) }
+    summary.addJump(eyes: ["R"])
+    guard let gains = summary.take(nowMs: 3_000, tMs: 1_900) else { return expect(false, "gain window") }
+    for part in ["levels=2", "levels_L=1", "levels_R=2", "jumps_L=0", "jumps_R=1"] {
+        expect(gains.contains(part), "summary has \(part): \(gains)")
+    }
 }
 
 private func testRecordEncoding() {
@@ -156,8 +186,15 @@ private func testRecordEncoding() {
     expectEqual(BrightTraceJSON.encode([0.7, 1.235e-05, Double.nan, "a\"b\\c\n"] as [Any]), #"[0.7,1.235e-05,null,"a\"b\\c\n"]"#, "number and string encoding")
     expectEqual(BrightTrace.rounded(0.123456), 0.1235, "4 significant digits")
     expectEqual(BrightTrace.rounded(1.234567e-5), 1.235e-5, "small values keep 4 significant digits")
-    let jumpLine = BrightTraceJumpDetector.Jump(eye: "L", before: r, after: r, deltaExponent: 0.25).line(tMs: 99)
-    expect(jumpLine.hasPrefix("BRIGHTTRACE JUMP t_ms=99 eye=L d_exp=0.25 before={") && jumpLine.contains(" after={"), "jump line: \(jumpLine.prefix(80))")
+    // JUMP line: compact (no grids), the changed fields and per eye the means, gain and exponent before > after.
+    var after = stereo(8, ts: 9, rightGain: 0.5)
+    after.changed = ["cv_transfer", "pipeline"]
+    let jumpLine = BrightTraceJumpDetector.Jump(before: stereo(7, ts: 8), after: after, eyes: ["R"]).line(tMs: 99)
+    expect(jumpLine.hasPrefix("BRIGHTTRACE JUMP t_ms=99 seq=7>8 ts_ns=8>9 eyes=R changed=cv_transfer,pipeline L=in:"), "jump line: \(jumpLine)")
+    expect(jumpLine.contains(",gain:1>0.5,exp:1>1") && jumpLine.contains(" R=in:"), "per-eye gain and exponent: \(jumpLine)")
+    expect(!jumpLine.contains("{") && jumpLine.count < 400, "no records or grids in the line (\(jumpLine.count) chars)")
+    let none = BrightTraceJumpDetector.Jump(before: r, after: r, eyes: ["L"]).line(tMs: 1)
+    expect(none.contains(" changed=none ") && none.hasSuffix(" R=in:na>na,out:na>na,gain:na>na,exp:na>na"), "missing values: na: \(none)")
 }
 
 private func testOutputRows() {
