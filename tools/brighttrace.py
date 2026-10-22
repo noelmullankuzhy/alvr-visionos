@@ -2,10 +2,10 @@
 """Brightness trace analysis (ALVRClient/BrightTrace.swift, -ALVRBrightTrace YES or the Diagnostics toggle).
 
 Reads Documents/diag/brighttrace-*.jsonl (one record per presented frame), or a log holding the forwarded lines (the
-PC streamer.log, or a simulator console log): the 1 Hz `BRIGHTTRACE t_ms=...` summaries and the
-`BRIGHTTRACE JUMP ... before={...} after={...}` records. Prints frame counts, the output levels (clusters of the
-per-frame output-vs-input transfer exponent), each jump with the recorded fields that changed at that frame, and a
-one-line verdict.
+PC streamer.log, or a simulator console log): the 1 Hz `BRIGHTTRACE t_ms=...` summaries and the compact
+`BRIGHTTRACE JUMP ... eyes=R changed=... L=in:a>b,out:a>b,gain:a>b,exp:a>b R=...` lines. Prints frame counts, per
+eye the output levels (clusters of the output-vs-input transfer exponent and of the gain), each jump with the eyes that
+stepped and the recorded fields that changed at that frame, and a one-line verdict.
 
 Usage: python3 tools/brighttrace.py <brighttrace.jsonl | streamer.log> [...]
 Python 3.9, stdlib only. Tests: tools/tests/test_brighttrace.py.
@@ -17,13 +17,17 @@ import sys
 
 # Mirrors of BrightTrace.swift.
 JUMP_EXPONENT_DELTA = 0.08
+JUMP_LOG_GAIN_DELTA = 0.1
 JUMP_INPUT_STABLE_RATIO = 0.03
 LEVEL_GAP = 0.05
 LUMA_FLOOR = 1e-4
-# Clusters holding fewer than this share of the exponents are reported but not counted as output levels.
+# Clusters holding fewer than this share of an eye's values are reported but not counted as output levels.
 MIN_LEVEL_SHARE = 0.02
+# Jumps listed in full; the rest are counted.
+MAX_JUMP_LINES = 20
 # Totals taken from the 1 Hz summary lines.
-SUMMARY_KEYS = ("frames", "new", "repeat", "levels", "jumps")
+SUMMARY_SUMS = ("frames", "new", "repeat", "jumps", "dropped", "dropped_lines")
+JUMP_KEYS = ("t_ms", "seq", "ts_ns", "eyes", "changed")
 
 
 def exponent(inp, out):
@@ -42,11 +46,36 @@ def exponent(inp, out):
     return slope, my - slope * mx
 
 
-def eye_exponent(eye):
-    if eye.get("exp") is not None:
-        return eye["exp"]
+def _fit(eye, key, index):
+    if eye.get(key) is not None:
+        return eye[key]
     fit = exponent(eye.get("in"), eye.get("out"))
-    return fit[0] if fit else None
+    return fit[index] if fit else None
+
+
+def eye_exponent(eye):
+    return _fit(eye, "exp", 0)
+
+
+def eye_log_gain(eye):
+    return _fit(eye, "log_gain", 1)
+
+
+def gain(eye):
+    """Output mean over input mean (BrightTraceEye.gain)."""
+    i, o = eye.get("in_mean"), eye.get("out_mean")
+    return o / i if i is not None and o is not None and i > LUMA_FLOOR and o > LUMA_FLOOR else None
+
+
+def stepped(a, b):
+    """Gain or exponent step of one eye with a stable input (BrightTrace.stepped)."""
+    ia, ib, ga, gb = a.get("in_mean"), b.get("in_mean"), gain(a), gain(b)
+    if None in (ia, ib, ga, gb) or abs(ia - ib) / max(ia, ib) >= JUMP_INPUT_STABLE_RATIO:
+        return False
+    if abs(math.log(gb / ga)) > JUMP_LOG_GAIN_DELTA:
+        return True
+    ea, eb = eye_exponent(a), eye_exponent(b)
+    return ea is not None and eb is not None and abs(eb - ea) > JUMP_EXPONENT_DELTA
 
 
 def levels(values, gap=LEVEL_GAP):
@@ -60,38 +89,50 @@ def levels(values, gap=LEVEL_GAP):
     return [(sum(c) / len(c), len(c)) for c in clusters]
 
 
+def counted(clusters):
+    total = sum(n for _, n in clusters)
+    return [c for c in clusters if c[1] >= max(1, MIN_LEVEL_SHARE * total)]
+
+
+def parse_number(text):
+    return None if text == "na" else float(text)
+
+
+def parse_jump(line):
+    """A compact JUMP line -> the jump dict of detect_jumps (no field values)."""
+    pairs = dict(re.findall(r"(\w+)=(\S+)", line[line.index("BRIGHTTRACE JUMP"):]))
+    seq = pairs.get("seq", "?>?").split(">")
+    per_eye = {}
+    for name, value in pairs.items():
+        if name in JUMP_KEYS or not value.startswith("in:"):
+            continue
+        per_eye[name] = {k: tuple(parse_number(x) for x in v.split(">")) for k, v in (p.split(":") for p in value.split(","))}
+    changed = pairs.get("changed", "none")
+    return {"t_ms": int(pairs.get("t_ms", 0)), "seq": (seq[0], seq[-1]), "eyes": pairs.get("eyes", "").split(","),
+            "per_eye": per_eye, "changed": [] if changed == "none" else changed.split(","), "detail": None}
+
+
 def load(paths):
-    """Records (jsonl lines and the records inside JUMP lines, deduplicated by seq) and summary dicts."""
-    records, summaries, seen = [], [], set()
-
-    def add(record):
-        key = record.get("seq")
-        if key not in seen:
-            seen.add(key)
-            records.append(record)
-
-    decoder = json.JSONDecoder()
+    """Records (jsonl lines), logged jumps (JUMP lines) and summary dicts."""
+    records, jumps, summaries = [], [], []
     for path in paths:
         with open(path, errors="replace") as handle:
             for line in handle:
                 line = line.strip()
                 if line.startswith("{"):
                     try:
-                        add(json.loads(line))
+                        records.append(json.loads(line))
                     except ValueError:
                         pass
                 elif "BRIGHTTRACE JUMP" in line:
-                    for tag in ("before=", "after="):
-                        at = line.find(" " + tag)
-                        if at >= 0:
-                            try:
-                                add(decoder.raw_decode(line, at + len(tag) + 1)[0])
-                            except ValueError:
-                                pass
+                    try:
+                        jumps.append(parse_jump(line))
+                    except ValueError:
+                        pass
                 elif "BRIGHTTRACE t_ms=" in line:
                     summaries.append(dict(re.findall(r"(\w+)=(\S+)", line[line.index("BRIGHTTRACE"):])))
     records.sort(key=lambda r: r.get("seq", 0))
-    return records, summaries
+    return records, jumps, summaries
 
 
 def is_new(record, previous):
@@ -99,98 +140,100 @@ def is_new(record, previous):
 
 
 def detect_jumps(records):
-    """Exponent steps between consecutive new frames with a stable input mean, per eye (no rate limit)."""
-    jumps, before, between = [], None, []
-    for record in records:
-        if before is not None and record.get("ts_ns") == before.get("ts_ns"):
-            between.append(record)
+    """Gain or exponent steps per eye between consecutive presented frames, repeats included (no rate limit)."""
+    jumps = []
+    for before, record in zip(records, records[1:]):
+        eyes_before = {e.get("eye"): e for e in before.get("eyes", [])}
+        names = [e.get("eye") for e in record.get("eyes", []) if e.get("eye") in eyes_before and stepped(eyes_before[e.get("eye")], e)]
+        if not names:
             continue
-        if before is not None:
-            best = None
-            for a, b in zip(before.get("eyes", []), record.get("eyes", [])):
-                ea, eb, ia, ib = eye_exponent(a), eye_exponent(b), a.get("in_mean"), b.get("in_mean")
-                if None in (ea, eb, ia, ib) or max(ia, ib) <= 0 or abs(ia - ib) / max(ia, ib) >= JUMP_INPUT_STABLE_RATIO:
-                    continue
-                if abs(eb - ea) > JUMP_EXPONENT_DELTA and (best is None or abs(eb - ea) > abs(best["d_exp"])):
-                    best = {"eye": b.get("eye", "?"), "d_exp": eb - ea, "exp": (ea, eb), "in": (ia, ib),
-                            "out": (a.get("out_mean"), b.get("out_mean"))}
-            if best:
-                best.update(before=before, after=record, changed=changed_fields(before, between + [record]))
-                jumps.append(best)
-        before, between = record, []
+        per_eye = {}
+        for b in record.get("eyes", []):
+            a = eyes_before.get(b.get("eye"), {})
+            per_eye[b.get("eye")] = {"in": (a.get("in_mean"), b.get("in_mean")), "out": (a.get("out_mean"), b.get("out_mean")),
+                                     "gain": (gain(a), gain(b)), "exp": (eye_exponent(a), eye_exponent(b))}
+        fa, fb = before.get("fields", {}), record.get("fields", {})
+        changed = sorted({k for k in set(fa) | set(fb) if fa.get(k) != fb.get(k)} | set(record.get("changed", [])))
+        jumps.append({"t_ms": record.get("t_ms", 0), "seq": (before.get("seq"), record.get("seq")), "eyes": names,
+                      "per_eye": per_eye, "changed": changed, "detail": {k: (fa.get(k, "none"), fb.get(k, "none")) for k in changed}})
     return jumps
-
-
-def changed_fields(before, following):
-    """Recorded fields that differ between `before` and the last of `following`, or that any of them flagged."""
-    after = following[-1]
-    a, b = before.get("fields", {}), after.get("fields", {})
-    keys = {k for k in set(a) | set(b) if a.get(k) != b.get(k)}
-    for record in following:
-        keys.update(record.get("changed", []))
-    return sorted(keys)
 
 
 def fmt(v):
     return "na" if v is None else "%.4g" % v
 
 
-def report(records, summaries):
+def jump_lines(jumps, eye_names):
+    by_eye = ", ".join("%s %d" % (e, sum(1 for j in jumps if e in j["eyes"])) for e in eye_names)
+    lines = ["%d (%s)" % (len(jumps), by_eye) if by_eye else "%d" % len(jumps)]
+    t0 = jumps[0]["t_ms"] if jumps else 0
+    for j in jumps[:MAX_JUMP_LINES]:
+        steps = " | ".join("%s gain %s -> %s, exp %s -> %s, in %s -> %s, out %s -> %s" % (
+            (e,) + tuple(fmt(v) for k in ("gain", "exp", "in", "out") for v in j["per_eye"].get(e, {}).get(k, (None, None))))
+            for e in j["eyes"])
+        head = "  t=%.3f s seq %s->%s eyes %s: %s" % ((j["t_ms"] - t0) / 1000.0, j["seq"][0], j["seq"][1], ",".join(j["eyes"]), steps)
+        if not j["changed"]:
+            lines.append(head + "; no recorded field changed (outside the client pipeline)")
+        elif j["detail"]:
+            lines.append(head + "; changed: " + ", ".join("%s (%s -> %s)" % (k, a, b) for k, (a, b) in sorted(j["detail"].items())))
+        else:
+            lines.append(head + "; changed: " + ", ".join(j["changed"]))
+    if len(jumps) > MAX_JUMP_LINES:
+        lines.append("  ... %d more" % (len(jumps) - MAX_JUMP_LINES))
+    return lines
+
+
+def report(records, logged, summaries):
     lines = []
     if summaries:
-        totals = {k: 0 for k in SUMMARY_KEYS}
-        for s in summaries:
-            for k in ("frames", "new", "repeat", "jumps"):
-                totals[k] += int(s.get(k, 0))
-            totals["levels"] = max(totals["levels"], int(s.get("levels", 0)))
-        lines.append("summary lines: %d (frames %d, new %d, repeat %d, levels max %d, jumps %d)" % (
-            len(summaries), totals["frames"], totals["new"], totals["repeat"], totals["levels"], totals["jumps"]))
+        totals = {k: sum(int(s.get(k, 0)) for s in summaries) for k in SUMMARY_SUMS}
+        lines.append("summary lines: %d (frames %d, new %d, repeat %d, levels max %d, jumps %d, dropped %d, dropped lines %d)" % (
+            len(summaries), totals["frames"], totals["new"], totals["repeat"], max(int(s.get("levels", 0)) for s in summaries),
+            totals["jumps"], totals["dropped"], totals["dropped_lines"]))
     new = sum(1 for i, r in enumerate(records) if is_new(r, records[i - 1] if i else None))
     lines.append("frames: %d (new %d, repeat %d)" % (len(records), new, len(records) - new))
-    exps = [e for r in records for e in map(eye_exponent, r.get("eyes", [])) if e is not None]
-    clusters = levels(exps)
-    counted = [c for c in clusters if c[1] >= max(1, MIN_LEVEL_SHARE * len(exps))]
-    lines.append("output levels: %d (transfer exponent clusters, gap %g)" % (len(counted), LEVEL_GAP))
-    for centre, count in clusters:
-        lines.append("  exp %s  n=%d%s" % (fmt(centre), count, "" if (centre, count) in counted else " (stray)"))
+    eye_names = sorted({e.get("eye") for r in records for e in r.get("eyes", [])})
+    level_count = 0
+    for name in eye_names:
+        eyes = [e for r in records for e in r.get("eyes", []) if e.get("eye") == name]
+        exps = levels([v for v in map(eye_exponent, eyes) if v is not None])
+        gains = levels([v for v in map(eye_log_gain, eyes) if v is not None])
+        level_count = max(level_count, len(counted(exps)), len(counted(gains)))
+        lines.append("eye %s: exponent levels %d, gain levels %d" % (name, len(counted(exps)), len(counted(gains))))
+        for label, clusters, value in (("exp", exps, lambda c: c), ("gain", gains, math.exp)):
+            for centre, count in clusters:
+                lines.append("  %s %s  n=%d%s" % (label, fmt(value(centre)), count, "" if (centre, count) in counted(clusters) else " (stray)"))
+    lines.append("output levels: %d (exponent or gain clusters, most of any eye, gap %g)" % (level_count, LEVEL_GAP))
     jumps = detect_jumps(records)
-    lines.append("jumps: %d" % len(jumps))
-    t0 = records[0].get("t_ms", 0) if records else 0
-    for j in jumps:
-        before, after = j["before"], j["after"]
-        head = "  t=%.3f s seq %s->%s eye %s: exp %s -> %s, in %s -> %s, out %s -> %s" % (
-            (after.get("t_ms", 0) - t0) / 1000.0, before.get("seq"), after.get("seq"), j["eye"], fmt(j["exp"][0]),
-            fmt(j["exp"][1]), fmt(j["in"][0]), fmt(j["in"][1]), fmt(j["out"][0]), fmt(j["out"][1]))
-        if j["changed"]:
-            a, b = before.get("fields", {}), after.get("fields", {})
-            detail = ", ".join("%s (%s -> %s)" % (k, a.get(k, "none"), b.get(k, "none")) for k in j["changed"])
-            lines.append(head + "; changed: " + detail)
-        else:
-            lines.append(head + "; no recorded field changed (outside the client pipeline)")
-    lines.append(verdict(jumps, len(counted)))
+    if records or not logged:
+        lines += ["jumps: " + jump_lines(jumps, eye_names)[0]] + jump_lines(jumps, eye_names)[1:]
+    if logged:
+        names = sorted({e for j in logged for e in j["eyes"]})
+        lines += ["logged jumps: " + jump_lines(logged, names)[0]] + jump_lines(logged, names)[1:]
+    lines.append(verdict(jumps if records else logged, level_count))
     return lines
 
 
 def verdict(jumps, level_count):
-    explained = [j for j in jumps if j["changed"]]
     if not jumps:
         if level_count <= 1:
             return "VERDICT stable: one output level, no jumps"
-        return "VERDICT %d output levels but no jump between consecutive new frames with stable input" % level_count
-    fields = sorted({k for j in explained for k in j["changed"]})
+        return "VERDICT %d output levels but no jump between consecutive frames with stable input" % level_count
+    explained = [j for j in jumps if j["changed"]]
+    fields = ", ".join(sorted({k for j in explained for k in j["changed"]}))
+    eyes = "eyes " + ",".join(sorted({e for j in jumps for e in j["eyes"]}))
     if len(explained) == len(jumps):
-        return "VERDICT client pipeline: all %d jumps coincide with recorded field changes (%s)" % (len(jumps), ", ".join(fields))
+        return "VERDICT client pipeline: all %d jumps coincide with recorded field changes (%s) (%s)" % (len(jumps), fields, eyes)
     if not explained:
-        return "VERDICT outside the client pipeline: %d jumps with no recorded field change" % len(jumps)
-    return "VERDICT mixed: %d jumps with field changes (%s), %d without" % (len(explained), ", ".join(fields), len(jumps) - len(explained))
+        return "VERDICT outside the client pipeline: %d jumps with no recorded field change (%s)" % (len(jumps), eyes)
+    return "VERDICT mixed: %d jumps with field changes (%s), %d without (%s)" % (len(explained), fields, len(jumps) - len(explained), eyes)
 
 
 def main(argv):
     if not argv:
         print(__doc__.strip())
         return 2
-    records, summaries = load(argv)
-    print("\n".join(report(records, summaries)))
+    print("\n".join(report(*load(argv))))
     return 0
 
 

@@ -5,6 +5,7 @@ Run: python3 tools/tests/test_brighttrace.py
 """
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -19,19 +20,22 @@ BASE_FIELDS = {"path": "metal", "pipeline": "biplanar", "binding": "explicit10",
                "decode": "sync", "cv_fourcc": "x420", "cv_transfer": "SMPTE_ST_2084_PQ", "drawable_format": "rgba16Float"}
 
 
-def grid(level, k):
+def grid(level, k, gain=1.0):
     inp = [level * (0.2 + i / 320.0) for i in range(256)]
-    return inp, [v ** k for v in inp]
+    return inp, [gain * v ** k for v in inp]
 
 
-def record(seq, ts, k, fields=None, level=0.5, grids=False):
-    inp, out = grid(level, k)
-    eye = {"eye": "L", "in_mean": sum(inp) / 256, "out_mean": sum(out) / 256, "exp": None if grids else k,
-           "in": inp if grids else None, "out": out if grids else None}
+def eye(name, k, level=0.5, gain=1.0, grids=False):
+    inp, out = grid(level, k, gain)
+    return {"eye": name, "in_mean": sum(inp) / 256, "out_mean": sum(out) / 256, "exp": None if grids else k,
+            "log_gain": None if grids else math.log(gain), "in": inp if grids else None, "out": out if grids else None}
+
+
+def record(seq, ts, k, fields=None, level=0.5, grids=False, eyes=None):
     f = dict(BASE_FIELDS)
     f.update(fields or {})
     return {"seq": seq, "t_ms": 1_000_000 + seq * 11, "present_s": seq / 90.0, "ts_ns": ts, "new": True,
-            "gen": 0, "changed": [], "fields": f, "eyes": [eye]}
+            "gen": 0, "changed": [], "fields": f, "eyes": eyes or [eye("L", k, level, grids=grids)]}
 
 
 def series(levels, field_change):
@@ -48,6 +52,11 @@ def series(levels, field_change):
             out.append(r)
             prev = r
     return out
+
+
+def stereo(count, ts, right):
+    """Both eyes, a steady input; right(i) gives the right eye's (exponent, gain) at presented frame i."""
+    return [record(i, ts(i), 1.0, eyes=[eye("L", 1.0), eye("R", right(i)[0], gain=right(i)[1])]) for i in range(count)]
 
 
 def write_jsonl(records):
@@ -110,6 +119,38 @@ class SeriesTests(unittest.TestCase):
         self.assertIn("jumps: 0", text)
         self.assertIn("VERDICT stable", text)
 
+    def test_right_only_gain_alternation(self):
+        code, text = run(write_jsonl(stereo(80, lambda i: 1000 + i, lambda i: (1.0, 1.0 if i % 2 == 0 else 0.5))))
+        self.assertEqual(code, 0)
+        self.assertIn("eye L: exponent levels 1, gain levels 1", text)
+        self.assertIn("eye R: exponent levels 1, gain levels 2", text)
+        self.assertIn("output levels: 2", text)
+        self.assertIn("jumps: 79 (L 0, R 79)", text)
+        self.assertIn("eyes R: R gain 1 -> 0.5", text)
+        self.assertIn("VERDICT outside the client pipeline: 79 jumps with no recorded field change (eyes R)", text)
+
+    def test_right_only_exponent_alternation_on_repeats(self):
+        records = stereo(80, lambda i: 1000 + i // 2, lambda i: (1.0 if i % 2 == 0 else 1.27, 1.0))
+        jumps = brighttrace.detect_jumps(records)
+        self.assertEqual(len(jumps), 79)
+        self.assertTrue(all(j["eyes"] == ["R"] for j in jumps))
+        code, text = run(write_jsonl(records))
+        self.assertIn("frames: 80 (new 40, repeat 40)", text)
+        self.assertIn("eye R: exponent levels 2, gain levels 1", text)
+        self.assertIn("jumps: 79 (L 0, R 79)", text)
+        self.assertIn("VERDICT outside the client pipeline", text)
+
+    def test_both_eyes_stable(self):
+        code, text = run(write_jsonl(stereo(80, lambda i: 1000 + i // 2, lambda i: (1.0, 1.0))))
+        self.assertEqual(code, 0)
+        self.assertIn("output levels: 1", text)
+        self.assertIn("jumps: 0 (L 0, R 0)", text)
+        self.assertIn("VERDICT stable", text)
+
+    def test_small_gain_change_is_not_a_jump(self):
+        records = [record(0, 1, 1.0), record(1, 2, 1.0, eyes=[eye("L", 1.0, gain=1.05)])]
+        self.assertEqual(brighttrace.detect_jumps(records), [])
+
     def test_input_change_is_not_a_jump(self):
         records = [record(0, 1, 1.0), record(1, 2, 1.27, level=0.9)]
         self.assertEqual(brighttrace.detect_jumps(records), [])
@@ -117,14 +158,14 @@ class SeriesTests(unittest.TestCase):
 
 class LogTests(unittest.TestCase):
     def test_forwarded_lines(self):
-        before, after = record(5, 10, 1.0), record(6, 11, 1.27)
-        compact = lambda r: json.dumps(r, separators=(",", ":"), sort_keys=True)  # noqa: E731
         lines = [
             "2026-10-23 10:00:00.000 [INFO] Client 192.168.1.20: [Info] [ALVR NATIVE] BRIGHTTRACE t_ms=1000 frames=90 new=72 repeat=18"
-            " in_min=0.2 in_max=0.3 out_min=0.1 out_max=0.3 exp_min=1 exp_max=1.27 levels=2 gen_changes=0"
-            " variants=biplanar/explicit10 attach_changes=0 jumps=1",
-            "2026-10-23 10:00:00.010 [INFO] Client 192.168.1.20: [Info] [ALVR NATIVE] BRIGHTTRACE JUMP t_ms=1001 eye=L d_exp=0.27"
-            " before=" + compact(before) + " after=" + compact(after),
+            " in_min=0.2 in_max=0.3 out_min=0.1 out_max=0.3 exp_min=1 exp_max=1 levels=2 levels_L=1 levels_R=2 gen_changes=0"
+            " variants=biplanar/explicit10 attach_changes=0 jumps=2 jumps_L=0 jumps_R=2 dropped=3 dropped_lines=1",
+            "2026-10-23 10:00:00.010 [INFO] Client 192.168.1.20: [Info] [ALVR NATIVE] BRIGHTTRACE JUMP t_ms=1001 seq=5>6 ts_ns=10>11"
+            " eyes=R changed=none L=in:0.25>0.25,out:0.25>0.25,gain:1>1,exp:1>1 R=in:0.25>0.25,out:0.25>0.125,gain:1>0.5,exp:1>1",
+            "2026-10-23 10:00:00.021 [INFO] Client 192.168.1.20: [Info] [ALVR NATIVE] BRIGHTTRACE JUMP t_ms=1012 seq=6>7 ts_ns=11>11"
+            " eyes=R changed=pipeline L=in:0.25>0.25,out:0.25>0.25,gain:1>1,exp:1>1 R=in:0.25>0.25,out:0.125>0.25,gain:0.5>1,exp:na>1",
             "unrelated line",
         ]
         handle = tempfile.NamedTemporaryFile("w", suffix=".log", delete=False)
@@ -132,9 +173,13 @@ class LogTests(unittest.TestCase):
         handle.close()
         code, text = run(handle.name)
         self.assertEqual(code, 0)
-        self.assertIn("summary lines: 1 (frames 90, new 72, repeat 18, levels max 2, jumps 1)", text)
-        self.assertIn("jumps: 1", text)
-        self.assertIn("no recorded field changed (outside the client pipeline)", text)
+        self.assertIn("summary lines: 1 (frames 90, new 72, repeat 18, levels max 2, jumps 2, dropped 3, dropped lines 1)", text)
+        self.assertIn("logged jumps: 2 (R 2)", text)
+        self.assertIn("seq 5->6 eyes R: R gain 1 -> 0.5", text)
+        self.assertIn("; no recorded field changed (outside the client pipeline)", text)
+        self.assertIn("exp na -> 1", text)
+        self.assertIn("; changed: pipeline", text)
+        self.assertIn("VERDICT mixed", text)
 
 
 if __name__ == "__main__":
