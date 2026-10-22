@@ -50,6 +50,7 @@ GREEN, MAGENTA, WHITE = (0, 1, 0), (1, 0, 1), (1, 1, 1)
 MIN_CONTRAST, NOISE_SIGMAS = 0.03, 6.0      # a line must stand 6 sigma of its window's background above it
 PASS_MEDIAN_DEG, PASS_MAX_DEG, PASS_EXTENT_DEG, PASS_FOUND = 0.1, 0.5, 0.5, 0.5
 MIN_RESOLVABLE_PX = 2.0                      # lines narrower than this in the image cannot show sharpness
+SEP_MIN = 8                                  # the stream background must stand this many (sRGB) counts above the surround
 
 
 # ---- page maths (frustum-pixel-map.html, section 7) --------------------------------------------------------------
@@ -92,6 +93,25 @@ def v_stats(g=600):
 
 def f32(x):
     return struct.unpack('f', struct.pack('f', x))[0]
+
+
+def _srgb_lut():
+    out = bytearray(256)
+    for i in range(256):
+        x = i / 255
+        out[i] = int(round((12.92 * x if x <= 0.0031308 else 1.055 * x ** (1 / 2.4) - 0.055) * 255))
+    return bytes(out)
+
+
+SRGB_LUT = _srgb_lut()
+
+
+def srgb_encode(pix):
+    """Linear-light RGBA bytes -> sRGB-encoded (alpha untouched)."""
+    out = bytearray(pix)
+    for c in range(3):
+        out[c::4] = bytes(pix[c::4]).translate(SRGB_LUT)
+    return out
 
 
 def fov_axis(c, s, r, n):
@@ -428,18 +448,22 @@ def rate_table(logical, physical, rmin=0.35):
     return table
 
 
-def synth_drawable(directory, w, h, logical, tangents, s, render, eye):
+def synth_drawable(directory, w, h, logical, tangents, s, render, eye, encoding='linear'):
     directory.mkdir(parents=True, exist_ok=True)
     left, right, down, up = tangents
     xt, yt = rate_table(logical[0], w), rate_table(logical[1], h)
     x = make_axis('h', 'drawable', -s * left, s * right, render[0], drawable=(-left, right, 0, logical[0], xt))
     y = make_axis('v', 'drawable', -s * up, s * down, render[1], drawable=(-up, down, 0, logical[1], yt))
     pix = synth_image(x, y, eye)
+    if encoding == 'srgb':
+        pix = srgb_encode(pix)
     vc.write_png(directory / 'slice.png', w, h, bytes(pix))
     meta = {'corner_chart': {'mode': 'Off', 'ring_percents': []}, 'trigger': 'synth', 'slices': [{
         'eye': eye, 'view': 0, 'slice': 0, 'png': 'slice.png', 'width': w, 'height': h,
         'viewport': [0, 0, logical[0], logical[1]], 'tangents': [left, right, down, up],
         'rate_map': {'screen_w': logical[0], 'screen_h': logical[1], 'physical_x': xt, 'physical_y': yt, 'layer': 0}}]}
+    if encoding == 'srgb':                      # linear (the client's raw drawable) is the absent default
+        meta['encoding'] = 'srgb'
     (directory / 'capture.json').write_text(json.dumps(meta))
 
 
@@ -536,8 +560,34 @@ def find_line(prof, lo_win, hi_win):
     return {'centre': centre, 'fwhm': fwhm, 'contrast': contrast}
 
 
-def stream_edges(pix, width, region, axis_kind, span):
-    """First and last non-black index along an axis (median over a few rows/columns); None if it touches the crop."""
+def edge_levels(pix, width, region, xspan, yspan):
+    """Surround and stream-background levels (max RGB), to find the stream border relative to the surround itself.
+
+    surround = the lowest of the four outer strips' medians (the stream may reach one side); background = median over
+    the middle of the predicted stream span. The border is separable when the background stands SEP_MIN above the surround."""
+    x0, y0, w, h = region
+
+    def level(x, y):
+        i = ((y0 + y) * width + x0 + x) * 4
+        return max(pix[i:i + 3])
+
+    mw, mh = max(2, w // 100), max(2, h // 100)
+    xs, ys = sample_indices(w * 0.1, w * 0.9, 15), sample_indices(h * 0.1, h * 0.9, 15)
+    strips = ([(x, k) for k in range(mh) for x in xs], [(x, h - 1 - k) for k in range(mh) for x in xs],
+              [(k, y) for k in range(mw) for y in ys], [(w - 1 - k, y) for k in range(mw) for y in ys])
+    surround = min(_median(level(x, y) for x, y in pts) for pts in strips)
+    inner = []
+    for a, b in ((max(0.0, xspan[0] - x0), min(w, xspan[1] - x0)), (max(0.0, yspan[0] - y0), min(h, yspan[1] - y0))):
+        pad = 0.1 * (b - a)
+        inner.append(sample_indices(a + pad, b - pad, 9) if b > a else [])
+    background = _median(level(x, y) for x in inner[0] for y in inner[1])
+    ok = background is not None and background - surround >= SEP_MIN
+    return {'surround': surround, 'background': background, 'separable': ok,
+            'threshold': surround + (background - surround) / 2 if ok else None}
+
+
+def stream_edges(pix, width, region, axis_kind, thr):
+    """First and last index above thr along an axis (median over a few rows/columns); None if it touches the crop."""
     x0, y0, w, h = region
     horizontal = axis_kind == 'h'
     n = w if horizontal else h
@@ -550,7 +600,7 @@ def stream_edges(pix, width, region, axis_kind, span):
         else:
             base = (y0 * width + x0 + k) * 4
             v = [max(pix[base + 4 * width * i:base + 4 * width * i + 3]) for i in range(n)]
-        idx = [i for i in range(n) if v[i] > 6 and v[min(i + 1, n - 1)] > 6 and v[min(i + 2, n - 1)] > 6]
+        idx = [i for i in range(n) if v[i] > thr and v[min(i + 1, n - 1)] > thr and v[min(i + 2, n - 1)] > thr]
         if idx:
             firsts.append(idx[0])
             lasts.append(min(n, idx[-1] + 3))
@@ -686,6 +736,14 @@ def summarise(lines, extent, params, foveated):
     for side, e in extent.items():
         if e['error_deg'] is not None and abs(e['error_deg']) > PASS_EXTENT_DEG:
             reasons.append('stream extent %s off by %.2f deg' % (side, e['error_deg']))
+    if params.get('mode') == 'drawable':
+        # the head-locked lines cannot test s: the extent is the only check, so an unmeasured one is a failure
+        missing = [side for side, e in extent.items() if e['measured_deg'] is None]
+        if missing:
+            lv, why = params.get('extent_levels'), ''
+            if lv and not lv['separable']:
+                why = '; stream background %s vs surround %s counts is not separable' % (lv['background'], lv['surround'])
+            reasons.append('stream extent unverified (%s%s)' % (', '.join(missing), why))
     s['verdict'] = 'FAIL' if reasons else 'PASS'
     s['verdict_reasons'] = reasons
     s['params'] = params
@@ -822,6 +880,7 @@ def build_parser():
     p.add_argument('--out-json')
     p.add_argument('--kind', choices=['render', 'encoded', 'drawable'], help='synth: which image to write')
     p.add_argument('--out-dir', type=Path, help='synth drawable: capture directory to write')
+    p.add_argument('--encoding', choices=['linear', 'srgb'], default='linear', help='synth drawable: pixel transfer to write')
     p.add_argument('--phys', default='2432x2368', help='synth drawable: physical texture size')
     p.add_argument('--logical', default='6261x5023', help='synth drawable: logical screen size')
     return p
@@ -845,7 +904,7 @@ def do_synth(a):
         vc.write_png(a.out_png, w, h, bytes(pix))
     else:
         phys, logical = size_arg(a.phys, '--phys'), size_arg(a.logical, '--logical')
-        synth_drawable(a.out_dir, phys[0], phys[1], logical, tangents, a.fov_scale, render, a.eye)
+        synth_drawable(a.out_dir, phys[0], phys[1], logical, tangents, a.fov_scale, render, a.eye, a.encoding)
     return 0
 
 
@@ -878,6 +937,11 @@ def run_measure(a):
         if (width, height) != (sl['width'], sl['height']):
             raise ValueError('texture/PNG size mismatch')
         tangents = tuple(sl['tangents'])
+        encoding = cap.get('encoding', sl.get('encoding', 'linear'))
+        if encoding not in ('srgb', 'linear'):
+            raise ValueError('capture.json encoding must be srgb or linear, got %r' % (encoding,))
+        if encoding == 'linear':                # the client writes linear light: measure on the sRGB-encoded counts
+            pix = srgb_encode(pix)
     else:
         if not a.image:
             raise ValueError('%s needs --image' % mode)
@@ -920,6 +984,8 @@ def run_measure(a):
         yaxis = make_axis('v', 'drawable', lo_y, hi_y, render[1], fov=fov[1], drawable=(-up, down, vy, vh, yt))
     params = {'mode': mode, 'eye': a.eye, 'fov_scale': s, 'tangents_LRDU': list(tangents), 'render': list(render),
               'foveation': foveation or 'off', 'region': [x0, y0, w, h], 'image_size': [width, height]}
+    if mode == 'drawable':
+        params['encoding'] = encoding
     notes = []
     if mode == 'encoded':
         coded = (fov[0]['coded'], fov[1]['coded'])
@@ -931,8 +997,12 @@ def run_measure(a):
     lines = analyse(pix, width, region, xaxis, yaxis)
     edges = None
     if mode == 'drawable':
-        xa, xb = stream_edges(pix, width, region, 'h', None)
-        ya, yb = stream_edges(pix, width, region, 'v', None)
+        levels = edge_levels(pix, width, region, xaxis.span(), yaxis.span())
+        params['extent_levels'] = levels
+        xa = xb = ya = yb = None
+        if levels['separable']:
+            xa, xb = stream_edges(pix, width, region, 'h', levels['threshold'])
+            ya, yb = stream_edges(pix, width, region, 'v', levels['threshold'])
         edges = {'left': xa, 'right': xb, 'up': ya, 'down': yb}
     extent = extent_report(mode, xaxis, yaxis, edges)
     summary = summarise(lines, extent, params, {'x': fov[0]['f'] < 0.9999, 'y': fov[1]['f'] < 0.9999})
