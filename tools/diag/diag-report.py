@@ -648,9 +648,11 @@ def rrm_gaze(records):
     return rows
 
 
-def grating_rows(records):
-    """Finest seen cycles/deg per eye label, render quality (read back), foveation, position and orientation.
-    The last judgment of a patch wins; seen_cpd / not_seen_cpd list every judged level."""
+GRATING_CPD = (8, 10, 12, 14, 17, 20)
+
+
+def grating_judgments(records):
+    """Per run, eye label, rq, fov, position and orientation: the last judgment of each patch (cpd -> fields)."""
     groups, run = {}, 0
     for record in records:
         f = record['fields']
@@ -662,18 +664,75 @@ def grating_rows(records):
         if cpd is None:
             continue
         key = (run, f.get('eye'), f.get('rq'), f.get('fov'), f.get('pos'), f.get('orient'))
-        group = groups.setdefault(key, dict(judgments={}, source=record['source']))
-        group['judgments'][int(cpd)] = f['seen'] == 'yes'
+        group = groups.setdefault(key, dict(judgments={}, source=record['source'], t_ms=None))
+        group['judgments'][int(cpd)] = f
         group['source'] = record['source']
+        group['t_ms'] = record['t_ms']
+    return groups
+
+
+def grating_physical_nyquist(records, source, eye, rq, fov, pos, orient, t_ms):
+    """Physical Nyquist (ppd / 2) at the patch set from the rrm sample nearest in time with the same eye
+    (both -> L), render quality and foveation in the same log. V bars: h_ppd at 0 / temporal 20 (L -20, R +20). H bars: v_ppd at 0;
+    at temporal 20 the separable rate map gives v_ppd(0) / cos 20° (logical vertical ppd grows by sec(az))."""
+    eye = 'R' if eye == 'R' else 'L'
+    samples = [r for r in records if r['topic'] == 'rrm' and r['source'].rsplit(':', 1)[0] == source.rsplit(':', 1)[0] and r['fields'].get('eye') == eye
+               and r['fields'].get('rq') == rq and r['fields'].get('fov') == fov]
+    if not samples:
+        return None
+    nearest = min(samples, key=lambda r: abs(r['t_ms'] - t_ms))['fields']
+    temporal = pos == 'temporal20'
+    if orient == 'V':
+        ppd = number(deg_values(nearest.get('h_ppd')).get(('20' if eye == 'R' else '-20') if temporal else '0'))
+    else:
+        ppd = number(deg_values(nearest.get('v_ppd')).get('0'))
+        if ppd is not None and temporal:
+            ppd /= math.cos(math.radians(20))
+    return ppd / 2 if ppd is not None else None
+
+
+def grating_limit(finest, physical):
+    """render-grid limited: finest seen >= the level one step below the finest level the physical grid can carry
+    (the coarsest level when none fits); lens/eye limited: below that; undetermined: no rate map or nothing seen."""
+    if finest is None or physical is None:
+        return 'undetermined'
+    fits = [i for i, c in enumerate(GRATING_CPD) if c <= physical * 1.001]
+    threshold = GRATING_CPD[max(fits[-1] - 1, 0)] if fits else GRATING_CPD[0]
+    return 'render-grid limited' if finest >= threshold else 'lens/eye limited'
+
+
+def grating_rows(records):
+    """Finest seen cycles/deg per eye label, render quality (read back), foveation, position and orientation.
+    The last judgment of a patch wins; patches logged above_nyquist=yes are listed apart and never count."""
     rows = []
-    for key, group in groups.items():
-        judged = group['judgments']
+    for key, group in grating_judgments(records).items():
+        judged = {c: f['seen'] == 'yes' for c, f in group['judgments'].items() if f.get('above_nyquist') != 'yes'}
+        above = sorted(c for c, f in group['judgments'].items() if f.get('above_nyquist') == 'yes')
+        logical = [number(f.get('nyquist_logical_cpd')) for f in group['judgments'].values()]
+        logical = [n for n in logical if n is not None]
         seen = sorted(c for c, s in judged.items() if s)
-        rows.append(dict(eye=key[1], rq=key[2], fov=key[3], pos=key[4], orient=key[5],
-                         finest_seen_cpd=max(seen) if seen else None, judged=len(judged),
+        finest = max(seen) if seen else None
+        physical = grating_physical_nyquist(records, group['source'], key[1], key[2], key[3], key[4], key[5], group['t_ms'])
+        rows.append(dict(eye=key[1], rq=key[2], fov=key[3], pos=key[4], orient=key[5], finest_seen_cpd=finest,
+                         nyquist_logical_cpd='{:.2f}'.format(min(logical)) if logical else None,
+                         nyquist_physical_cpd='{:.2f}'.format(physical) if physical is not None else None,
+                         limit=grating_limit(finest, physical), judged=len(judged),
                          seen_cpd=','.join(map(str, seen)) or None,
                          not_seen_cpd=','.join(str(c) for c in sorted(judged) if not judged[c]) or None,
+                         above_nyquist_cpd=','.join(map(str, above)) or None,
                          run=key[0], source=group['source']))
+    return rows
+
+
+def grating_above_nyquist(records):
+    """Judgments of patches logged above their logical Nyquist (aliased on the render grid): reported, never counted."""
+    rows = []
+    for key, group in grating_judgments(records).items():
+        for cpd in sorted(group['judgments']):
+            f = group['judgments'][cpd]
+            if f.get('above_nyquist') == 'yes':
+                rows.append(dict(eye=key[1], rq=key[2], fov=key[3], pos=key[4], orient=key[5], cpd=cpd, seen=f['seen'],
+                                 nyquist_logical_cpd=f.get('nyquist_logical_cpd'), run=key[0], source=group['source']))
     return rows
 
 
@@ -690,9 +749,17 @@ def resolution_report(records):
               'fixed = one map hash and peaks within 1°; follows gaze = peaks move ≥5° towards each logged fixation.', '']
     lines += table(rrm_gaze(records), ('eye', 'rq', 'fov', 'samples', 'hashes', 'peaks', 'verdict', 'source')) + ['']
     lines += ['Grating limit: finest cycles/deg judged seen (square wave, 1.5° patches sized by the view tangents). '
-              'rq is the render quality read back; the last judgment of a patch wins.', '']
-    lines += table(grating_rows(records), ('eye', 'rq', 'fov', 'pos', 'orient', 'finest_seen_cpd', 'judged',
-                                           'seen_cpd', 'not_seen_cpd', 'run', 'source')) + ['']
+              'rq is the render quality read back; the last judgment of a patch wins. nyquist_logical_cpd: half the '
+              'logical px/deg at the patch (lowest logged in the set); nyquist_physical_cpd: half the rate-map px/deg '
+              'from the nearest rrm sample of the same eye, rq and fov. limit: render-grid limited = finest seen within '
+              'one level of the physical Nyquist (the grid stops it); lens/eye limited = finer levels the grid carries '
+              'were not seen; undetermined = no rate map or nothing seen.', '']
+    lines += table(grating_rows(records), ('eye', 'rq', 'fov', 'pos', 'orient', 'finest_seen_cpd', 'nyquist_logical_cpd',
+                                           'nyquist_physical_cpd', 'limit', 'judged', 'seen_cpd', 'not_seen_cpd',
+                                           'above_nyquist_cpd', 'run', 'source')) + ['']
+    lines += ['Above the logical Nyquist (aliased on the render grid; not counted as seen):', '']
+    lines += table(grating_above_nyquist(records), ('eye', 'rq', 'fov', 'pos', 'orient', 'cpd', 'seen',
+                                                    'nyquist_logical_cpd', 'run', 'source')) + ['']
     lines += measurements(selected, ('phase', 's', 'fix', 'eye', 'rq', 'fov', 'cpd', 'orient', 'seen')) + ['']
     return lines
 

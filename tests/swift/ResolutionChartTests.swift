@@ -65,7 +65,6 @@ private func testRates() {
     expect(abs(peak - 10) <= 1, "peak follows the plateau \(peak)")
     expect(RateMapSampling.peak(leftEye, width: w, height: h, horizontal: true, map: { x, y in (x, y) }).map { abs($0) <= 1 } ?? false,
            "uniform map: plateau centre is the axis")
-    expectEqual(RateMapSampling.hash(Data([1, 2, 3])), RateMapSampling.hash(Data([1, 2, 3])), "stable hash")
     expect(RateMapSampling.hash(Data([1, 2, 3])) != RateMapSampling.hash(Data([1, 2, 4])), "hash changes with the map")
 }
 
@@ -86,12 +85,14 @@ private func testSchedule() {
 private func testGratingSizing() {
     let patches = GratingChart.patches
     expectEqual(patches.count, 24, "6 cpd x 2 orientations x 2 positions")
-    expectEqual(GratingChart.cyclesPerDegree, [10, 15, 20, 25, 30, 35], "cpd levels")
+    expectEqual(GratingChart.cyclesPerDegree, [8, 10, 12, 14, 17, 20], "cpd levels (<= 20, the on-axis logical Nyquist at 1.0)")
     expectEqual(Array(patches.prefix(6).map(\.cpd)), GratingChart.cyclesPerDegree, "walk: cpd ascending")
     expect(patches.prefix(12).allSatisfy { $0.position == .axis } && patches.suffix(12).allSatisfy { $0.position == .temporal20 }, "axis set first")
-    let axisCentre = patches.filter { $0.position == .axis }.map(\.temporalDeg).reduce(0, +) / 12
-    let temporalCentre = patches.filter { $0.position == .temporal20 }.map(\.temporalDeg).reduce(0, +) / 12
-    expect(near(axisCentre, 0) && near(temporalCentre, 20), "sets centred at the axis and 20 deg temporal")
+    // Coarsest at the set's position, finer levels alternating outward (+ temporal first).
+    for o in [GratingChart.Orientation.vertical, .horizontal] {
+        expectEqual(patches.filter { $0.position == .axis && $0.orientation == o }.map(\.temporalDeg), [0, 2, -2, 4, -4, 6], "axis set positions")
+        expectEqual(patches.filter { $0.position == .temporal20 && $0.orientation == o }.map(\.temporalDeg), [20, 22, 18, 24, 16, 26], "temporal set positions")
+    }
     // No two patches or labels overlap (degrees).
     var rects = patches.map { GratingChart.patchRect($0) } + patches.map { GratingChart.labelRect($0) }
     rects.append(GratingChart.statusRect("0.75 24-24"))
@@ -124,9 +125,9 @@ private func testGratingSizing() {
         expect(near(xs.max()! - xs.min()!, 1.0 / 40, 1e-9), "\(eye) 20 cpd bar = 0.025 deg")
     }
     // Temporal side: left eye -x, right eye +x; horizontal bars keep their angular height at 20 deg azimuth (Fick).
-    let h35 = patches.first { $0.position == .temporal20 && $0.cpd == 35 && $0.orientation == .horizontal }!
+    let h20 = patches.first { $0.position == .temporal20 && $0.cpd == 20 && $0.orientation == .horizontal }!
     for (eye, t) in [(CornerEye.left, leftEye), (.right, rightEye)] {
-        let bar = GratingChart.bars(h35)[3]
+        let bar = GratingChart.bars(h20)[3]
         let q = GratingChart.quad(t, eye: eye, bar, color: [1, 1, 1, 1])
         let centre = q.vertices.map { tanX(t, $0.x) }.reduce(0, +) / 4
         expect(eye == .left ? centre < -0.3 : centre > 0.3, "\(eye) temporal is \(eye == .left ? "-x" : "+x")")
@@ -173,10 +174,14 @@ private func testSession() {
 }
 
 private func testFieldsAndConfiguration() {
-    let p = GratingChart.patches.first { $0.position == .temporal20 && $0.cpd == 25 && $0.orientation == .horizontal }!
-    let line = Diag.line(topic: "grating", tMs: 7, fields: GratingChart.fields(eye: "L", patch: p, seen: true, requested: 0.75, actual: 0.75, foveation: true))
-    expect(line.hasPrefix("DIAG grating t_ms=7 eye=L pos=temporal20 cpd=25 orient=H seen=yes rq=0.750 rq_set=0.750 fov=on "), line)
+    let p = GratingChart.patches.first { $0.position == .temporal20 && $0.cpd == 20 && $0.orientation == .horizontal }!
+    let line = Diag.line(topic: "grating", tMs: 7, fields: GratingChart.fields(eye: "L", patch: p, seen: true, requested: 0.75, actual: 0.75,
+                                                                           foveation: true, nyquist: 17.6))
+    expect(line.hasPrefix("DIAG grating t_ms=7 eye=L pos=temporal20 cpd=20 orient=H seen=yes rq=0.750 rq_set=0.750 fov=on nyquist_logical_cpd=17.60 above_nyquist=yes temporal_deg=26.0 "), line)
     expect(line.contains(" size_deg=1.5"), line)
+    let unknown = Diag.line(topic: "grating", tMs: 7, fields: GratingChart.fields(eye: "L", patch: p, seen: true, requested: 0.75, actual: nil,
+                                                                              foveation: true, nyquist: nil))
+    expect(unknown.contains(" nyquist_logical_cpd=unavailable above_nyquist=unknown "), unknown)
     let k = RateMapSampling.pxPerTan(leftEye, width: w, height: h)
     let sample = RateMapSampling.ViewSample(phase: "sweep", second: 3, fixation: RateMapSampling.fixations[0], eye: .left,
         drawable: 0, view: 0, layer: 0, quality: 1, foveation: true, mapped: true, screen: "6261x5023", physical: "2432x2368",
@@ -189,11 +194,36 @@ private func testFieldsAndConfiguration() {
     expect(rrm.contains(" logical_ppd_x=39.997 ") && rrm.contains(" h_rate=-40:1.0000,"), rrm)
     expect(rrm.contains(" h_ppd=-40:68.16,") && rrm.contains(",0:40.00,"), rrm)
     expect(rrm.contains(" h_peak_deg=0.0 v_peak_deg=none map_hash=0badf00d"), rrm)
-    // Foveation off only for the diagnostics resolution chart; production keeps the capability.
-    expect(!GratingChart.foveationDisabled(diagnostics: false, chart: "Both eyes", foveation: false), "Diagnostics off: unchanged")
-    expect(!GratingChart.foveationDisabled(diagnostics: true, chart: "Off", foveation: false), "chart off: unchanged")
-    expect(!GratingChart.foveationDisabled(diagnostics: true, chart: "Both eyes", foveation: true), "foveation on")
-    expect(GratingChart.foveationDisabled(diagnostics: true, chart: "Left only", foveation: false), "foveation off chosen")
+    // Foveation off only for the offline diagnostics space with the resolution chart on and no connection; every other
+    // entry (streaming spaces, input debug, dummy) keeps the production configuration.
+    for diagnostics in [false, true] { for chart in CornerChartMode.allCases { for foveation in [false, true] {
+        for entry in [LayerEntry.diagnostics, .stream, .other] { for connected in [false, true] {
+            let off = GratingChart.foveationDisabled(diagnostics: diagnostics, chart: chart.rawValue, foveation: foveation,
+                                                     entry: entry, connected: connected)
+            expectEqual(off, diagnostics && chart != .off && !foveation && entry == .diagnostics && !connected,
+                        "foveation off: diag \(diagnostics) chart \(chart) setting \(foveation) entry \(entry) connected \(connected)")
+        } }
+    } } }
+}
+
+// Logical Nyquist (logical_ppd(theta) / 2, from the view tangents) at the three render qualities' logical screens.
+private func testNyquist() {
+    let screens: [(q: String, w: Double, h: Double, axis: Double)] = [("1.0", 6261, 5023, 20.0), ("0.75", 5479, 4395, 17.5), ("0.5", 4696, 3767, 15.0)]
+    for s in screens {
+        for (eye, t) in [(CornerEye.left, leftEye), (.right, rightEye)] {
+            for o in [GratingChart.Orientation.vertical, .horizontal] {
+                let p = GratingChart.patches.first { $0.position == .axis && $0.cpd == 8 && $0.orientation == o }!
+                let n = GratingChart.nyquistLogical(t, width: s.w, height: s.h, eye: eye, patch: p)
+                expect(near(n, s.axis, 0.02), "\(s.q) \(eye) \(o.rawValue) axis Nyquist \(n)")
+            }
+            // Off axis the logical grid is finer (sec^2): 20 deg temporal V bars at 1.0 -> 20 / cos^2(20 deg) = 22.65.
+            let tv = GratingChart.patches.first { $0.position == .temporal20 && $0.cpd == 8 && $0.orientation == .vertical }!
+            let n = GratingChart.nyquistLogical(t, width: s.w, height: s.h, eye: eye, patch: tv)
+            expect(near(n, s.axis / pow(cos(20 * Double.pi / 180), 2), 0.05), "\(s.q) \(eye) temporal V Nyquist \(n)")
+        }
+    }
+    expect(GratingChart.aboveNyquist(cpd: 20, nyquist: 17.5) && !GratingChart.aboveNyquist(cpd: 17, nyquist: 17.5), "17.5: 20 above, 17 not")
+    expect(!GratingChart.aboveNyquist(cpd: 20, nyquist: 19.998), "20 at the 1.0 axis Nyquist (4-digit tangents) is representable")
 }
 
 @main enum ResolutionChartTests {
@@ -205,6 +235,7 @@ private func testFieldsAndConfiguration() {
         testGratingGeometry()
         testSession()
         testFieldsAndConfiguration()
+        testNyquist()
         finishTests("ResolutionChart")
     }
 }

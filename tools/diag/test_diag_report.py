@@ -397,30 +397,104 @@ DIAG diag t_ms=31 file_recovered=true dropped_lines=7
             records, _, _ = report.read_logs(Path(directory))
             self.assertEqual(report.rrm_gaze(records)[0]['verdict'], 'no data')
 
+    @staticmethod
+    def grating_line(cpd, seen, rq, pos='axis', orient='V', fov='on', eye='both', nyquist=None, t=2):
+        """nyquist None: a line without the Nyquist fields; else logical Nyquist with above_nyquist derived."""
+        extra = ''
+        if nyquist is not None:
+            extra = 'nyquist_logical_cpd={:.2f} above_nyquist={} '.format(nyquist, 'yes' if cpd > nyquist * 1.001 else 'no')
+        return ('DIAG grating t_ms={} eye={} pos={} cpd={} orient={} seen={} rq={} rq_set={} fov={} {}'
+                'temporal_deg=0.0 up_deg=1.0 size_deg=1.5\n').format(t, eye, pos, cpd, orient, seen, rq, rq, fov, extra)
+
     def test_grating_finest_seen_per_quality_and_foveation(self):
         lines = 'DIAG grating t_ms=1 chart=on mode="Both eyes" foveation=on\n'
-        for rq in ('0.500', '1.000'):
-            for cpd in (10, 15, 20, 25, 30, 35):
-                seen = 'yes' if cpd <= (15 if rq == '0.500' else 25) else 'no'
-                lines += ('DIAG grating t_ms=2 eye=both pos=axis cpd={} orient=V seen={} rq={} rq_set={} fov=on '
-                          'temporal_deg=0.0 up_deg=1.0 size_deg=1.5\n').format(cpd, seen, rq, rq)
+        for rq, nyquist in (('0.500', 15.0), ('1.000', 20.0)):
+            for cpd in (8, 10, 12, 14, 17, 20):
+                seen = 'yes' if cpd <= (12 if rq == '0.500' else 14) else 'no'
+                lines += self.grating_line(cpd, seen, rq, nyquist=nyquist)
         # A redo of the same patch replaces the earlier judgment.
-        lines += ('DIAG grating t_ms=3 eye=both pos=axis cpd=30 orient=V seen=yes rq=1.000 rq_set=1.000 fov=on '
-                  'temporal_deg=0.0 up_deg=1.0 size_deg=1.5\n')
-        lines += ('DIAG grating t_ms=4 eye=both pos=temporal20 cpd=10 orient=H seen=no rq=1.000 rq_set=1.000 fov=off '
-                  'temporal_deg=15.0 up_deg=-1.5 size_deg=1.5\n')
+        lines += self.grating_line(17, 'yes', '1.000', nyquist=20.0, t=3)
+        lines += self.grating_line(8, 'no', '1.000', pos='temporal20', orient='H', fov='off', nyquist=22.6, t=4)
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / 'diag-a.log').write_text(lines)
             records, _, _ = report.read_logs(Path(directory))
             rows = report.grating_rows(records)
         key = {(r['rq'], r['fov'], r['pos'], r['orient']): r for r in rows}
-        self.assertEqual(key[('0.500', 'on', 'axis', 'V')]['finest_seen_cpd'], 15)
-        self.assertEqual(key[('1.000', 'on', 'axis', 'V')]['finest_seen_cpd'], 30)
+        self.assertEqual(key[('0.500', 'on', 'axis', 'V')]['finest_seen_cpd'], 12)
+        self.assertEqual(key[('1.000', 'on', 'axis', 'V')]['finest_seen_cpd'], 17)
         self.assertEqual(key[('1.000', 'on', 'axis', 'V')]['judged'], 6)
+        self.assertEqual(key[('1.000', 'on', 'axis', 'V')]['nyquist_logical_cpd'], '20.00')
         self.assertIsNone(key[('1.000', 'off', 'temporal20', 'H')]['finest_seen_cpd'])
         out = self.render(lines)
-        self.assertIn('| both | 1.000 | on | axis | V | 30 |', out)
+        self.assertIn('| both | 1.000 | on | axis | V | 17 |', out)
         self.assertIn('| both | 1.000 | off | temporal20 | H | no data |', out)
+
+    def test_grating_above_nyquist_listed_separately_never_finest(self):
+        lines = 'DIAG grating t_ms=1 chart=on mode="Both eyes" foveation=on\n'
+        for cpd in (8, 10, 12, 14, 17, 20):
+            lines += self.grating_line(cpd, 'yes', '0.500', nyquist=15.0)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'diag-a.log').write_text(lines)
+            records, _, _ = report.read_logs(Path(directory))
+            rows = report.grating_rows(records)
+            above = report.grating_above_nyquist(records)
+        self.assertEqual(rows[0]['finest_seen_cpd'], 14)
+        self.assertEqual(rows[0]['judged'], 4)
+        self.assertEqual(rows[0]['above_nyquist_cpd'], '17,20')
+        self.assertEqual([(a['cpd'], a['seen']) for a in above], [(17, 'yes'), (20, 'yes')])
+        self.assertEqual(above[0]['nyquist_logical_cpd'], '15.00')
+        out = self.render(lines)
+        self.assertIn('Above the logical Nyquist', out)
+        self.assertIn('| both | 0.500 | on | axis | V | 17 | yes | 15.00 |', out)
+
+    def test_grating_physical_nyquist_and_limit_classification(self):
+        # Rate map at 1.0 / fov on: h_ppd 40 on axis, 30 at -20 (left temporal), 36 at +20; v_ppd 34 on axis.
+        def rrm(t, rq, fov, h0=40, hl=30, hr=36, v0=34, eye='L'):
+            return ('DIAG rrm t_ms={} phase=quality s=0 fix=none fix_x_deg=0 fix_y_deg=0 eye={} drawable=0 view=0 layer=0 '
+                    'rq={} fov={} map=ok screen=6261x5023 physical=2432x2368 viewport=0,0,6261,5023 '
+                    'h_rate=0:1 h_ppd=-20:{:.2f},0:{:.2f},20:{:.2f} v_rate=0:1 v_ppd=0:{:.2f} '
+                    'h_peak_deg=0.0 v_peak_deg=0.0 map_hash=a\n').format(t, eye, rq, fov, hl, h0, hr, v0)
+        lines = 'DIAG grating t_ms=1 chart=on mode="Both eyes" foveation=on\n'
+        lines += rrm(5, '1.000', 'on', h0=20)       # older sample, superseded by the nearer one
+        lines += rrm(100, '1.000', 'on')
+        lines += rrm(110, '1.000', 'on', h0=30, hl=20, eye='R')   # right eye: not used for eye=both / L
+        lines += rrm(120, '0.500', 'on', h0=24, hl=16, v0=24)
+        judged = {('1.000', 'axis', 'V'): 17,      # phys 20 -> 17 = 20 - one step: render-grid limited
+                  ('1.000', 'axis', 'H'): 12,      # phys 17 -> needs 14: lens/eye limited
+                  ('1.000', 'temporal20', 'V'): 14,  # phys 15 (h_ppd -20 = 30) -> needs 12: render-grid limited
+                  ('1.000', 'temporal20', 'H'): 14,  # phys 34/cos20/2 = 18.09 -> needs 14: render-grid limited
+                  ('0.500', 'axis', 'V'): 8}       # phys 12 -> needs 10: lens/eye limited
+        for (rq, pos, orient), finest in judged.items():
+            for cpd in (8, 10, 12, 14, 17):
+                lines += self.grating_line(cpd, 'yes' if cpd <= finest else 'no', rq, pos=pos, orient=orient,
+                                           nyquist=20.0 if rq == '1.000' else 15.0, t=200)
+        lines += self.grating_line(8, 'yes', '0.750', nyquist=17.5, t=300)   # no rate map at 0.75: undetermined
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'diag-a.log').write_text(lines)
+            records, _, _ = report.read_logs(Path(directory))
+            rows = report.grating_rows(records)
+        key = {(r['rq'], r['pos'], r['orient']): r for r in rows}
+        self.assertEqual(key[('1.000', 'axis', 'V')]['nyquist_physical_cpd'], '20.00')
+        self.assertEqual(key[('1.000', 'axis', 'H')]['nyquist_physical_cpd'], '17.00')
+        self.assertEqual(key[('1.000', 'temporal20', 'V')]['nyquist_physical_cpd'], '15.00')
+        self.assertEqual(key[('1.000', 'temporal20', 'H')]['nyquist_physical_cpd'], '18.09')
+        self.assertEqual(key[('0.500', 'axis', 'V')]['nyquist_physical_cpd'], '12.00')
+        self.assertEqual(key[('1.000', 'axis', 'V')]['limit'], 'render-grid limited')
+        self.assertEqual(key[('1.000', 'axis', 'H')]['limit'], 'lens/eye limited')
+        self.assertEqual(key[('1.000', 'temporal20', 'V')]['limit'], 'render-grid limited')
+        self.assertEqual(key[('1.000', 'temporal20', 'H')]['limit'], 'render-grid limited')
+        self.assertEqual(key[('0.500', 'axis', 'V')]['limit'], 'lens/eye limited')
+        self.assertIsNone(key[('0.750', 'axis', 'V')]['nyquist_physical_cpd'])
+        self.assertEqual(key[('0.750', 'axis', 'V')]['limit'], 'undetermined')
+        # Right-eye judgments read the right eye's map, temporal = +20.
+        right = self.grating_line(14, 'yes', '1.000', pos='temporal20', eye='R', nyquist=22.6, t=200)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'diag-a.log').write_text(lines + right)
+            records, _, _ = report.read_logs(Path(directory))
+            r = [r for r in report.grating_rows(records) if r['eye'] == 'R'][0]
+        self.assertEqual(r['nyquist_physical_cpd'], '18.00')
+        out = self.render(lines)
+        self.assertIn('| both | 1.000 | on | axis | V | 17 | 20.00 | 20.00 | render-grid limited |', out)
 
     def test_no_inference_across_sessions_or_bad_sender_alignment(self):
         lines = ('DIAG edr t_ms=1 step=1 value=2 layout=10% hold_s=60\n'

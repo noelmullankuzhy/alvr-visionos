@@ -129,10 +129,16 @@ enum RateMapSampling {
     }
 }
 
+// Which immersive space a layer configuration is for.
+enum LayerEntry { case diagnostics, stream, other }
+
 enum GratingChart {
-    static let cyclesPerDegree = [10, 15, 20, 25, 30, 35]
+    // Up to 20 cpd, the on-axis logical Nyquist at render quality 1.0 (40 logical px/deg); finer cannot be drawn.
+    static let cyclesPerDegree = [8, 10, 12, 14, 17, 20]
+    // Patch column per cpd level, degrees temporal from its set's position: coarsest there, finer alternating outward.
+    static let columnDeg = [0.0, 2, -2, 4, -4, 6]
     static let qualities: [Float] = [0.5, 0.75, 1.0]
-    static let patchDeg = 1.5, pitchDeg = 2.0, labelDeg = 0.4, labelGapDeg = 0.05
+    static let patchDeg = 1.5, labelDeg = 0.4, labelGapDeg = 0.05
     static let statusDeg = 0.5, statusUpDeg = -4.0, dotDeg = 0.5, frameDeg = 0.08, frameGapDeg = 0.12
 
     enum Orientation: String { case vertical = "V", horizontal = "H" }
@@ -150,13 +156,13 @@ enum GratingChart {
         let temporalDeg, upDeg: Double
     }
 
-    // Walk order: axis set then temporal set; per set vertical bars then horizontal; cpd ascending (left to right
-    // on the chart, i.e. towards temporal for the axis set as well).
+    // Walk order: axis set then temporal set; per set vertical bars then horizontal; cpd ascending, i.e. outward
+    // from the set's position (columnDeg).
     static let patches: [Patch] = [Position.axis, .temporal20].flatMap { pos in
         [Orientation.vertical, .horizontal].flatMap { o in
             cyclesPerDegree.enumerated().map { i, cpd in
                 Patch(position: pos, cpd: cpd, orientation: o,
-                      temporalDeg: pos.temporalDeg + (Double(i) - Double(cyclesPerDegree.count - 1) / 2) * pitchDeg,
+                      temporalDeg: pos.temporalDeg + columnDeg[i],
                       upDeg: o == .vertical ? 1.0 : -1.5)
             }
         }
@@ -245,16 +251,32 @@ enum GratingChart {
         return out
     }
 
-    static func fields(eye: String, patch p: Patch, seen: Bool, requested: Float, actual: Float?, foveation: Bool) -> KeyValuePairs<String, Any> {
+    // Logical Nyquist (half the logical px/deg across the bars) at the patch centre, from the view tangents and the
+    // logical screen size. V bars: horizontal ppd = k.x sec^2(az); H bars: vertical ppd = k.y sec^2(el) / cos(az) (Fick).
+    static func nyquistLogical(_ t: CornerTangents, width: Double, height: Double, eye: CornerEye, patch p: Patch) -> Double {
+        let k = RateMapSampling.pxPerTan(t, width: width, height: height), c = screen(patchRect(p), eye: eye)
+        let az = (c.t0 + c.t1) / 2 * Double.pi / 180, el = (c.u0 + c.u1) / 2 * Double.pi / 180
+        let ppd = p.orientation == .vertical ? k.x / (cos(az) * cos(az)) : k.y / (cos(el) * cos(el) * cos(az))
+        return ppd * Double.pi / 180 / 2
+    }
+
+    // Above Nyquist the bars alias on the render grid; 0.1 % slack keeps 20 cpd at the 4-digit tangents' 19.998.
+    static func aboveNyquist(cpd: Int, nyquist: Double) -> Bool { Double(cpd) > nyquist * 1.001 }
+
+    static func fields(eye: String, patch p: Patch, seen: Bool, requested: Float, actual: Float?, foveation: Bool,
+                       nyquist: Double?) -> KeyValuePairs<String, Any> {
         ["eye": eye, "pos": p.position.rawValue, "cpd": p.cpd, "orient": p.orientation.rawValue, "seen": seen ? "yes" : "no",
          "rq": actual.map { String(format: "%.3f", $0) } ?? "unavailable", "rq_set": String(format: "%.3f", requested),
-         "fov": foveation ? "on" : "off", "temporal_deg": String(format: "%.1f", p.temporalDeg),
+         "fov": foveation ? "on" : "off", "nyquist_logical_cpd": nyquist.map { String(format: "%.2f", $0) } ?? "unavailable",
+         "above_nyquist": nyquist.map { aboveNyquist(cpd: p.cpd, nyquist: $0) ? "yes" : "no" } ?? "unknown",
+         "temporal_deg": String(format: "%.1f", p.temporalDeg),
          "up_deg": String(format: "%.1f", p.upDeg), "size_deg": String(format: "%.1f", patchDeg)]
     }
 
-    // The layer configuration drops foveation only for this diagnostic, when chosen; otherwise production's choice.
-    static func foveationDisabled(diagnostics: Bool, chart: String, foveation: Bool) -> Bool {
-        diagnostics && CornerChartMode(setting: chart) != .off && !foveation
+    // The layer configuration drops foveation only for this diagnostic, when chosen, in the offline diagnostics space
+    // with no stream connected; every other entry keeps production's choice.
+    static func foveationDisabled(diagnostics: Bool, chart: String, foveation: Bool, entry: LayerEntry, connected: Bool) -> Bool {
+        diagnostics && CornerChartMode(setting: chart) != .off && !foveation && entry == .diagnostics && !connected
     }
 }
 

@@ -776,11 +776,22 @@ stream. Code: `ALVRClient/Diagnostics/ResolutionChart.swift` (math, tested by
 2. **Enter diagnostics** (Metal). Keep the head still. For 20 s a white 0.5° dot
    steps centre → 20° left → 20° right → 15° up → 15° down, 4 s each: follow it
    with the eyes only. Each view logs one `rrm` line per second (20 per eye).
-3. The grating chart appears, head-locked: two sets of 1.5° patches, one centred
-   on the eye axis and one 20° temporal. Top row vertical bars, bottom row
-   horizontal; 10, 15, 20, 25, 30, 35 cycles/deg left to right (towards temporal),
-   each labelled. The status under the axis set shows render quality and patch
-   number (`0.50 1-24`). A yellow frame marks the current patch; the walk starts at
+3. The grating chart appears, head-locked: two sets of 1.5° patches, one at the
+   eye axis and one at 20° temporal. Top row vertical bars (centre 1° up), bottom
+   row horizontal (centre 1.5° down); 8, 10, 12, 14, 17, 20 cycles/deg, each
+   labelled. 20 cpd is the logical Nyquist on axis at quality 1.0 (40 logical
+   px/deg), so finer levels cannot be drawn. The coarsest patch sits at the set's
+   position and finer ones alternate outward, temporal first. Patch centres, in
+   degrees temporal from the eye axis (`temporal_deg`, logged):
+
+   | cpd | 8 | 10 | 12 | 14 | 17 | 20 |
+   |---|---|---|---|---|---|---|
+   | axis set | 0 | +2 | −2 | +4 | −4 | +6 |
+   | temporal20 set | 20 | 22 | 18 | 24 | 16 | 26 |
+
+   Temporal is screen left for the left eye and screen right for the right eye.
+   The status under the axis set shows render quality and patch number
+   (`0.50 1-24`). A yellow frame marks the current patch; the walk starts at
    render quality **0.5**.
 4. Look at the framed patch. **Hold the right pinch (>= 0.5 s)** if you can see the
    bars (any orientation-correct stripes, not moiré or a grey field), **hold the
@@ -809,8 +820,9 @@ DIAG rrm phase=sweep|quality s=0..19 fix=centre|left20|right20|up15|down15|none 
          h_rate=-40:r,...,40:r h_ppd=-40:p,... v_rate=... v_ppd=... h_peak_deg v_peak_deg map_hash
 DIAG grating chart=on mode=.. foveation=on|off foveation_setting=on|off
 DIAG grating walk=start quality=0.500 restore=..  |  quality=0.750  |  chart=done restore=..
-DIAG grating eye=both|L|R pos=axis|temporal20 cpd=10..35 orient=V|H seen=yes|no rq=<read back>
-         rq_set=<requested> fov=on|off temporal_deg up_deg size_deg=1.5
+DIAG grating eye=both|L|R pos=axis|temporal20 cpd=8|10|12|14|17|20 orient=V|H seen=yes|no
+         rq=<read back>|unavailable rq_set=<requested> fov=on|off nyquist_logical_cpd=<x.xx>|unavailable
+         above_nyquist=yes|no|unknown temporal_deg up_deg size_deg=1.5
 ```
 
 `*_rate` is physical px per logical px (central difference of
@@ -824,11 +836,35 @@ unchanged hash means an unchanged map. Patch positions and sizes are true angles
 pixels; bars are drawn as geometry through the rate map, so they render (and alias)
 exactly as any app content would. The finest-cpd result is one wearer, one fit.
 
+`nyquist_logical_cpd` is half the logical px/deg across the bars at the patch centre,
+from the latest frame's tangents and logical viewport (both eyes: the left one).
+V bars use the horizontal density k_x·sec²(az)·π/180; H bars use the vertical
+density k_y·sec²(el)/cos(az)·π/180. On axis it is 15.0 / 17.5 / 20.0 at quality
+0.5 / 0.75 / 1.0. A patch above it (`above_nyquist=yes`, 0.1 % slack) is still
+shown and judged, but its bars alias on the render grid. The report lists those
+judgments apart and never counts them as seen.
+
+Render-grid or lens/eye limited: the report takes the physical Nyquist (half the
+rate-map px/deg) from the `rrm` sample nearest in time, in the same log, with the
+same eye (both: L), quality and foveation. V bars use `h_ppd` at 0° (axis), or at
+−20° (L) / +20° (R) for the temporal set. H bars use `v_ppd` at 0°; for the
+temporal set that is divided by cos 20°, because the rate map is separable and the
+logical vertical density grows by sec(az). The verdict compares the finest level
+seen with the level one step below the finest level the physical grid can carry:
+- `render-grid limited`: finest seen is at or above that level, so the rendered
+  pixels stop the wearer and more render resolution would show more.
+- `lens/eye limited`: finest seen is below it. The grid carries finer bars that
+  the optics or the eye do not pass.
+- `undetermined`: no matching rate-map sample, or nothing was seen.
+
 The report gives: a rendered px/deg profile per eye, quality and foveation (h and v
 rows, one column per angle); a gaze-follow verdict per eye and sweep (`fixed`: one
 map hash and peaks within 1°; `follows gaze`: peaks move ≥5° towards each
 fixation; otherwise `changes, not with gaze`); and the finest seen cpd per eye
-label, quality, foveation, position and orientation, with every judged level.
+label, quality, foveation, position and orientation, with every judged level,
+both Nyquists (`nyquist_logical_cpd`: lowest logged in the set;
+`nyquist_physical_cpd`) and the limit verdict; then the above-Nyquist judgments
+in a separate table.
 
 Limits: selection is by stepping, not gaze, so the tested patch is the framed one;
 look at it. Both eyes labels a binocular judgment. Starting a stream replaces the

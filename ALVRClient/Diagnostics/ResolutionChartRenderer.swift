@@ -80,8 +80,14 @@ final class ResolutionChartRenderer {
         for event in session.apply(action) {
             switch event {
             case let .judged(index, seen, quality):
-                Diag.log("grating", GratingChart.fields(eye: session.eyeLabel, patch: GratingChart.patches[index], seen: seen,
-                                                        requested: quality, actual: lastActual, foveation: foveation))
+                // The latest frame's tangents and logical viewport for the judged eye (both eyes: the left one).
+                let patch = GratingChart.patches[index]
+                let eye: CornerEye = session.eyeLabel == "R" ? .right : .left
+                let nyquist = lastViews.first { $0.eye == eye }.map {
+                    GratingChart.nyquistLogical($0.t, width: $0.width, height: $0.height, eye: eye, patch: patch)
+                }
+                Diag.log("grating", GratingChart.fields(eye: session.eyeLabel, patch: patch, seen: seen, requested: quality,
+                                                        actual: lastActual, foveation: foveation, nyquist: nyquist))
             case let .quality(q):
                 pendingQuality = q
                 Diag.log("grating", ["quality": String(format: "%.3f", q)])
@@ -93,6 +99,7 @@ final class ResolutionChartRenderer {
     }
 
     private var lastActual: Float?
+    private var lastViews: [(eye: CornerEye, t: CornerTangents, width: Double, height: Double)] = []
 
     func spatialEvent(_ event: SpatialEventCollection.Event) {
         guard event.kind == .indirectPinch else { return }
@@ -230,6 +237,8 @@ final class ResolutionChartRenderer {
         for (v, view) in drawable.views.enumerated() {
             views.append((CornerEye(viewOffsetX: Double(view.transform.columns.3.x)), v, CornerTangents(simd: drawable.gimmeTangents(viewIndex: v))))
         }
+        lastViews = views.map { ($0.eye, $0.t, drawable.views[$0.view].textureMap.viewport.width,
+                                 drawable.views[$0.view].textureMap.viewport.height) }
         let key = "\(fixation?.name ?? "grating")|\(session.statusText)|\(views.map { "\($0.t)" })"
         if key != geometryKey {
             geometryKey = key

@@ -1219,6 +1219,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             }
             else if let resolutionChart, let layerRenderer, !renderingStreaming {
                 reprojectedFramesInARow = 0
+                // drawableIndex is only the rrm log's drawable= field. This loop has no index (the streaming calls above
+                // pass 0 too), so with several drawables per frame their samples all log drawable=0.
                 resolutionChart.encode(commandBuffer: commandBuffer, layer: layerRenderer, drawable: drawable, drawableIndex: 0,
                                        viewports: viewports, rasterizationRateMap: rasterizationRateMap)
             }
