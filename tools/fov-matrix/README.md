@@ -64,8 +64,10 @@ temple_mtf50_cpd, up_mtf50_cpd, down_mtf50_cpd, display_ceiling_cpd. rdr2 mode s
 The `*_mtf50_cpd` columns are the stream's own sharpness: `stream_mtf.py` measures edge MTF50 on the angle chart's lines in
 the capture's expanded stage image (mean of the two eyes; `n/a` without a capture, `<x` an upper bound, `>x` above
 Nyquist). `display_ceiling_cpd` is the W33 client-drawn chart's ceiling from `avp-field.json` (`w33_ceiling_cpd`). See
-docs/lumen/sharpness-chain.md "Stream MTF50 vs display ceiling". A row with a capture takes about 35 s more (pure Python
-PNG decode). Per edge, with the curves: `python3 tools/fov-matrix/stream_mtf.py POINT_DIR --curves out.tsv`.
+docs/lumen/sharpness-chain.md "Stream MTF50 vs display ceiling". When the ±15 deg lines are not where
+dump/meta.json's tangents put them, every MTF column is n/a and notes reads `mtf: meta scale mismatch`. The first row
+with a capture takes about 35 s more (pure Python PNG decode). The result is then cached in `capture/mtf.json`, keyed by
+the inputs' size and mtime. Per edge, with the curves: `python3 tools/fov-matrix/stream_mtf.py POINT_DIR --curves out.tsv`.
 
 ## Streaming capture trace
 

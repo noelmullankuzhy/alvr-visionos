@@ -118,13 +118,21 @@ How to read it against the ceiling:
 | a100-centred | 6.7 | 7.1 | 7.1 | 6.7 | 6.7 | 17 |
 | a100-wider | 6.6 | 7.1 | 7.2 | 6.6 | 6.6 | 17 |
 | a085-asrun | 7.9 | 8.4 | 8.4 | 7.9 | 7.9 | 17 |
-| a085-centred | 6.7* | n/a* | n/a* | 6.9* | 6.9* | 17 |
+| a085-centred | n/a* | n/a* | n/a* | n/a* | n/a* | 17 |
 | a085-wider | 7.1 | 7.6 | 7.7 | 7.1 | 7.1 | 17 |
 | a070-asrun | 9.6 | <6.1 | 10.2 | 9.6 | 9.6 | 17 |
 | a070-centred | 9.6 | 10.3 | 10.2 | 9.6 | 9.6 | 17 |
 
-\* a085-centred's `dump/meta.json` holds the 1.0 tangents, but its chart was drawn at 0.85: the 15 deg line is not at the
-1.0 column. The row is therefore read on the wrong grid. At 0.85 px/deg its centre would read about 7.9, like a085-asrun.
+\* a085-centred's `dump/meta.json` holds the 1.0 tangents, but its chart was drawn at 0.85, so the 15 deg line is not at
+the 1.0 column.
+- `stream_mtf.scale_mismatch` checks for this on every eye. It requires both ±15 deg lines within 2 px of where the meta
+  tangents put them.
+- The 0 deg column does not move with scale, so without that check the row reads a plausible but wrong 6.7.
+- On a mismatch, every MTF column is n/a and notes reads `mtf: meta scale mismatch`.
+- On the right grid, its centre would read about 7.9, like a085-asrun.
+
+Each point's result is cached in `capture/mtf.json`, keyed by the size and mtime of capture.json, meta.json and the
+expanded PNGs. A summary rerun therefore skips the ~35 s decode.
 
 Findings:
 - In cycles/px, every edge reads about 0.25 or 0.32. Those are a two-pixel and a one-pixel transition.

@@ -295,13 +295,16 @@ def _stream_mtf():
 
 
 def mtf_columns(point_dir):
-    """{column: text}: the stream's edge MTF50 per position (stream_mtf.py, capture expanded stage; n/a without it) and
-    the W33 display ceiling from avp-field.json."""
+    """{column: text}: the stream's edge MTF50 per position (stream_mtf.py, capture expanded stage; n/a without it, or
+    n/a and a 'notes' reason when meta.json's tangents are not the scale the chart was drawn at) and the W33 display
+    ceiling from avp-field.json."""
     out = {'%s_mtf50_cpd' % p: NA for p in MTF_POSITIONS}
     try:
         sm = _stream_mtf()
-        res = sm.measure_point(point_dir)
-        out.update({'%s_mtf50_cpd' % p: sm.combine(res, p) for p in MTF_POSITIONS})
+        point = sm.measure_point(point_dir)
+        out.update({'%s_mtf50_cpd' % p: sm.combine(point['eyes'], p) for p in MTF_POSITIONS})
+        if point['mismatch']:
+            out['notes'] = 'mtf: ' + point['mismatch']
     except (OSError, ValueError, KeyError, IndexError, TypeError):
         pass
     try:

@@ -47,7 +47,11 @@ MIN_CONTRAST = 0.1          # line plateau over background, linear luminance
 LINE_LUM = 0.7152           # the chart's vertical lines, sRGB (0, 255, 0): linear luminance
 PLATEAU_TOL = 0.01          # samples this close to the line's maximum (fraction of contrast) are its top
 TRUNCATED_FRACTION = 0.02   # line top short of LINE_LUM by more than this fraction of the contrast: the edges overlap
-F_STEP = 0.005              # cycles/px, the MTF50 search grid
+SCALE_SEARCH_PX = 40        # the +-15 deg lines are looked for this far either side of their predicted column
+SCALE_TOL_PX = 2            # ... and must sit this close to it, else meta.json's tangents are not the drawn scale
+CACHE_FILE = 'mtf.json'     # per point, next to capture.json
+CACHE_VERSION = 2           # bump when the method changes: older caches are measured again
+F_STEP = 0.005             # cycles/px, the MTF50 search grid
 CURVE_STEP = 0.025          # cycles/px, the written curves
 
 
@@ -192,8 +196,38 @@ def measure_eye(grid, image, eye):
     return {pos: measure_edge(grid, image, nose * sign * a if nose else a, e0) for pos, a, nose, e0 in POSITIONS}
 
 
-def load_point(point_dir):
-    """[(eye, Grid, PngImage)] for every expanded stage in point_dir/capture with the dump's meta.json; [] when absent."""
+def line_centre(grid, image, a, search_px=SCALE_SEARCH_PX):
+    """Column of the vertical line nearest grid.col(a) within +- search_px (rows around e = 0), on the col() pixel-centre
+    scale; None when there is no line there."""
+    w = line_width_px(a)
+    c = grid.col(a)
+    xs = list(range(int(math.floor(c)) - search_px, int(math.ceil(c)) + search_px + 1))
+    rows = [y for y in sample_rows(grid, image, 0) if image.contains(xs[0], y) and image.contains(xs[-1], y)]
+    if len(rows) < 8:
+        return None
+    prof = profile(image, xs, rows)
+    d = [prof[i + 1] - prof[i] for i in range(len(prof) - 1)]
+    rise = max(range(len(d)), key=lambda i: d[i])
+    fall = min(range(len(d)), key=lambda i: d[i])
+    if not 0 < fall - rise <= w + 3 or max(prof[rise + 1:fall + 1]) - _base(prof) < MIN_CONTRAST:
+        return None
+    return xs[0] + (rise + 1 + fall) / 2            # first and last line pixel: rise + 1, fall
+
+
+def scale_mismatch(grid, image):
+    """None when the +-15 deg lines sit within SCALE_TOL_PX of where the grid's tangents put them, else the reason.
+    The 0 deg column does not move with the fov scale, so a meta.json with the wrong scale still finds the centre line
+    and would give a plausible but wrong px/deg: this check is what catches it (the row skip around the crossings uses
+    the same grid, so it is only right once this passes)."""
+    for a in (15, -15):
+        x = line_centre(grid, image, a)
+        if x is None or abs(x - grid.col(a)) > SCALE_TOL_PX:
+            return 'meta scale mismatch'
+    return None
+
+
+def _point_files(point_dir):
+    """(cap_dir, meta, [expanded stage entries]) or None when the capture or the dump's meta.json is absent."""
     cap_dir = os.path.join(point_dir, 'capture')
     try:
         with open(os.path.join(cap_dir, 'capture.json')) as f:
@@ -201,11 +235,19 @@ def load_point(point_dir):
         with open(os.path.join(point_dir, 'dump', 'meta.json')) as f:
             meta = json.load(f)
     except (OSError, ValueError):
+        return None
+    stages = [st for st in cap.get('stages') or [] if st.get('stage') == 'expanded' and st.get('eye') in ('L', 'R')]
+    return cap_dir, meta, stages
+
+
+def load_point(point_dir):
+    """[(eye, Grid, PngImage)] for every expanded stage in point_dir/capture with the dump's meta.json; [] when absent."""
+    files = _point_files(point_dir)
+    if files is None:
         return []
+    cap_dir, meta, stages = files
     out = []
-    for st in cap.get('stages') or []:
-        if st.get('stage') != 'expanded' or st.get('eye') not in ('L', 'R'):
-            continue
+    for st in stages:
         eye = st['eye']
         tangents = meta['tangents'][0 if eye == 'L' else 1]
         w, h, pix = fo.read_stage_png(fo.Path(cap_dir) / st['png'], st.get('encoding', 'srgb'))
@@ -213,9 +255,53 @@ def load_point(point_dir):
     return out
 
 
+def _cache_key(point_dir):
+    """{file: [size, mtime_ns]} of every input (capture.json, meta.json, the expanded PNGs), or None."""
+    files = _point_files(point_dir)
+    if files is None:
+        return None
+    cap_dir, _, stages = files
+    paths = [os.path.join(cap_dir, 'capture.json'), os.path.join(point_dir, 'dump', 'meta.json')]
+    paths += [os.path.join(cap_dir, st['png']) for st in stages]
+    key = {}
+    for p in paths:
+        try:
+            s = os.stat(p)
+        except OSError:
+            return None
+        key[os.path.relpath(p, point_dir)] = [s.st_size, s.st_mtime_ns]
+    return {'method': CACHE_VERSION, 'files': key}
+
+
 def measure_point(point_dir):
-    """{eye: {position: result}}."""
-    return {eye: measure_eye(grid, image, eye) for eye, grid, image in load_point(point_dir)}
+    """{'eyes': {eye: {position: result}} ({} on a meta scale mismatch), 'mismatch': reason or None}. Cached as
+    capture/mtf.json, keyed by the inputs' size and mtime (a summary rerun skips the ~35 s PNG decode)."""
+    cache = os.path.join(point_dir, 'capture', CACHE_FILE)
+    key = _cache_key(point_dir)
+    if key is not None:
+        try:
+            with open(cache) as f:
+                c = json.load(f)
+            if c.get('key') == key:
+                return {'eyes': c['eyes'], 'mismatch': c['mismatch']}
+        except (OSError, ValueError, KeyError, AttributeError):
+            pass
+    eyes, mismatch = {}, None
+    for eye, grid, image in load_point(point_dir):
+        mismatch = scale_mismatch(grid, image)
+        if mismatch:
+            eyes = {}
+            break
+        eyes[eye] = measure_eye(grid, image, eye)
+    out = {'eyes': eyes, 'mismatch': mismatch}
+    if key is not None:
+        try:
+            with open(cache, 'w') as f:
+                json.dump(dict(out, key=key), f)
+                f.write('\n')
+        except OSError:
+            pass
+    return out
 
 
 def combine(results, position):
@@ -251,7 +337,11 @@ def main(argv=None):
     p.add_argument('--curves', help='append the MTF curves to this tsv (header written when new)')
     a = p.parse_args(argv)
     name = a.name or os.path.basename(os.path.normpath(a.point_dir))
-    res = measure_point(a.point_dir)
+    point = measure_point(a.point_dir)
+    if point['mismatch']:
+        print('%s: mtf: %s (the +-15 deg lines are not where dump/meta.json tangents put them)' % (name, point['mismatch']))
+        return 3
+    res = point['eyes']
     if not res:
         print('%s: no expanded stage capture or no dump/meta.json' % name)
         return 2

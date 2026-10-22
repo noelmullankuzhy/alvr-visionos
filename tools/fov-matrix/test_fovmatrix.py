@@ -742,23 +742,67 @@ class StreamMtfTest(unittest.TestCase):
         self.assertTrue(5 < r['cpd'] < r['nyquist_cpd'], r['cpd'])
         self.assertLess(os.path.getsize(os.path.join(FIXTURES, 'mtf-a100-asrun-L-centre.png')), 200 * 1024)
 
-    def test_point_dir_row(self):
-        # a small point: expanded stage for L (lines at 0 and +-15 deg, Gaussian sigma 0.7 px) + dump meta.json
-        tang, n, sigma = (-1.0, 1.0, -1.0, 1.0), 1200, 0.7
-        g = SM.Grid(tang, n, n)
-        img = SynthLines(g, [0, 15, -15], sigma)
+    TANG, N, SIGMA = (-1.0, 1.0, -1.0, 1.0), 1200, 0.7
+
+    def write_point(self, d, meta_scale=1.0):
+        """A small point: expanded stage for L drawn on TANG (lines at 0 and +-15 deg, Gaussian SIGMA px) + dump
+        meta.json with TANG x meta_scale."""
+        n = self.N
+        img = SynthLines(SM.Grid(self.TANG, n, n), [0, 15, -15], self.SIGMA)
         # grey pixels: the luminance is the linear value itself; lines are vertical, so one row repeats
         line = b''.join(bytes((srgb8(img.lum(x, 0)),) * 3 + (255,)) for x in range(n))
-        pix = line * n
+        os.makedirs(os.path.join(d, 'capture'))
+        os.makedirs(os.path.join(d, 'dump'))
+        SM.fo.vc.write_png(os.path.join(d, 'capture', 'stage-expanded-L.png'), n, n, bytes(line * n))
+        wj(os.path.join(d, 'capture', 'capture.json'), {'stages': [
+            {'stage': 'decoded', 'eye': 'L', 'png': 'missing.png', 'encoding': 'srgb'},
+            {'stage': 'expanded', 'eye': 'L', 'png': 'stage-expanded-L.png', 'encoding': 'srgb'}]})
+        tang = [t * meta_scale for t in self.TANG]
+        wj(os.path.join(d, 'dump', 'meta.json'), {'tangents': [tang, tang], 'renderEyeSize': [n, n]})
+
+    def test_scale_check_finds_the_15_deg_lines(self):
+        g = SM.Grid(self.TANG, self.N, self.N)
+        img = SynthLines(g, [0, 15, -15], self.SIGMA)
+        self.assertIsNone(SM.scale_mismatch(g, img))
+        # the same image read with the tangents of fov scale 0.85: the 15 deg lines sit ~28 px from the predicted column
+        g85 = SM.Grid([t * 0.85 for t in self.TANG], self.N, self.N)
+        self.assertEqual(SM.scale_mismatch(g85, img), 'meta scale mismatch')
+        # no 15 deg line at all (a085-centred 22 Oct: drawn at 0.85, meta 1.0, nothing within the search window)
+        self.assertEqual(SM.scale_mismatch(g, SynthLines(g, [0], self.SIGMA)), 'meta scale mismatch')
+
+    def test_meta_scale_mismatch_is_na_with_a_note(self):
         with tempfile.TemporaryDirectory() as d:
-            os.makedirs(os.path.join(d, 'capture'))
-            os.makedirs(os.path.join(d, 'dump'))
-            SM.fo.vc.write_png(os.path.join(d, 'capture', 'stage-expanded-L.png'), n, n, bytes(pix))
-            wj(os.path.join(d, 'capture', 'capture.json'), {'stages': [
-                {'stage': 'decoded', 'eye': 'L', 'png': 'missing.png', 'encoding': 'srgb'},
-                {'stage': 'expanded', 'eye': 'L', 'png': 'stage-expanded-L.png', 'encoding': 'srgb'}]})
-            wj(os.path.join(d, 'dump', 'meta.json'), {'tangents': [list(tang), list(tang)], 'renderEyeSize': [n, n]})
+            self.write_point(d, meta_scale=0.85)
             r = dict(zip(fm.SUMMARY_COLUMNS, fm.summary_row('p', d).split('\t')))
+            for p in fm.MTF_POSITIONS:
+                self.assertEqual(r['%s_mtf50_cpd' % p], 'n/a', p)
+            self.assertEqual(r['notes'], 'mtf: meta scale mismatch')
+            self.assertEqual(r['display_ceiling_cpd'], '17')
+
+    def test_point_result_is_cached_by_file_size_and_mtime(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.write_point(d)
+            first = SM.measure_point(d)
+            self.assertTrue(os.path.exists(os.path.join(d, 'capture', 'mtf.json')))
+            real = SM.fo.read_stage_png
+            SM.fo.read_stage_png = lambda *a: self.fail('decoded again despite the cache')
+            try:
+                again = SM.measure_point(d)
+            finally:
+                SM.fo.read_stage_png = real
+            self.assertEqual(SM.combine(again['eyes'], 'centre'), SM.combine(first['eyes'], 'centre'))
+            # meta.json changed (size + mtime): measured again, so the scale check sees the new tangents
+            tang = [t * 0.85 for t in self.TANG]
+            wj(os.path.join(d, 'dump', 'meta.json'), {'tangents': [tang, tang], 'renderEyeSize': [self.N, self.N], 'x': 1})
+            self.assertEqual(SM.measure_point(d)['mismatch'], 'meta scale mismatch')
+
+    def test_point_dir_row(self):
+        tang, n, sigma = self.TANG, self.N, self.SIGMA
+        g = SM.Grid(tang, n, n)
+        with tempfile.TemporaryDirectory() as d:
+            self.write_point(d)
+            r = dict(zip(fm.SUMMARY_COLUMNS, fm.summary_row('p', d).split('\t')))
+            self.assertEqual(r['notes'], 'n/a')
             want = gauss_f50(sigma)
             for col, a in (('centre_mtf50_cpd', 0), ('nose_mtf50_cpd', 15), ('temple_mtf50_cpd', 15), ('up_mtf50_cpd', 0),
                            ('down_mtf50_cpd', 0)):
