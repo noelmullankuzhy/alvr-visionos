@@ -32,11 +32,16 @@ case "$2" in
     [ -f "$FAKE_DATA/Documents/diag/capture.request" ] && : > "$FAKE_DATA/leftover-seen"
     [ -n "${NOSTREAM:-}" ] || echo 'ALVRSTATS {"frames_decoded":5,"presented_fps":89.5,"decode_ms_mean":7.0}'
     d="$FAKE_PC/angle-chart/s-$$"; mkdir -p "$d"; : > "$d/chart_L.png"; : > "$d/encoder_input_L.png"; echo '{}' > "$d/meta.json"
-    # The streaming client takes a capture only on request: the runner writes Documents/diag/capture.request, the client deletes it.
+    # Live evidence (chart-matrix-20261022 m3): an idle start_timer capture lands first (stream gap) and must NOT be taken as the
+    # answer to the request. It sorts after the request capture on purpose (newest-name-wins pulling would take it).
+    mkdir -p "$FAKE_DATA/Documents/diag/captures/S-zidle-$$"
+    echo '{"trigger":{"reason":"start_timer"}}' > "$FAKE_DATA/Documents/diag/captures/S-zidle-$$/capture.json"
+    # The streaming client takes a capture only on request: the runner writes Documents/diag/capture.request, the client deletes it
+    # and the capture appears a second later (writing a capture takes seconds on the simulator).
     ( n=0; while [ ! -f "$FAKE_DATA/Documents/diag/capture.request" ] && [ $n -lt 300 ]; do /bin/sleep 0.2; n=$((n + 1)); done
       [ -f "$FAKE_DATA/Documents/diag/capture.request" ] || exit 0
-      rm -f "$FAKE_DATA/Documents/diag/capture.request"; mkdir -p "$FAKE_DATA/Documents/diag/captures/S-$$"
-      echo '{"trigger":{"reason":"request_file"}}' > "$FAKE_DATA/Documents/diag/captures/S-$$/capture.json" ) &
+      rm -f "$FAKE_DATA/Documents/diag/capture.request"; /bin/sleep 1; mkdir -p "$FAKE_DATA/Documents/diag/captures/S-req-$$"
+      echo '{"trigger":{"reason":"request_file"}}' > "$FAKE_DATA/Documents/diag/captures/S-req-$$/capture.json" ) &
     exec /bin/sleep 600 ;;
   io) for a in "$@"; do last=$a; done; : > "$last" ;;
 esac

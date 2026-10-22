@@ -29,13 +29,21 @@ or `off` (rdr2) -> `alvr-run2.py dashboard` + manual client IP -> client setting
 captureDiagnosticFrames) -> launch with `SIMCTL_CHILD_ALVR_DIAG=1` -> (rdr2: `hdr-game-run.sh start`) -> wait for decoded
 frames -> settle -> write `Documents/diag/capture.request` into the simulator app container (the streaming client takes it,
 deletes it and captures the drawables it is presenting; `trigger.reason` = `request_file` in capture.json) -> server stats
-probe (ws, as e4) while waiting up to 20 s (`--capture-timeout`) for a new capture dir -> pull capture dir, screenshot, server
+probe (ws, as e4) while waiting up to 45 s (`--capture-timeout`; writing a capture took ~10 s on the simulator) for a new capture dir -> pull capture dir, screenshot, server
 dump (tar over base64) -> `fov-overlay.py` drawable + render/encoded per dump PNG -> stats (encode ms/bitrate from
 GraphStatistics, client fps/decode from ALVRSTATS) -> restore. The trap (installed before the first PC change, armed before the backup runs, restore exactly once) restores on error/Ctrl-C/SIGTERM/SIGHUP. Every run tags its PC backup with a nonce (`session.orig.nonce`) and only restores a backup carrying its own nonce: a stale or foreign backup is left untouched (loud message, use `--restore`). The app's `capture.request` is cleared before each launch.
 Files per point: `sets.txt pc-*.sh/.log console.log events.jsonl stats.json screenshot.png capture/ dump/ overlay/ ERROR`.
 
 `summary.tsv`: name, verdict, median_deg, max_deg, extent_err_deg, centre_px_deg (measured/predicted), fps, bitrate_mbps,
 encode_ms, verdict_render, verdict_encoded, notes. rdr2 mode skips the overlay unless `--overlay` (no chart in the image).
+
+## Streaming capture trace
+
+The client logs one `DIAG capture_trigger step=...` line per step in `Documents/diag/diag-*.log`: `session_started` (poll timer
+running, directory polled), `request_seen` (file found and deleted), `waiting why=previous_capture_in_flight|no_stream_frame`,
+`request_taken` (reason, on which frame), `submitted`, `written` (or `skipped`); the existing `capture` line adds `reason`,
+`ms_gpu_done`, `ms_to_write`. The runner only accepts a capture whose `trigger.reason` is `request_file` or `after_ms`: an
+idle `start_timer` capture (e.g. taken while the simulator's stream dropped) is ignored.
 
 ## Simulator bitrate
 

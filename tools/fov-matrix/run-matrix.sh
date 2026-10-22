@@ -28,7 +28,7 @@ PCW=${PCW:-/mnt/c/Users/noelm/claude-tmp/fov-matrix}   # override only in the st
 TUNNEL_PORT=18082
 
 POINTS=; MODE=; OUT=; DRY=0; RESTORE_ONLY=0; STOP_ON_ERROR=0; FORCE_OVERLAY=0
-STREAM_TIMEOUT=150; CAPTURE_TIMEOUT=20; PROBE_SECONDS=30; SETTLE=
+STREAM_TIMEOUT=150; CAPTURE_TIMEOUT=45; PROBE_SECONDS=30; SETTLE=
 
 die() { echo "run-matrix: $*" >&2; exit 2; }
 while [ $# -gt 0 ]; do
@@ -123,10 +123,13 @@ wait_stream() {  # until the client log shows decoded frames
   return 1
 }
 
-new_capture() {  # newest capture dir (with capture.json) not listed in file $1; prints its name
+new_capture() {  # newest capture dir not listed in file $1 whose capture.json answers our request; prints its name
+  # Only trigger.reason request_file|after_ms counts: an idle start_timer/corner_mark capture (taken in a stream gap, e.g. the
+  # simulator dropping the stream) is not the streaming capture and its drawable shows no stream.
   r=
   for c in "$DATA"/Documents/diag/captures/*; do
     [ -f "$c/capture.json" ] || continue
+    grep -qE '"reason" *: *"(request_file|after_ms)"' "$c/capture.json" 2>/dev/null || continue
     b=$(basename "$c")
     grep -qxF "$b" "$1" 2>/dev/null || r=$b
   done
@@ -297,7 +300,7 @@ run_point() {
     latest=$(ls -t "$DATA"/Documents/diag/diag-*.log 2>/dev/null | head -1)
     [ -n "$latest" ] && cp "$latest" "$PD/"
   else
-    fail_soft "capture: no DiagFrameCapture appeared in ${CAPTURE_TIMEOUT}s after capture.request. Needs Diagnostics on (ALVR_DIAG=1 is set) and captureDiagnosticFrames (set); a client without streaming capture support ignores the request file. Screenshot kept: $PD/screenshot.png"
+    fail_soft "capture: no streaming DiagFrameCapture (trigger.reason request_file) appeared in ${CAPTURE_TIMEOUT}s after capture.request (idle start_timer captures are ignored; see the client Diag log for the capture_trigger steps). Needs Diagnostics on (ALVR_DIAG=1 is set) and captureDiagnosticFrames (set); a client without streaming capture support ignores the request file. Screenshot kept: $PD/screenshot.png"
   fi
 
   # 9. server chart dump (chart mode)
