@@ -138,6 +138,8 @@ class EventHandler: ObservableObject {
     var currentCodec: Int = -1
     var av1InstantiatedForReal = false
     var frameQueueLock = NSObject()
+    // -ALVRAsyncDecode YES: pipelined hardware decode, at most DecodeInFlight.limit frames in flight; nil decodes synchronously.
+    let asyncDecode: DecodeGate? = UserDefaults.standard.bool(forKey: DecodeInFlight.asyncDefaultsKey) ? DecodeGate() : nil
 
     var frameQueue = [QueuedFrame]()
     var frameQueueLastTimestamp: UInt64 = 0
@@ -264,6 +266,7 @@ class EventHandler: ObservableObject {
         StreamTelemetry.shared.streamingStopped()
         EyeDecodeWindows.shared.stop()
         streamingActive = false
+        finishAsyncDecode(vtDecompressionSession)
         vtDecompressionSession = nil
         videoFormat = nil
         lastRequestedTimestamp = 0
@@ -553,6 +556,17 @@ class EventHandler: ObservableObject {
     func resetEncoding() {
         needsEncoderReset = true
     }
+
+    // Before a session is dropped or replaced, so no asynchronous output handler runs against it afterwards.
+    // Not from a decoder output handler (it would wait on itself).
+    private func finishAsyncDecode(_ session: VTDecompressionSession?) {
+        guard let asyncDecode, let session else { return }
+        VTDecompressionSessionWaitForAsynchronousFrames(session)
+        let dropped = asyncDecode.drain()
+        if dropped > 0 {
+            print("Async decode: \(dropped) frames still in flight after the wait")
+        }
+    }
     
     // Poll for NALs and and, when decoded, add them to the frameQueue
     func handleNals(frameData: AlvrVideoFrameData) -> Bool {
@@ -633,6 +647,7 @@ class EventHandler: ObservableObject {
             print("Creating AV1 codec for real now.")
             let (attemptVtDecompressionSession, attemptVideoFormat) = VideoHandler.createVideoDecoder(initialNals: nal, codec: currentCodec)
             if attemptVtDecompressionSession != nil && attemptVideoFormat != nil {
+                finishAsyncDecode(vtDecompressionSession)
                 vtDecompressionSession = attemptVtDecompressionSession
                 videoFormat = attemptVideoFormat
                 av1InstantiatedForReal = true
@@ -644,7 +659,34 @@ class EventHandler: ObservableObject {
             // The stream this frame was decoded for: its colour state is derived from it, not from a later videoFormat.
             let frameVideoFormat = self.videoFormat!
             let frameStream = EventHandler.videoStreams.currentStream
-            VideoHandler.feedVideoIntoDecoder(decompressionSession: vtDecompressionSession, nals: nal, timestamp: timestamp, videoFormat: frameVideoFormat, codec: currentCodec) { [self] imageBuffer in
+            // -ALVRAsyncDecode: hold a slot (waits while DecodeInFlight.limit frames are in flight) and decode from a copy.
+            var slot: (token: UInt64, inFlight: Int)? = nil
+            var inputCopy: DecodeInputCopy? = nil
+            if let asyncDecode {
+                slot = asyncDecode.acquire(timestampNs: timestamp, timeout: 0.1)
+                guard let acquired = slot else {
+                    print("Async decode: no slot within 100 ms, dropping frame for an IDR")
+                    StreamTelemetry.shared.recordDroppedBeforeDecode()
+                    return false
+                }
+                StreamTelemetry.shared.recordDecodeInFlight(acquired.inFlight)
+                inputCopy = DecodeInputCopy(nal)
+            }
+            let submitted = VideoHandler.feedVideoIntoDecoder(decompressionSession: vtDecompressionSession, nals: inputCopy?.buffer ?? nal, timestamp: timestamp, videoFormat: frameVideoFormat, codec: currentCodec, asynchronous: asyncDecode != nil) { [self] imageBuffer in
+                // Every output, decoded or not, releases its slot; the overrun is measured from this frame's own submit.
+                var asyncFrame: DecodeInFlight.Frame? = nil
+                if let asyncDecode, let slot {
+                    withExtendedLifetime(inputCopy) {}
+                    switch asyncDecode.complete(slot.token) {
+                    case .inOrder(let frame):
+                        asyncFrame = frame
+                    case .outOfOrder(let frame):
+                        asyncFrame = frame
+                        print("Async decode: output out of submit order, timestamp \(frame.timestampNs)")
+                    case .unknown:
+                        break
+                    }
+                }
                 guard let imageBuffer = imageBuffer else {
                     //print("Frame not decoded")
                     return
@@ -654,10 +696,11 @@ class EventHandler: ObservableObject {
                 }
                 //print("Frame decoded")
                 
-                if (CACurrentMediaTime() - startedDecodeTime > Double(50*MSEC_PER_SEC)) {
+                let decodeSeconds = asyncFrame.map { Double(StreamTelemetry.nowNs() &- $0.submitNs) / 1e9 } ?? CACurrentMediaTime() - startedDecodeTime
+                if (decodeSeconds > Double(50*MSEC_PER_SEC)) {
                     objc_sync_enter(frameQueueLock)
 
-                    print("Handle decode overrun!", CACurrentMediaTime() - startedDecodeTime, framesSinceLastDecode, framesSinceLastIDR, ns_diff_from_last_req_ts)
+                    print("Handle decode overrun!", decodeSeconds, framesSinceLastDecode, framesSinceLastIDR, ns_diff_from_last_req_ts)
 
                     // We have to request an IDR to resume the video feed
                     resetEncoding()
@@ -718,6 +761,9 @@ class EventHandler: ObservableObject {
                 // After the lock: it takes its own lock and may write the once-a-second log line.
                 EyeDecodeWindows.shared.decoded(timestampNs: timestamp)
                 //print("End VT callback")
+            }
+            if !submitted, let asyncDecode, let slot {
+                asyncDecode.cancel(slot.token)
             }
         } else {
             StreamTelemetry.shared.recordDroppedBeforeDecode()

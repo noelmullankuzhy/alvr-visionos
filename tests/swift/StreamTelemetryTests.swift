@@ -154,7 +154,7 @@ private func testStatsJsonShape() {
         return
     }
     expect(!line.json.contains("\n"), "one line")
-    let keys = ["decode_errors", "dropped_before_decode", "dropped_decode_overrun", "dropped_queue_overflow",
+    let keys = ["decode_async", "decode_errors", "decode_in_flight_max", "decode_realtime", "dropped_before_decode", "dropped_decode_overrun", "dropped_queue_overflow",
                 "dropped_selection_skip", "frames_blank", "frames_decoded", "frames_dropped", "frames_presented",
                 "frames_received", "frames_repeated", "late_frames", "presented_fps", "render_loop_hz", "render_loops",
                 "repeats_no_new_frame", "repeats_retry", "t", "type", "unique_presented_fps", "window_s"]
@@ -164,6 +164,27 @@ private func testStatsJsonShape() {
     expectEqual(positions.count, keys.count, "all keys present in text")
     expectEqual(positions, positions.sorted(), "keys are sorted in the JSON text")
     expect(!line.json.contains("\"frames_received\":\""), "numbers are not strings")
+}
+
+private func testDecodeModeFields() {
+    let (telemetry, sink, clock) = makeTelemetry()
+    startStream(telemetry)
+    telemetry.recordDecodeMode(async: true, realTime: false)
+    telemetry.recordDecodeInFlight(1)
+    telemetry.recordDecodeInFlight(2)
+    telemetry.recordDecodeInFlight(1)
+    clock.advance(ms: 1000)
+    telemetry.recordRender(frameTimestampNs: nil, displayed: false, presentNs: clock.ns)
+    clock.advance(ms: 1000)
+    telemetry.recordRender(frameTimestampNs: nil, displayed: false, presentNs: clock.ns)
+    let stats = sink.objects("ALVRSTATS")
+    expectEqual(stats.count, 2, "two windows")
+    guard stats.count == 2 else { return }
+    expectEqual(int(stats[0], "decode_in_flight_max"), 2, "max in flight in the window")
+    expectEqual(int(stats[0], "decode_async"), 1, "async arm")
+    expectEqual(int(stats[0], "decode_realtime"), 0, "real-time off")
+    expectEqual(int(stats[1], "decode_in_flight_max"), 0, "max resets per window")
+    expectEqual(int(stats[1], "decode_async"), 1, "mode persists across windows")
 }
 
 private func testPacingCounters() {
@@ -523,6 +544,7 @@ enum StreamTelemetryTests {
         testLatencySamples()
         testWindowingAndCounters()
         testStatsJsonShape()
+        testDecodeModeFields()
         testPacingCounters()
         testUniquePresentedOutOfOrder()
         testUniquePresentedWindows()

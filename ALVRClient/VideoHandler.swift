@@ -176,7 +176,13 @@ struct VideoHandler {
             print("VTDecompressionSessionCreate err?! \(err)")
             return (nil, nil)
         }
-        
+        let realTime = UserDefaults.standard.bool(forKey: DecodeInFlight.realTimeDefaultsKey)
+        if realTime, let decompressionSession {
+            let status = VTSessionSetProperty(decompressionSession, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+            print("Decoder RealTime=true status \(status)")
+        }
+        StreamTelemetry.shared.recordDecodeMode(async: EventHandler.shared.asyncDecode != nil, realTime: realTime)
+
         // Optimize display for 24P film viewing if selected
         VideoHandler.applyRefreshRate(videoFormat: videoFormat)
         
@@ -587,7 +593,9 @@ struct VideoHandler {
     
     // MARK: - Actually feed the NALs/OBUs into the decoder
     
-    static func feedVideoIntoDecoder(decompressionSession: VTDecompressionSession, nals: UnsafeMutableBufferPointer<UInt8>, timestamp: UInt64, videoFormat: CMFormatDescription, codec: Int, callback: @escaping (_ imageBuffer: CVImageBuffer?) -> Void) {
+    // Returns false when no output will follow. `asynchronous` (-ALVRAsyncDecode): the output arrives on a decoder thread later.
+    @discardableResult
+    static func feedVideoIntoDecoder(decompressionSession: VTDecompressionSession, nals: UnsafeMutableBufferPointer<UInt8>, timestamp: UInt64, videoFormat: CMFormatDescription, codec: Int, asynchronous: Bool = false, callback: @escaping (_ imageBuffer: CVImageBuffer?) -> Void) -> Bool {
         var err:OSStatus = 0
         guard let sampleBuffer =
             (codec == ALVR_CODEC_AV1.rawValue) ?
@@ -596,10 +604,11 @@ struct VideoHandler {
         else {
             print("Failed in annexBBufferToCMSampleBuffer")
             StreamTelemetry.shared.recordDecodeSubmitFailed()
-            return
+            return false
         }
         let submitNs = StreamTelemetry.nowNs()
-        err = VTDecompressionSessionDecodeFrame(decompressionSession, sampleBuffer: sampleBuffer, flags: VTDecodeFrameFlags.init(rawValue: 0), infoFlagsOut: nil) { (status: OSStatus, infoFlags: VTDecodeInfoFlags, imageBuffer: CVImageBuffer?, taggedBuffers: [CMTaggedBuffer]?, presentationTimeStamp: CMTime, presentationDuration: CMTime) in
+        let flags: VTDecodeFrameFlags = asynchronous ? [._EnableAsynchronousDecompression, ._1xRealTimePlayback] : VTDecodeFrameFlags.init(rawValue: 0)
+        err = VTDecompressionSessionDecodeFrame(decompressionSession, sampleBuffer: sampleBuffer, flags: flags, infoFlagsOut: nil) { (status: OSStatus, infoFlags: VTDecodeInfoFlags, imageBuffer: CVImageBuffer?, taggedBuffers: [CMTaggedBuffer]?, presentationTimeStamp: CMTime, presentationDuration: CMTime) in
             StreamTelemetry.shared.recordDecodeOutput(submitNs: submitNs, ok: status >= 0 && imageBuffer != nil)
 
             if status < 0 {
@@ -624,6 +633,7 @@ struct VideoHandler {
             StreamTelemetry.shared.recordDecodeSubmitFailed()
             //fatalError("VTDecompressionSessionDecodeFrame")
         }
+        return err == 0
     }
     
     // MARK: - Video format helpers
