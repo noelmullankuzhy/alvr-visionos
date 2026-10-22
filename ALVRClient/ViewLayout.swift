@@ -34,6 +34,19 @@ enum ViewLayout {
         return [view * offsetX(-ipd * 0.5), view * offsetX(ipd * 0.5)]
     }
 
+    // ALVR Fov angles (alvr_common::Fov: radians, left and down negative) from gimmeTangents magnitudes, which are
+    // ordered (left, right, bottom, top). docs/lumen/fov-updown.md.
+    static func fovAngles(tangents t: simd_float4, scale: Float) -> (left: Float, right: Float, up: Float, down: Float) {
+        let a = atan(t * scale)
+        return (left: -a.x, right: a.y, up: a.w, down: -a.z)
+    }
+
+    // DIAG fov_sent fields for one eye's Fov as sent to the server: degrees, ALVR signs.
+    static func fovSentFields(eye: String, left: Float, right: Float, up: Float, down: Float) -> KeyValuePairs<String, Any> {
+        func deg(_ rad: Float) -> String { String(format: "%.2f", Double(rad) * 180 / Double.pi) }
+        return ["eye": eye, "up": deg(up), "down": deg(down), "left": deg(left), "right": deg(right), "units": "deg"]
+    }
+
     private static func offsetX(_ x: Float) -> simd_float4x4 {
         var m = matrix_identity_float4x4
         m.columns.3 = simd_float4(x, 0, 0, 1)
