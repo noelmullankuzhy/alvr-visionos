@@ -218,7 +218,13 @@ enum EDRImmersion: String, CaseIterable {
     static let defaultStyle = EDRImmersion.full
 }
 
-enum EDRGridRange: String, CaseIterable { case fine, coarse, knee }
+enum EDRGridRange: String, CaseIterable { case fine, coarse, knee, wide }
+
+// Level of the opaque surround behind the grid; 1.0 is the 203-nit SDR reference white.
+enum EDRSurround: String, CaseIterable {
+    case black, sdrWhite
+    var value: Float { self == .sdrWhite ? 1 : 0 }
+}
 
 struct EDRGrid {
     struct Entry: Equatable {
@@ -226,6 +232,7 @@ struct EDRGrid {
         let value: Float
     }
     var range = EDRGridRange.fine
+    var surround = EDRSurround.black
     var mirror = false
     var borders = false
     var entries: [Entry] {
@@ -238,12 +245,13 @@ struct EDRGrid {
             case .fine: value = 1 + Double(index) / 24
             case .coarse: value = 0.5 + Double(index) / 10
             case .knee: value = 1.30 + Double(index) / 60
+            case .wide: value = pow(49, Double(index) / 24)
             }
             return Entry(cell: "\(String(UnicodeScalar(65 + row)!))\(column + 1)", value: Float(value))
         }
     }
     func fields(_ entry: Entry, layout: EDRLayout, immersion: String) -> KeyValuePairs<String, Any> {
-        ["grid": layout.rawValue, "range": range.rawValue, "mirror": mirror ? 1 : 0, "borders": borders ? 1 : 0,
+        ["grid": layout.rawValue, "range": range.rawValue, "surround": surround.rawValue, "mirror": mirror ? 1 : 0, "borders": borders ? 1 : 0,
          "cell": entry.cell, "value": entry.value, "immersion": immersion]
     }
     // Small 3x5 glyphs outside the cluster, rendered through the same raw-value pipeline.
@@ -305,6 +313,8 @@ struct EDRFrame {
     let layout: EDRLayout
     let grid: EDRGrid
     var matchValue: Float = 1
+    // Only the grid layouts take the picker's surround; every other layout keeps black.
+    var surround: Float { layout.gridArea == nil ? 0 : grid.surround.value }
     func shiftFields(centre: SIMD2<Double>, aspect: Double, pixelHeight: Double,
                      view: Int, immersion: String) -> KeyValuePairs<String, Any>? {
         guard layout.shift(centre: centre, aspect: aspect, grid: grid, pixelHeight: pixelHeight) != .zero else { return nil }
@@ -362,15 +372,15 @@ final class EDRSession {
         lock.lock(); defer { lock.unlock() }
         return presented?.1 == .match ? presentedMatch?.value : presented?.0.value
     }
-    func configure(layout: EDRLayout, automatic: Bool, sustained: Bool, fine: Bool = false, gridRange: EDRGridRange = .fine, mirror: Bool = false, borders: Bool = false, coarse: Bool = false) {
+    func configure(layout: EDRLayout, automatic: Bool, sustained: Bool, fine: Bool = false, gridRange: EDRGridRange = .fine, mirror: Bool = false, borders: Bool = false, coarse: Bool = false, surround: EDRSurround = .black) {
         lock.lock(); defer { lock.unlock() }
         let changedLayout = self.layout != layout
         self.layout = layout
         if changedLayout && layout == .match { match = EDRMatch() }
         match.coarse = coarse
         step.selectFine(fine)
-        let changedGrid = changedLayout || grid.range != gridRange || grid.mirror != mirror || grid.borders != borders
-        grid = EDRGrid(range: gridRange, mirror: mirror, borders: borders)
+        let changedGrid = changedLayout || grid.range != gridRange || grid.mirror != mirror || grid.borders != borders || grid.surround != surround
+        grid = EDRGrid(range: gridRange, surround: surround, mirror: mirror, borders: borders)
         if changedGrid {
             gridNeedsLog = true
             if presented != nil {

@@ -131,6 +131,7 @@ import simd
                                         case .fine: expected = Float(1 + Double(index) / 24)
                                         case .coarse: expected = Float(5 + index) / 10
                                         case .knee: expected = Float(1.30 + Double(index) / 60)
+                                        case .wide: expected = Float(pow(49, Double(index) / 24))
                                         }
                                     }
                                 }

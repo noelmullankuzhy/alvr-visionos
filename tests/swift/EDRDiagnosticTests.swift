@@ -77,7 +77,7 @@ import Foundation
             expect(abs((l.x + r.x + r.width) / 2 - min(centre.x, 1 - 1.5 * l.width)) < 2e-12, "pair centre fits inward")
             expect(abs(l.y + l.height / 2 - centre.y) < 1e-12, "pair tangent centre y")
         }
-        expectEqual(EDRGridRange.allCases.map(\.rawValue), ["fine", "coarse", "knee"], "grid ranges")
+        expectEqual(EDRGridRange.allCases.map(\.rawValue), ["fine", "coarse", "knee", "wide"], "grid ranges")
         expect(!EDRGrid().borders, "seamless by default")
         for range in EDRGridRange.allCases {
             let grid = EDRGrid(range: range, mirror: false)
@@ -92,15 +92,16 @@ import Foundation
                 case .fine: expected = 1 + Double(snake) / 24
                 case .coarse: expected = 0.5 + Double(snake) / 10
                 case .knee: expected = 1.30 + Double(snake) / 60
+                case .wide: expected = pow(49, Double(snake) / 24)
                 }
-                expect(abs(Double(grid.entries[i].value) - expected) < 1e-6, "snake range")
+                expect(abs(Double(grid.entries[i].value) - expected) < 1e-6 * max(1, expected), "snake range")
                 if range == .coarse {
                     expectEqual(grid.entries[i].value, Float(5 + snake) / 10, "coarse values match decimal tenths without accumulation")
                 }
                 expectEqual(mirrored.entries[i].value, grid.entries[24 - i].value, "mirror reverses all 25")
             }
             expectEqual(Diag.line(topic: "edr", tMs: 1, fields: grid.fields(grid.entries[0], layout: .gridTen, immersion: "full")),
-                        "DIAG edr t_ms=1 grid=\"grid 10%\" range=\(range.rawValue) mirror=0 borders=0 cell=A1 value=\(range == .fine ? "1.000" : range == .coarse ? "0.500" : "1.300") immersion=full", "grid log")
+                        "DIAG edr t_ms=1 grid=\"grid 10%\" range=\(range.rawValue) surround=black mirror=0 borders=0 cell=A1 value=\(range == .fine ? "1.000" : range == .coarse ? "0.500" : range == .wide ? "1.000" : "1.300") immersion=full", "grid log")
             for (layout, area) in [(EDRLayout.gridOne, 0.01), (.gridTen, 0.1), (.gridFifty, 0.5)] {
                 let patches = layout.patches(value: 4, centre: centre, aspect: 1.25, grid: EDRGrid(range: range, borders: true), pixelHeight: 1000)
                 expect(abs(patches.reduce(0) { $0 + $1.width * $1.height } - area) < 1e-12, "grid total lit area excludes lines")
@@ -180,6 +181,18 @@ import Foundation
                 }
             }
         }
+        let wide = EDRGrid(range: .wide).entries.map(\.value).sorted()
+        expectEqual(wide.count, 25, "wide has 25 cells")
+        expectEqual(wide[0], 1, "wide first cell is 1.0x")
+        expect(abs(wide[12] - 7) < 1e-5, "wide middle is sqrt(49) = 7")
+        expect(abs(wide[24] - 49) < 1e-4, "wide last cell is 49x")
+        for i in 1..<25 { expect(wide[i] > wide[i - 1], "wide increases monotonically"); expect(abs(Double(wide[i] / wide[i - 1]) - pow(49, 1.0 / 24)) < 1e-5, "wide x1.176 steps") }
+        expectEqual(EDRSurround.allCases.map(\.rawValue), ["black", "sdrWhite"], "surround options")
+        expectEqual(EDRSurround.black.value, 0, "black surround is 0")
+        expectEqual(EDRSurround.sdrWhite.value, 1, "SDR white surround is 1.0 (203 nits)")
+        expectEqual(EDRGrid().surround, .black, "black surround by default")
+        expectEqual(Diag.line(topic: "edr", tMs: 1, fields: EDRGrid(range: .wide, surround: .sdrWhite).fields(EDRGrid(range: .wide).entries[24], layout: .gridTen, immersion: "full")),
+                    "DIAG edr t_ms=1 grid=\"grid 10%\" range=wide surround=sdrWhite mirror=0 borders=0 cell=E5 value=49.000 immersion=full", "surround logged next to range")
         let knee = EDRGrid(range: .knee).entries.map(\.value).sorted()
         expectEqual(knee.first!, Float(1.30), "knee minimum")
         expectEqual(knee.last!, Float(1.70), "knee maximum")
@@ -294,6 +307,15 @@ import Foundation
         Diag.flush()
         expectEqual(lines.filter { $0.contains(" grid=") }.count, 150, "all grid values on new run")
         expect(lines.allSatisfy { $0.hasSuffix("immersion=full") }, "every EDR session line attributes immersion")
+        expectEqual(session.frame().surround, 0, "grid surround defaults to black")
+        session.configure(layout: .gridTen, automatic: false, sustained: false, gridRange: .wide, surround: .sdrWhite)
+        let white = session.frame()
+        expectEqual(white.surround, 1, "surround follows the picker")
+        expectEqual(white.grid.entries[24].value, 49, "wide range reaches the frame")
+        Diag.flush()
+        expect(lines.contains { $0.contains(" range=wide surround=sdrWhite ") }, "surround logged with the grid")
+        session.configure(layout: .onePercent, automatic: false, sustained: false, surround: .sdrWhite)
+        expectEqual(session.frame().surround, 0, "non-grid layouts keep the black surround")
         session.configure(layout: .match, automatic: true, sustained: false)
         session.beginRun()
         expectEqual(session.frame().matchValue, 1, "new match run starts at one")
