@@ -419,6 +419,10 @@ enum GoldenFrame {
 
     static func size(_ s: [Int]) -> String { s.map(String.init).joined(separator: "x") }
 
+    // MetalClientSystem: a spatial event goes to the game only online and while golden is not shown. Golden can be shown
+    // over a live stream (the charts cannot), so its pinches must not also act in the game.
+    static func forwardToGame(goldenActive: Bool, offlineDiagnostics: Bool) -> Bool { !offlineDiagnostics && !goldenActive }
+
     // DIAG golden step=show|hide: the settings in force.
     static func fields(step: String, set: String, eyePx: [Int], density: Double, rq: Float?, worldLocked: Bool,
                        overlays: GoldenFrameSession.Overlays, shaOK: Bool) -> KeyValuePairs<String, Any> {

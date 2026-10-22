@@ -77,7 +77,8 @@ The status text sits under the eye-axis cross: the selected control and its valu
 - Quality changes are confirmed by the W33 settle rule (rate map screen size within 1 % of the expected size for 30
   frames; the read-back without a map; timeout after 600 frames) and logged as `DIAG golden step=settled`.
 - There is no client sharpening stage, so there is no sharpening control.
-- During a live stream, pinches also reach the game as usual.
+- While the golden frame is shown, pinches go to its controls only and are not forwarded to the game, even over a live
+  stream. After exit they reach the game again.
 
 ## Logs
 
