@@ -12,8 +12,16 @@ private final class BoundaryDotsScene {
     private var dotEntities: [ModelEntity] = []
     private var pinches = BoundaryDotsPinches<SpatialEventCollection.Event.ID>()
     private var drag = BoundaryDotsDrag<SpatialEventCollection.Event.ID>()
+    private var slider = BoundaryDotsSlider<SpatialEventCollection.Event.ID>()
+    private var sliderLog = BoundaryDotsSliderLog()
     private let cursorEntity = ModelEntity()
     private let statusEntity = ModelEntity()
+    private let outlineEntity = ModelEntity()
+    private let insetEntity = ModelEntity()
+    private let limitsEntity = ModelEntity()
+    private var outlineShown: (eye: BoundaryDotsEye, shape: BoundaryDotsOutlineShape, value: Double, frustum: BoundaryDotsFrustum)?
+    private var dotStates = BoundaryDotsDotStates()
+    private var statusShown: String?
     private var eyeEntities: [BoundaryDotsEye: ModelEntity] = [:]
     private var started = false
     private var finished = false
@@ -21,6 +29,7 @@ private final class BoundaryDotsScene {
 
     private let dim = UnlitMaterial(color: UIColor(white: 0.18, alpha: 1))
     private let white = UnlitMaterial(color: .white)
+    private let bright = UnlitMaterial(color: UIColor(red: 0.2, green: 1, blue: 0.4, alpha: 1))
 
     func install(in content: RealityViewContent) {
         guard !started else { return }
@@ -36,6 +45,8 @@ private final class BoundaryDotsScene {
         root.addChild(backdrop)
 
         let mesh = MeshResource.generateSphere(radius: Float(BoundaryDots.visualRadius))
+        // Controls keep their 1 deg spheres; only the reference dots shrank.
+        let buttonMesh = MeshResource.generateSphere(radius: Float(BoundaryDots.radius * sin(.pi / 360)))
         for (index, dot) in BoundaryDots.layout.enumerated() {
             let entity = ModelEntity(mesh: mesh, materials: [dim])
             entity.name = "dot_\(index)"
@@ -47,17 +58,24 @@ private final class BoundaryDotsScene {
 
         installCursor()
         root.addChild(cursorEntity)
+        root.addChild(outlineEntity)
         statusEntity.position = [-0.65, -0.27, -9.9]
         root.addChild(statusEntity)
-        refresh()
+        for entity in [insetEntity, limitsEntity] { root.addChild(entity) }
 
+        // A quick right pinch on the centre cross deselects the cursor (the left drag then sizes the outline);
+        // with no cursor it toggles the outline style (lens <-> rect).
+        let centre = Entity()
+        centre.name = "centre"
+        centre.position = [0, 0, -10]
+        makeInteractive(centre)
         for size in [SIMD3<Float>(0.09, 0.015, 0.01), SIMD3<Float>(0.015, 0.09, 0.01)] {
-            let cross = ModelEntity(mesh: .generateBox(size: size), materials: [white])
-            cross.position = [0, 0, -10]
-            root.addChild(cross)
+            centre.addChild(ModelEntity(mesh: .generateBox(size: size), materials: [white]))
         }
+        root.addChild(centre)
+        refresh()
         for (index, eye) in BoundaryDotsEye.allCases.enumerated() {
-            let button = ModelEntity(mesh: mesh, materials: [eye == session.eye ? white : dim])
+            let button = ModelEntity(mesh: buttonMesh, materials: [eye == session.eye ? white : dim])
             button.name = "eye_\(eye.rawValue)"
             button.position = [Float(index - 1) * 0.6, -0.5, -10]
             makeInteractive(button)
@@ -65,7 +83,7 @@ private final class BoundaryDotsScene {
             eyeEntities[eye] = button
             root.addChild(button)
         }
-        let exit = ModelEntity(mesh: mesh, materials: [dim])
+        let exit = ModelEntity(mesh: buttonMesh, materials: [dim])
         exit.name = "leave"
         exit.position = [0, -1.05, -10]
         makeInteractive(exit)
@@ -152,6 +170,7 @@ private final class BoundaryDotsScene {
                   streaming: EventHandler.shared.streamingActive) else {
             pinches = BoundaryDotsPinches()
             drag = BoundaryDotsDrag()
+            slider = BoundaryDotsSlider()
             return false
         }
         guard event.kind == .indirectPinch else { return false }
@@ -170,17 +189,41 @@ private final class BoundaryDotsScene {
         }
         if let handPosition {
             let rotation = simd_quatd(vector: SIMD4<Double>(root.orientation.vector))
-            switch drag.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
-                               headRotation: rotation, cursor: session.cursor) {
-            case .move(let dot)?:
-                if session.place(dot) { refresh() }
-            case .release(let from, let to)?:
-                if session.place(to) {
-                    Diag.log("dots", session.markFields(to, action: to.eccDeg > from.eccDeg ? "step_out" : "step_in", via: "step"))
-                    refresh()
+            // Without a cursor the left drag is the outline slider; a started slide or cursor drag keeps its meaning.
+            if slider.active || (!drag.active && session.cursor == nil) {
+                if !slider.active { sliderLog.reset() }
+                let update = slider.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
+                                           headRotation: rotation, inset: session.sliderValue,
+                                           enabled: session.cursor == nil && session.eye != .both,
+                                           range: session.sliderRange, sign: session.sliderSign)
+                switch update {
+                case .move(let value)?, .release(_, let value)?:
+                    // A slider step changes only the outline and its labels: no dot materials.
+                    session.sliderValue = value
+                    refreshOutline()
+                    refreshStatus()
+                case nil:
+                    break
                 }
-            case nil:
-                break
+                // One dots_outline line per snapped step and one at release.
+                if sliderLog.logs(update, session: session),
+                   let (frustum, source) = BoundaryDotsTangents.frustum(session.eye),
+                   let fields = session.outlineFields(frustum: frustum, source: source) {
+                    Diag.log("dots_outline", fields)
+                }
+            } else {
+                switch drag.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
+                                   headRotation: rotation, cursor: session.cursor) {
+                case .move(let dot)?:
+                    if session.place(dot) { refresh() }
+                case .release(let from, let to)?:
+                    if session.place(to) {
+                        Diag.log("dots", session.markFields(to, action: to.eccDeg > from.eccDeg ? "step_out" : "step_in", via: "step"))
+                        refresh()
+                    }
+                case nil:
+                    break
+                }
             }
         }
         guard let pinch = pinches.update(id: event.id, hand: hand, phase: phase,
@@ -191,9 +234,13 @@ private final class BoundaryDotsScene {
         if pinch.held {
             if let dot = session.confirm() {
                 Diag.log("dots", session.markFields(dot, action: "confirm", via: "step"))
+            } else if let (frustum, source) = BoundaryDotsTangents.frustum(session.eye),
+                      let fields = session.outlineFields(frustum: frustum, source: source) {
+                Diag.log("dots_outline", fields)
             }
         } else if let name = pinch.target {
             if name == "leave" { return true }
+            if name == "centre", !session.deselect(), session.eye != .both { session.toggleShape() }
             if name.hasPrefix("eye_"), let eye = BoundaryDotsEye(rawValue: String(name.dropFirst(4))) {
                 session.eye = eye
             } else if name.hasPrefix("dot_"), let index = Int(name.dropFirst(4)),
@@ -208,20 +255,86 @@ private final class BoundaryDotsScene {
     }
 
     private func refresh() {
-        for (index, dot) in BoundaryDots.layout.enumerated() { updateDot(index, dot) }
+        for index in dotStates.changes(session) { updateDot(index, BoundaryDots.layout[index]) }
         for (eye, button) in eyeEntities { button.model?.materials = [eye == session.eye ? white : dim] }
         cursorEntity.isEnabled = session.cursor != nil
-        var text = "\(session.eye.rawValue)  select a ray"
         if let dot = session.cursor {
             let direction = SIMD3<Float>(dot.direction)
             cursorEntity.position = direction * 9.95
             cursorEntity.orientation = simd_quatf(from: [0, 0, 1], to: -direction)
-            text = String(format: "%@  ray %g  ecc %g", session.eye.rawValue, dot.rayDeg, dot.eccDeg)
+        }
+        refreshOutline()
+        refreshStatus()
+    }
+
+    /// Rebuilds the status text mesh only when its text changes.
+    private func refreshStatus() {
+        var text = "\(session.eye.rawValue)  select a ray"
+            + (session.eye == .both ? "" : "  |  left drag: \(session.shape.rawValue) outline, pinch cross: style")
+        if let dot = session.cursor {
+            text = String(format: "%@  ray %g  ecc %g  |  left drag: cursor, pinch cross for outline",
+                          session.eye.rawValue, dot.rayDeg, dot.eccDeg)
         }
         text += "  [\(session.outermost(session.eye).count) rays done]"
+        guard text != statusShown else { return }
+        statusShown = text
         statusEntity.model = ModelComponent(mesh: .generateText(text, extrusionDepth: 0.001,
                                           font: .systemFont(ofSize: 0.065)),
                                           materials: [UnlitMaterial(color: UIColor(white: 0.3, alpha: 1))])
+    }
+
+    /// The selected eye's outline (lens: measured field + offset; rect: frustum - inset), its value
+    /// and four side limits under the centre cross. Both is not monocular: outline and labels are hidden.
+    private func refreshOutline() {
+        let eye = session.eye, shape = session.shape, value = session.sliderValue
+        guard let (frustum, _) = BoundaryDotsTangents.frustum(eye),
+              let limits = shape == .lens ? BoundaryDotsLensReference.limits(eye, offsetDeg: value)
+                                          : frustum.limits(eye: eye, insetDeg: value),
+              let outline = shape == .lens ? BoundaryDotsLensReference.outline(eye, offsetDeg: value)
+                                           : frustum.outline(insetDeg: value) else {
+            outlineShown = nil
+            for entity in [outlineEntity, insetEntity, limitsEntity] { entity.isEnabled = false }
+            return
+        }
+        for entity in [outlineEntity, insetEntity, limitsEntity] { entity.isEnabled = true }
+        if let shown = outlineShown, shown.eye == eye, shown.shape == shape, shown.value == value, shown.frustum == frustum { return }
+        outlineShown = (eye, shape, value, frustum)
+        if let mesh = outlineMesh(outline) {
+            outlineEntity.model = ModelComponent(mesh: mesh, materials: [bright])
+        }
+        let label = shape == .lens ? String(format: "lens offset %+.1f deg", value) : String(format: "rect inset %.1f deg", value)
+        setCentredText(insetEntity, String(format: "%@  area %.0f%%", label, 100 * frustum.areaFraction(of: outline)), y: -0.12)
+        setCentredText(limitsEntity, String(format: "nasal %.1f  temporal %.1f  up %.1f  down %.1f",
+                                            limits.nasal, limits.temporal, limits.up, limits.down), y: -0.2)
+    }
+
+    private func setCentredText(_ entity: ModelEntity, _ text: String, y: Float) {
+        entity.model = ModelComponent(mesh: .generateText(text, extrusionDepth: 0.001, font: .systemFont(ofSize: 0.065)),
+                                      materials: [bright])
+        let bounds = entity.visualBounds(relativeTo: entity)
+        entity.position = [-bounds.center.x, y, -9.9]
+    }
+
+    // A closed ribbon of constant angular width on the 9.9 m sphere, in front of the
+    // dots (10 m) and behind the cursor (9.95 m). Both windings, so it shows from inside.
+    private func outlineMesh(_ outline: [BoundaryDot]) -> MeshResource? {
+        let radius: Float = 9.9
+        let half = radius * Float(tan(BoundaryDotsOutline.lineWidthDeg * .pi / 360))
+        let points = outline.map { SIMD3<Float>($0.direction) * radius }
+        guard points.count >= 3 else { return nil }
+        var positions: [SIMD3<Float>] = []
+        var triangles: [UInt32] = []
+        for (i, point) in points.enumerated() {
+            let along = normalize(points[(i + 1) % points.count] - points[(i + points.count - 1) % points.count])
+            let side = normalize(cross(normalize(point), along)) * half
+            positions += [point + side, point - side]
+            let a = UInt32(i * 2), b = UInt32(((i + 1) % points.count) * 2)
+            triangles += [a, b, a + 1, a + 1, b, b + 1, a, a + 1, b, a + 1, b + 1, b]
+        }
+        var descriptor = MeshDescriptor(name: "boundary_outline")
+        descriptor.positions = MeshBuffers.Positions(positions)
+        descriptor.primitives = .triangles(triangles)
+        return try? MeshResource.generate(from: [descriptor])
     }
 
     private func updateDot(_ index: Int, _ dot: BoundaryDot) {
