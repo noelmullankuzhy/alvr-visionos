@@ -76,7 +76,9 @@ struct SettingsCodables {
 struct Settings {
     private init() {}
     
-    static var _cached: SettingsCodables.Settings?
+    // Locked: the render thread reads it in sendTracking while the event thread clears it on every DecoderConfig (each
+    // IDR request); the unlocked copy racing the clear crashed in `outlined destroy of SettingsCodables.Settings`.
+    private static let cached = LockedBox<SettingsCodables.Settings?>(nil)
 
     private static func parseSettingsJsonCString<T: Decodable>(getJson: (UnsafeMutablePointer<CChar>?) -> UInt64, type: T.Type) -> T? {
         let len = getJson(nil)
@@ -104,16 +106,16 @@ struct Settings {
     }
 
     public static func getAlvrSettings() -> SettingsCodables.Settings? {
-        if Settings._cached != nil {
-            return Settings._cached
+        if let val = cached.get() {
+            return val
         }
 
         let val = parseSettingsJsonCString(getJson: alvr_get_settings_json, type: SettingsCodables.Settings.self)
-        Settings._cached = val
+        cached.set(val)
         return val
     }
-    
+
     public static func clearSettingsCache() {
-        Settings._cached = nil
+        cached.set(nil)
     }
 }

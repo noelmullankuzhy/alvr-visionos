@@ -29,8 +29,10 @@ for t in "$ROOT"/tests/swift/*Tests.swift; do
   for s in $(sed -n 's#^// SOURCES: ##p' "$t" | head -1); do
     srcs="$srcs $ROOT/$s"
   done
+  # Optional `// FLAGS: -sanitize=thread`: extra swiftc flags for this test only.
+  flags=$(sed -n 's#^// FLAGS: ##p' "$t" | head -1)
   # shellcheck disable=SC2086
-  xcrun swiftc -parse-as-library -swift-version 5 -o "$OUT/$name" "$ROOT/tests/swift/TestSupport.swift" $srcs "$t"
+  xcrun swiftc -parse-as-library -swift-version 5 $flags -o "$OUT/$name" "$ROOT/tests/swift/TestSupport.swift" $srcs "$t"
   # Optional `// METAL: tests/swift/Foo.metal`: compiled for the Mac GPU, the metallib path passed as argument 1.
   metal=$(sed -n 's#^// METAL: ##p' "$t" | head -1)
   if [ -n "$metal" ]; then

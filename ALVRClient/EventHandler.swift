@@ -144,8 +144,13 @@ class EventHandler: ObservableObject {
     var frameQueue = [QueuedFrame]()
     var frameQueueLastTimestamp: UInt64 = 0
     var frameQueueLastImageBuffer: CVImageBuffer? = nil
-    var lastQueuedFrame: QueuedFrame? = nil
-    var lastQueuedFramePose: simd_float4x4? = nil
+    // The last submitted frame and its pose: render threads set them, stop() clears them on the event thread, so every
+    // access goes through this one lock (an unlocked assign racing stop() crashed in CVPixelBuffer finalize).
+    let lastQueued = LockedBox<(frame: QueuedFrame?, pose: simd_float4x4?)>((nil, nil))
+    var lastQueuedFrame: QueuedFrame? {
+        get { lastQueued.get().frame }
+        set { lastQueued.update { $0.frame = newValue } }
+    }
     var lastRequestedTimestamp: UInt64 = 0
     var lastSubmittedTimestamp: UInt64 = 0
     var lastIpd: Float = -1
@@ -275,9 +280,7 @@ class EventHandler: ObservableObject {
         framesSinceLastIDR = 0
         framesSinceLastDecode = 0
         lastIpd = -1
-        objc_sync_enter(frameQueueLock)
-        lastQueuedFrame = nil
-        objc_sync_exit(frameQueueLock)
+        lastQueued.set((nil, nil))
         withStreamBootstrap { $0.streamStopped() }
         objc_sync_enter(viewParamsLock)
         poseKeepalive.reset()
@@ -301,9 +304,7 @@ class EventHandler: ObservableObject {
         framesSinceLastDecode = 0
         lastRequestedTimestamp = 0
         lastSubmittedTimestamp = 0
-        objc_sync_enter(frameQueueLock)
-        lastQueuedFrame = nil
-        objc_sync_exit(frameQueueLock)
+        lastQueued.set((nil, nil))
         withStreamBootstrap { $0.reentered() }
     }
 

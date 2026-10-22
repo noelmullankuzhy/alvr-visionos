@@ -1773,8 +1773,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             renderer.fadeInOverlayAlpha = 0.0
         }
 
-        EventHandler.shared.lastQueuedFrame = queuedFrame // crashed once?
-        EventHandler.shared.lastQueuedFramePose = framePreviouslyPredictedPose
+        EventHandler.shared.lastQueued.set((queuedFrame, framePreviouslyPredictedPose))
         
         let submitTime = CACurrentMediaTime()
         
