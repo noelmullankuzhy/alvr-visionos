@@ -12,6 +12,21 @@ touches neither the PC nor the simulator. Live: progress on stderr and `<out>/ru
 Exit 0 = every point clean, 1 = some point had problems (`<out>/<point>/ERROR`), 4 = PC session backup refused
 (a stale backup exists: run `--restore`), 5 = PC session NOT restored or hash mismatch (loud, backup kept on the PC).
 
+## Dead-server guard and graceful stop
+
+A killed `vrserver` makes SteamVR write `"driver_alvr_server": {"blocked_by_safe_mode": true}` into
+`C:\Program Files (x86)\Steam\config\steamvr.vrsettings`; every later launch then skips the ALVR driver, the dashboard API
+(127.0.0.1:8082) never listens and each point would wait the full `--stream-timeout`. So, per point:
+
+- before SteamVR launches: `pc-session.py safemode-clear` (backup to `...\claude-tmp\vr-gaming\steamvr-backups\steamvr.vrsettings.<timestamp>`,
+  flips only that flag, refuses while vrserver/vrmonitor/vrstartup run; JSON logged, `<point>/pc-safemode.log`);
+- after launch: the dashboard API is polled for up to 20 s (`pc-dashboard-wait.ps1`) and the newest `vrserver.txt` lines are
+  checked (`pc-session.py driver-check`). Failures end the point at once: `driver blocked by safe mode: ...` or
+  `dashboard API not listening: ...` (also when the manual-IP step prints `Unable to connect`);
+- `stop_all` quits SteamVR gracefully first (ALVR dashboard `ShutdownSteamvr` request + closing the vrmonitor window,
+  `pc-steamvr-stop.ps1`), waits up to 10 s, then kills only what is left. Proof of the clear on a copy of the real file:
+  `proof-safemode.sh` (header says how to run it on the PC).
+
 ## Points file (tab separated, `#` comments)
 
 `name  fov_scale  render_scale  foveation  bitrate_mbps  fps  [extra path=json ...]`

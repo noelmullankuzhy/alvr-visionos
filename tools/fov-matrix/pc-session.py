@@ -1,15 +1,19 @@
 """Runs on the PC inside WSL (python3, stdlib): back up, edit, restore and verify the ALVR streamer session.json,
 and drive the angle-chart flag file next to it. Writes only under /mnt/c/Users/noelm/claude-tmp.
 usage: pc-session.py backup|apply SETSFILE|restore|flag off|on|dump|fetch-dump BUILD   (BUILD = 12-char commit dir)
+       pc-session.py safemode-check|safemode-clear|driver-check [--file PATH] [--backup-dir DIR]   (one JSON line each)
 Every failure exits non-zero with a precise message; apply is strict (an unknown settings path aborts, nothing written)."""
 import base64
 import hashlib
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tarfile
+import time
 
 ROOT = os.environ.get('FOVMATRIX_PC_ROOT', '/mnt/c/Users/noelm/claude-tmp')  # env override is for the local stub test only
 
@@ -144,8 +148,78 @@ def fetch_dump(root, build, out):
     return stamp
 
 
+STEAM = '/mnt/c/Program Files (x86)/Steam'
+VRSETTINGS = STEAM + '/config/steamvr.vrsettings'
+VRSERVER_LOG = STEAM + '/logs/vrserver.txt'
+BLOCKED_RE = re.compile(rb'("driver_alvr_server"\s*:\s*\{[^}]*?"blocked_by_safe_mode"\s*:\s*)true')
+VR_PROCS = ('vrserver.exe', 'vrmonitor.exe', 'vrstartup.exe')
+LOG_TAIL_LINES = 200
+
+
+def vr_running():
+    """Names of the SteamVR processes tasklist.exe lists; no tasklist.exe is an error (never assume nothing runs)."""
+    try:
+        out = subprocess.run(['tasklist.exe'], stdout=subprocess.PIPE, universal_newlines=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise SystemExit('safemode-clear FAILED: cannot list processes (tasklist.exe): %s' % e)
+    found = []
+    for line in out.splitlines():
+        words = line.split()
+        if words and words[0].lower() in VR_PROCS:
+            found.append(words[0])
+    return found
+
+
+def safemode_check(path):
+    with open(path, 'rb') as f:
+        return {'blocked': BLOCKED_RE.search(f.read()) is not None}
+
+
+def safemode_clear(path, backup_dir, now=None):
+    """Flip driver_alvr_server.blocked_by_safe_mode true -> false, every other byte kept; backs the file up first."""
+    with open(path, 'rb') as f:
+        data = f.read()
+    if not BLOCKED_RE.search(data):
+        return {'cleared': False, 'backup': None}
+    running = vr_running()
+    if running:
+        raise SystemExit('safemode-clear FAILED: refused while SteamVR runs (%s); stop it first' % ', '.join(running))
+    os.makedirs(backup_dir, exist_ok=True)
+    backup = os.path.join(backup_dir, '%s.%s' % (os.path.basename(path), now or time.strftime('%Y%m%dT%H%M%S')))
+    shutil.copyfile(path, backup)
+    new, n = BLOCKED_RE.subn(rb'\g<1>false', data, count=1)
+    with open(path, 'wb') as f:
+        f.write(new)
+    if n != 1 or safemode_check(path)['blocked']:
+        raise SystemExit('safemode-clear FAILED: flag still set after the write; original backed up at %s' % backup)
+    return {'cleared': True, 'backup': backup}
+
+
+def driver_check(path):
+    """not_loaded: the newest vrserver.txt lines say the ALVR driver was not loaded (safe-mode block)."""
+    try:
+        with open(path, errors='replace') as f:
+            tail = f.read().splitlines()[-LOG_TAIL_LINES:]
+    except FileNotFoundError:
+        return {'not_loaded': False}
+    return {'not_loaded': any('Not loading driver alvr_server' in l for l in tail)}
+
+
+def opt(argv, name, default):
+    return argv[argv.index(name) + 1] if name in argv else default
+
+
 def main(argv):
     try:
+        if argv[1] in ('safemode-check', 'safemode-clear', 'driver-check'):
+            if argv[1] == 'safemode-check':
+                r = safemode_check(opt(argv, '--file', VRSETTINGS))
+            elif argv[1] == 'safemode-clear':
+                r = safemode_clear(opt(argv, '--file', VRSETTINGS), opt(argv, '--backup-dir', os.path.join(ROOT, 'vr-gaming', 'steamvr-backups')))
+            else:
+                r = driver_check(opt(argv, '--file', VRSERVER_LOG))
+            print(json.dumps(r))
+            return
         action, build = argv[1], argv[-1]
         if action == 'backup':
             print(backup(ROOT, build))

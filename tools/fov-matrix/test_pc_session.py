@@ -216,5 +216,98 @@ class PcSessionTest(unittest.TestCase):
         self.assertIn('no dump', str(cm.exception))
 
 
+VRSETTINGS_BLOCKED = (b'{\r\n   "driver_alvr_server" : {\r\n      "blocked_by_safe_mode" : true,\r\n      "other" : 1\r\n   },\r\n'
+                      b'   "driver_other" : {\r\n      "blocked_by_safe_mode" : true\r\n   },\r\n   "steamvr" : {\r\n      "x" : "\xc3\xa9"\r\n   }\r\n}\r\n')
+
+
+class SafeModeTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.file = os.path.join(self.tmp.name, 'steamvr.vrsettings')
+        self.bdir = os.path.join(self.tmp.name, 'backups')
+        self.wr(VRSETTINGS_BLOCKED)
+        self.old_running = ps.vr_running
+        ps.vr_running = lambda: []
+
+    def tearDown(self):
+        ps.vr_running = self.old_running
+        self.tmp.cleanup()
+
+    def wr(self, data):
+        with open(self.file, 'wb') as f:
+            f.write(data)
+
+    def rb(self, path=None):
+        with open(path or self.file, 'rb') as f:
+            return f.read()
+
+    def test_check_blocked_and_not(self):
+        self.assertEqual(ps.safemode_check(self.file), {'blocked': True})
+        self.wr(VRSETTINGS_BLOCKED.replace(b'true,\r\n      "other"', b'false,\r\n      "other"'))
+        self.assertEqual(ps.safemode_check(self.file), {'blocked': False})
+
+    def test_check_only_looks_at_the_alvr_driver(self):
+        self.wr(b'{"driver_other" : {"blocked_by_safe_mode" : true}, "driver_alvr_server" : {"x" : 1}}')
+        self.assertEqual(ps.safemode_check(self.file), {'blocked': False})
+
+    def test_clear_flips_only_alvr_flag_and_keeps_every_other_byte(self):
+        r = ps.safemode_clear(self.file, self.bdir, now='20261022T120000')
+        self.assertTrue(r['cleared'])
+        self.assertEqual(r['backup'], os.path.join(self.bdir, 'steamvr.vrsettings.20261022T120000'))
+        self.assertEqual(self.rb(r['backup']), VRSETTINGS_BLOCKED)
+        want = VRSETTINGS_BLOCKED.replace(b'"blocked_by_safe_mode" : true,', b'"blocked_by_safe_mode" : false,', 1)
+        self.assertEqual(self.rb(), want)
+        self.assertIn(b'"driver_other" : {\r\n      "blocked_by_safe_mode" : true', self.rb())  # other drivers untouched
+        self.assertEqual(ps.safemode_check(self.file), {'blocked': False})
+
+    def test_clear_when_not_blocked_changes_nothing_and_makes_no_backup(self):
+        self.wr(b'{"driver_alvr_server" : {"blocked_by_safe_mode" : false}}')
+        r = ps.safemode_clear(self.file, self.bdir)
+        self.assertEqual(r, {'cleared': False, 'backup': None})
+        self.assertFalse(os.path.exists(self.bdir))
+
+    def test_clear_refused_while_steamvr_runs(self):
+        ps.vr_running = lambda: ['vrserver.exe']
+        with self.assertRaises(SystemExit) as cm:
+            ps.safemode_clear(self.file, self.bdir)
+        self.assertIn('vrserver.exe', str(cm.exception))
+        self.assertEqual(self.rb(), VRSETTINGS_BLOCKED)
+        self.assertFalse(os.path.exists(self.bdir))
+
+    def test_vr_running_parses_tasklist(self):
+        import subprocess
+        real = subprocess.run
+
+        class R:
+            stdout = 'Image Name   PID\r\nvrmonitor.exe  12  Console\r\nsteam.exe  3 Console\r\nVRSERVER.EXE 5 Console\r\n'
+        subprocess.run = lambda *a, **k: R()
+        try:
+            self.assertEqual(sorted(x.lower() for x in self.old_running()), ['vrmonitor.exe', 'vrserver.exe'])
+        finally:
+            subprocess.run = real
+
+    def test_driver_check_reads_newest_lines_only(self):
+        log = os.path.join(self.tmp.name, 'vrserver.txt')
+        line = 'Not loading driver alvr_server because it was blocked by a previous safe mode event\n'
+        with open(log, 'w') as f:
+            f.write(line + 'x\n' * 300)
+        self.assertEqual(ps.driver_check(log), {'not_loaded': False})   # beyond the 200-line tail
+        with open(log, 'w') as f:
+            f.write('x\n' * 10 + line + 'y\n' * 5)
+        self.assertEqual(ps.driver_check(log), {'not_loaded': True})
+        self.assertEqual(ps.driver_check(log + '.none'), {'not_loaded': False})
+
+    def test_cli_json_line_and_file_option(self):
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ps.main(['pc-session.py', 'safemode-check', '--file', self.file])
+        self.assertEqual(json.loads(buf.getvalue()), {'blocked': True})
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ps.main(['pc-session.py', 'safemode-clear', '--file', self.file, '--backup-dir', self.bdir])
+        self.assertTrue(json.loads(buf.getvalue())['cleared'])
+
+
 if __name__ == '__main__':
     unittest.main()
