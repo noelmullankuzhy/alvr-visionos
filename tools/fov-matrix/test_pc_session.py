@@ -22,6 +22,8 @@ SESSION = {'session_settings': {'video': {
     'preferred_fps': 72.0,
     'bitrate': {'mode': {'variant': 'Adaptive', 'ConstantMbps': 30, 'Adaptive': {'x': 1}}},
     'foveated_encoding': {'enabled': True, 'content': {'center_size_x': 0.4}},
+    'encoder_config': {'nvenc': {'quality_preset': {'variant': 'P1'}, 'multi_pass': {'variant': 'QuarterResolution'},
+                                 'split_encode_mode': {'variant': 'Auto'}, 'gop_length': -1}},
     'transcoding_view_resolution': {'variant': 'Absolute', 'Absolute': {'width': 100, 'height': {'enabled': True, 'content': 50}}},
 }}, 'client_connections': {'x': 1}}
 
@@ -153,6 +155,40 @@ class PcSessionTest(unittest.TestCase):
         ps.flag(self.root, self.build, 'dump')
         ps.restore(self.root, self.build)
         self.assertFalse(os.path.exists(flag))
+
+    def test_flag_stress_modes(self):
+        flag = os.path.join(os.path.dirname(self.session), 'angle_chart.enable')
+        ps.backup(self.root, self.build)
+        for mode in ('stress', 'stress,dump', 'dump,stress'):
+            self.assertIn(mode, ps.flag(self.root, self.build, mode))
+            self.assertEqual(rd(flag), mode + '\n')
+        for bad in ('stres', 'stress,', 'dump,x', ''):
+            with self.assertRaises(SystemExit):
+                ps.flag(self.root, self.build, bad)
+        ps.flag(self.root, self.build, 'stress,dump')
+        self.assertTrue(ps.restore(self.root, self.build).startswith('restore OK'))
+        self.assertFalse(os.path.exists(flag))   # absent originally: removed again
+
+    def test_flag_stress_restores_original_content(self):
+        flag = os.path.join(os.path.dirname(self.session), 'angle_chart.enable')
+        with open(flag, 'w') as f:
+            f.write('on')
+        ps.backup(self.root, self.build)
+        ps.flag(self.root, self.build, 'stress')
+        ps.restore(self.root, self.build)
+        self.assertEqual(rd(flag), 'on')
+
+    def test_nvenc_session_paths(self):
+        # the exact paths of ALVR settings.rs: video.encoder_config.nvenc.{quality_preset,multi_pass,split_encode_mode}
+        ps.backup(self.root, self.build)
+        ps.apply(self.root, self.build, ['video.encoder_config.nvenc.quality_preset={"variant":"P4"}',
+                                         'video.encoder_config.nvenc.multi_pass={"variant":"Disabled"}',
+                                         'video.encoder_config.nvenc.split_encode_mode={"variant":"ForceTwo"}'])
+        n = self.live()['session_settings']['video']['encoder_config']['nvenc']
+        self.assertEqual(n, {'quality_preset': {'variant': 'P4'}, 'multi_pass': {'variant': 'Disabled'},
+                             'split_encode_mode': {'variant': 'ForceTwo'}, 'gop_length': -1})
+        with self.assertRaises(SystemExit):   # strict: a misspelt key is refused
+            ps.apply(self.root, self.build, ['video.encoder_config.nvenc.multipass={"variant":"Disabled"}'])
 
     def test_fetch_dump_picks_dir_newer_than_flag(self):
         base = os.path.join(self.root, 'angle-chart')

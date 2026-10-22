@@ -115,11 +115,11 @@ def flag(root, build, mode):
     if mode == 'off':
         if os.path.exists(p['flag']):
             os.remove(p['flag'])
-    elif mode in ('on', 'dump'):
+    elif mode == 'on' or (mode and set(mode.split(',')) <= {'dump', 'stress'}):   # content as angle-chart.md: dump, stress, stress,dump
         with open(p['flag'], 'w') as f:
             f.write(mode + '\n')
     else:
-        raise SystemExit('flag FAILED: mode must be off|on|dump')
+        raise SystemExit('flag FAILED: mode must be off|on|dump|stress|stress,dump')
     return 'flag %s %s' % (mode, p['flag'])
 
 
