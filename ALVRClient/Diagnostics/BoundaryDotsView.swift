@@ -370,16 +370,19 @@ private final class BoundaryDotsScene {
             let hue = hueMaterial(drawn.eye), width = ProjectionOverlay.width
             // L in front of R by 1 cm so coincident edges (top and bottom) do not z-fight; both in front of the dots.
             let radius: Float = drawn.eye == .left ? 9.9 : 9.89
-            let ribbons: [([SIMD3<Double>], Double, UnlitMaterial, Float)] = [
-                (boxDirections(readout.frustum), width.frustum, hue, 0),
-                (drawn.outline.map(\.direction), width.lens, hue, 0.02),
-                (boxDirections(readout.bbox), width.bbox, hue, 0.04),
-                (readout.fovRect.map(boxDirections) ?? [], width.foveation, white, 0.06),
-                (ProjectionOverlay.axisCircle.map(\.direction), width.circle, hue, 0.08),
+            // Closed ribbons, except the bbox: open dashes, thinner, so it reads apart from the frustum rectangle.
+            let dash = ProjectionOverlay.bboxDash
+            let bboxDashes = ProjectionOverlay.dashes(readout.bbox.path(step: 0.05), dash: dash.dash, gap: dash.gap).map(directions)
+            let ribbons: [([[SIMD3<Double>]], Bool, Double, UnlitMaterial, Float)] = [
+                ([boxDirections(readout.frustum)], true, width.frustum, hue, 0),
+                ([drawn.outline.map(\.direction)], true, width.lens, hue, 0.02),
+                (bboxDashes, false, width.bbox, hue, 0.04),
+                ([readout.fovRect.map(boxDirections) ?? []], true, width.foveation, white, 0.06),
+                ([ProjectionOverlay.axisCircle.map(\.direction)], true, width.circle, hue, 0.08),
             ]
             for (entity, ribbon) in zip(layer, ribbons) {
-                entity.model = ribbonMesh(ribbon.0, widthDeg: ribbon.1, radius: radius - ribbon.3).map {
-                    ModelComponent(mesh: $0, materials: [ribbon.2])
+                entity.model = ribbonMesh(ribbon.0, closed: ribbon.1, widthDeg: ribbon.2, radius: radius - ribbon.4).map {
+                    ModelComponent(mesh: $0, materials: [ribbon.3])
                 }
             }
             for (line, (entity, text)) in zip(readout.lines.indices, zip(readoutEntities[drawn.eye] ?? [], readout.lines)) {
@@ -411,7 +414,12 @@ private final class BoundaryDotsScene {
 
     /// A tangent-space box as head-frame directions (x right, y up, forward -z), edges split every 0.05 tan.
     private func boxDirections(_ box: ProjectionBox) -> [SIMD3<Double>] {
-        box.path(step: 0.05).map { normalize(SIMD3($0.x, $0.y, -1)) }
+        directions(box.path(step: 0.05))
+    }
+
+    /// Tangent-space points as head-frame directions.
+    private func directions(_ points: [SIMD2<Double>]) -> [SIMD3<Double>] {
+        points.map { normalize(SIMD3($0.x, $0.y, -1)) }
     }
 
     private func setCentredText(_ entity: ModelEntity, _ text: String, y: Float, material: UnlitMaterial) {
@@ -421,21 +429,27 @@ private final class BoundaryDotsScene {
         entity.position = [-bounds.center.x, y, -9.9]
     }
 
-    // A closed ribbon of constant angular width on a sphere of `radius` (9.8-9.9 m), in front of the
-    // dots (10 m) and the cursor (9.95 m). Both windings, so it shows from inside.
-    private func ribbonMesh(_ directions: [SIMD3<Double>], widthDeg: Double, radius: Float) -> MeshResource? {
+    // Ribbons of constant angular width on a sphere of `radius` (9.8-9.9 m), in front of the dots (10 m) and the
+    // cursor (9.95 m), one per strip: closed loops, or open strips (dashes). Both windings, so they show from inside.
+    private func ribbonMesh(_ strips: [[SIMD3<Double>]], closed: Bool, widthDeg: Double, radius: Float) -> MeshResource? {
         let half = radius * Float(tan(widthDeg * .pi / 360))
-        let points = directions.map { SIMD3<Float>($0) * radius }
-        guard points.count >= 3 else { return nil }
         var positions: [SIMD3<Float>] = []
         var triangles: [UInt32] = []
-        for (i, point) in points.enumerated() {
-            let along = normalize(points[(i + 1) % points.count] - points[(i + points.count - 1) % points.count])
-            let side = normalize(cross(normalize(point), along)) * half
-            positions += [point + side, point - side]
-            let a = UInt32(i * 2), b = UInt32(((i + 1) % points.count) * 2)
-            triangles += [a, b, a + 1, a + 1, b, b + 1, a, a + 1, b, a + 1, b + 1, b]
+        for strip in strips {
+            let points = strip.map { SIMD3<Float>($0) * radius }, n = points.count
+            guard n >= (closed ? 3 : 2) else { continue }
+            let base = UInt32(positions.count)
+            for (i, point) in points.enumerated() {
+                let next = closed ? points[(i + 1) % n] : points[min(i + 1, n - 1)]
+                let previous = closed ? points[(i + n - 1) % n] : points[max(i - 1, 0)]
+                let side = normalize(cross(normalize(point), normalize(next - previous))) * half
+                positions += [point + side, point - side]
+                guard closed || i + 1 < n else { continue }
+                let a = base + UInt32(i * 2), b = base + UInt32(((i + 1) % n) * 2)
+                triangles += [a, b, a + 1, a + 1, b, b + 1, a, a + 1, b, a + 1, b + 1, b]
+            }
         }
+        guard !triangles.isEmpty else { return nil }
         var descriptor = MeshDescriptor(name: "boundary_outline")
         descriptor.positions = MeshBuffers.Positions(positions)
         descriptor.primitives = .triangles(triangles)

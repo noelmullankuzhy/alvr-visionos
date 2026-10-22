@@ -676,7 +676,7 @@ def projection_fields(f, points, tangents, eye):
     """The logged projection readout of a `dots_outline` line and its check against this file's formulas
     (bbox from the drawn polygon, px/deg from render_px, the foveation rect from the logged setting)."""
     out = dict(bbox_deg=number_list(f.get('bbox_deg'), 4), bbox_tan=number_list(f.get('bbox_tan'), 4),
-               fov_source=f.get('fov_source'), foveation=number_list(f.get('foveation'), 6),
+               fov_source=f.get('fov_source'), fov_live=f.get('fov_live'), foveation=number_list(f.get('foveation'), 6),
                fov_rect_deg='off' if f.get('fov_rect_deg') == 'off' else number_list(f.get('fov_rect_deg'), 4),
                render_px=number_list(f.get('render_px'), 2),
                pxdeg_frustum=number(f.get('pxdeg_frustum')), pxdeg_bbox=number(f.get('pxdeg_bbox')))
@@ -772,8 +772,10 @@ def outline_report(records):
              'seen outside the outline), against the latest walk of the same eye in these logs.', '',
              'Projection overlay columns (lines since the overlay): bbox_deg is the axis-aligned tangent box of the drawn '
              'outline, left,right,up,down degrees from the eye axis (head-frame sides, as the client reports fov '
-             'tangents): the FOV to send for the highest sharpness. fov_rect_deg is the 1:1 band of the foveated '
-             'encoding (fov_source: a points-chart-avp.tsv row, or live) on the rendered frustum. pxdeg_frustum and '
+             'tangents). It contains the outline, so its corners lie outside the visible field: it is the FOV to send so '
+             'that every visible direction is rendered. fov_rect_deg is the 1:1 band of the foveated encoding '
+             '(fov_source: a points-chart-avp.tsv row, fov_live=no, a preset shown when not streaming; or live, '
+             'fov_live=yes) on the rendered frustum. pxdeg_frustum and '
              'pxdeg_bbox are the predicted px/deg on the eye axis at render_px over the frustum and over the bbox '
              '(avp-sharpness.py centre: the lower of h and v). projection_check recomputes bbox, px/deg and the '
              'foveation rect from the logged inputs (ok, mismatch: <fields>, or not logged).', '']
@@ -791,11 +793,11 @@ def outline_report(records):
                              tangent_source=r['tangent_source'],
                              tangents=','.join('{:g}'.format(t) for t in r['tangents']) +
                              (' ({})'.format(r['tangent_note']) if r['tangent_note'] else ''),
-                             bbox_deg=values(r['bbox_deg']), fov_source=r['fov_source'],
+                             bbox_deg=values(r['bbox_deg']), fov_source=r['fov_source'], fov_live=r['fov_live'],
                              fov_rect_deg=values(r['fov_rect_deg']), projection_check=r['projection_check']) for r in mine],
                        ('source', 'shape', 'inset_deg', 'offset_deg', 'nasal_deg', 'temporal_deg', 'up_deg', 'down_deg',
                         'area_frac', 'max_dev_deg', 'max_dev_ray', 'reference', 'tangent_source', 'tangents',
-                        'bbox_deg', 'fov_source', 'fov_rect_deg', 'pxdeg_frustum', 'pxdeg_bbox', 'projection_check')) + ['']
+                        'bbox_deg', 'fov_source', 'fov_live', 'fov_rect_deg', 'pxdeg_frustum', 'pxdeg_bbox', 'projection_check')) + ['']
         lens = [r for r in mine if r['rays']]
         if lens:
             lines += ['Per-ray outline, latest lens line ({}; reference + offset):'.format(cell(lens[-1]['source'])), '']
@@ -824,9 +826,9 @@ def projection_summary(rows):
                 eyes.append('eye={} no data'.format(eye))
                 continue
             rect = r['fov_rect_deg']
-            eyes.append('eye={} source={} fov_source={} bbox_deg={} fov_rect_deg={} render_px={} pxdeg_frustum={} '
+            eyes.append('eye={} source={} fov_source={} fov_live={} bbox_deg={} fov_rect_deg={} render_px={} pxdeg_frustum={} '
                         'pxdeg_bbox={} gain={:.2f} check={}'.format(
-                            eye, r['source'], r['fov_source'], ','.join(fmt(v) for v in r['bbox_deg'] or ()),
+                            eye, r['source'], r['fov_source'], r['fov_live'] or '-', ','.join(fmt(v) for v in r['bbox_deg'] or ()),
                             rect if isinstance(rect, str) or rect is None else ','.join(fmt(v) for v in rect),
                             ','.join(str(v) for v in r['render_px']), fmt(r['pxdeg_frustum']), fmt(r['pxdeg_bbox']),
                             r['pxdeg_bbox'] / r['pxdeg_frustum'], r['projection_check']))

@@ -171,8 +171,8 @@ struct BoundaryDotsSession {
             return ["eye": eye.rawValue, "shape": shape.rawValue, "inset_deg": inset, "nasal_deg": limits.nasal,
                     "temporal_deg": limits.temporal, "up_deg": limits.up, "down_deg": limits.down,
                     "tangent_source": source, "tangents": tangents,
-                    "bbox_deg": p.bboxDeg, "bbox_tan": p.bboxTan, "fov_source": p.stream.source, "foveation": p.foveation,
-                    "fov_rect_deg": p.fovRectDeg, "render_px": p.renderPx, "pxdeg_frustum": p.pxdegFrustum, "pxdeg_bbox": p.pxdegBbox]
+                    "bbox_deg": p.bboxDeg, "bbox_tan": p.bboxTan, "fov_source": p.stream.source, "fov_live": p.fovLive,
+                    "foveation": p.foveation, "fov_rect_deg": p.fovRectDeg, "render_px": p.renderPx, "pxdeg_frustum": p.pxdegFrustum, "pxdeg_bbox": p.pxdegBbox]
         }
         guard let limits = BoundaryDotsLensReference.limits(eye, offsetDeg: offset) else { return nil }
         let rays = stride(from: 0.0, to: 360, by: 15).compactMap { ray -> String? in
@@ -183,8 +183,8 @@ struct BoundaryDotsSession {
         return ["eye": eye.rawValue, "shape": shape.rawValue, "offset_deg": offset, "nasal_deg": limits.nasal,
                 "temporal_deg": limits.temporal, "up_deg": limits.up, "down_deg": limits.down,
                 "tangent_source": source, "tangents": tangents, "reference": BoundaryDotsLensReference.tag, "rays": rays,
-                "bbox_deg": p.bboxDeg, "bbox_tan": p.bboxTan, "fov_source": p.stream.source, "foveation": p.foveation,
-                "fov_rect_deg": p.fovRectDeg, "render_px": p.renderPx, "pxdeg_frustum": p.pxdegFrustum, "pxdeg_bbox": p.pxdegBbox]
+                "bbox_deg": p.bboxDeg, "bbox_tan": p.bboxTan, "fov_source": p.stream.source, "fov_live": p.fovLive,
+                "foveation": p.foveation, "fov_rect_deg": p.fovRectDeg, "render_px": p.renderPx, "pxdeg_frustum": p.pxdegFrustum, "pxdeg_bbox": p.pxdegBbox]
     }
 }
 
