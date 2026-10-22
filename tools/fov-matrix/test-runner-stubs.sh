@@ -212,4 +212,12 @@ clear_stale
 echo "== a finished run leaves no backup files (normal and failing points)"
 t "! [ -e $T/pc/fov-matrix/session.orig.nonce ] && ! [ -e $T/pc/fov-matrix/session.orig.json ]" "no backup or nonce sidecar left after the earlier runs"
 
+# macOS TMPDIR ends in "/": mktemp then returns a path with "//" that the runner (cd && pwd) normalises, so path greps must too.
+if [ -z "${STUB_NESTED:-}" ]; then
+  echo "== TMPDIR with a trailing slash (macOS default)"
+  mkdir -p "$T/slash"
+  STUB_NESTED=1 TMPDIR="$T/slash/" sh "$0" > "$T/nested.out" 2>&1
+  t "tail -1 $T/nested.out | grep -q 'ALL PASS'" "whole suite passes with a trailing-slash TMPDIR"
+fi
+
 [ "$FAILS" = 0 ] && echo "ALL PASS" || { echo "$FAILS FAILED"; exit 1; }
