@@ -215,9 +215,10 @@ class EventHandler: ObservableObject {
             // "Crop FOV to outline": ask for the 1:1 render size of the frame the crop will send (CropFov.oneToOne), at the grid
             // density measured from the layer, else the reference device's; crop off keeps the default size. Fixed per stream.
             let settings = ALVRClientApp.gStore.settings
+            CropFov.applyLaunch(setting: settings.cropInsetDeg)
             let recommended = CropFov.recommendedViewResolution(
                 crop: settings.cropFovToOutline, device: CropFov.referenceDevice, density: CropFov.grid.density,
-                insetDeg: CropFov.inset, marginDeg: settings.cropMarginDeg, fallback: (renderWidth * 2, renderHeight * 2))
+                insetDeg: CropFov.inset, marginDeg: CropFov.effectiveMargin(setting: settings.cropMarginDeg), fallback: (renderWidth * 2, renderHeight * 2))
             recommendedViewResolution = recommended
             print("Recommended view resolution", recommended.width, "x", recommended.height)
 

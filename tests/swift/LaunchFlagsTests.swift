@@ -28,6 +28,7 @@ private func testOldSettingsDecodeWithDefaults() {
     expect(s.hdrPQ && s.streamFPS == "90", "existing keys kept")
     expect(!s.asyncDecode && !s.deadlineSelect && !s.decodeRealTime && !s.displayP3Output, "stream/colour flags default off")
     expectEqual(s.hdrHeadroom, 0, "headroom default automatic")
+    expectEqual(s.cropInsetDeg, 15, "crop inset default 15")
     expectEqual(s.hdrReferenceWhiteNits, 0, "reference white default stream value")
     expect(!s.eyeBadges && !s.hdrProbe, "diagnostics flags default off")
     let new = Data(#"{"asyncDecode":true,"hdrHeadroom":2}"#.utf8)
