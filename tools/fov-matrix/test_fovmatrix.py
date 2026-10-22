@@ -156,7 +156,7 @@ class EyeTangentsTest(unittest.TestCase):
         pts = fm.parse_points(text.splitlines())
         names = ['a%s-%s' % (s, v) for s in ('100', '085', '070') for v in ('asrun', 'centred', 'wider')]
         rec = ['a100-axis-C', 'a100-axis-A', 'a100-wider-A']          # the doc's three recommended settings
-        self.assertEqual([p['name'] for p in pts], names + rec)
+        self.assertEqual([p['name'] for p in pts], names + rec + ['a100-crop-C', 'a100-crop-A'])
         for p in pts[:len(names)]:
             scale, variant = p['name'][1:].split('-')
             self.assertEqual(p['fov_scale'], int(scale) / 100)
@@ -258,6 +258,86 @@ class EyeTangentsTest(unittest.TestCase):
             self.assertGreater(AS.derive(AS.load(f.name), 1.0, 'wider')[0], AS.derive(p, 1.0, 'wider')[0])
         finally:
             os.unlink(f.name)
+
+
+CROP_FIXTURE = os.path.join(HERE, '..', 'diag', 'fixtures', 'crop-fov.json')
+CROP_EYES = 'L:0.9494,0.8243,0.6873,0.6646;R:0.8243,0.9494,0.6873,0.6646'   # seal-on lens bbox + 2 deg, |tan| L,R,D,U
+
+
+class CropTest(unittest.TestCase):
+    """`crop` variant: the client's "Crop FOV to outline" (ALVRClient/CropFov.swift): the frame is the lens outline's bbox
+    (reference + offset, R mirrored) widened by the margin, clamped to the device frustum, band centred on the eye axis."""
+    def test_fixture_shared_with_swift(self):
+        with open(CROP_FIXTURE) as f:
+            fx = json.load(f)
+        p = AS.load()
+        self.assertEqual(fx['reference_rays'], p['crop']['lens_reference_rays'])
+        self.assertEqual(fx['device_tan_LRDU'], {e: p['frustum_tan_LRDU'][e] for e in 'LR'})
+        c = fx['center_size']
+        for case in fx['cases']:
+            want = case['expect']
+            got = {e: AS.crop_tan(p, e, case['offset_deg'], case['margin_deg']) for e in 'LR'}
+            for g, w in zip(got[case['eye']], want['sent_tan_LRDU']):
+                self.assertAlmostEqual(g, w, delta=1e-4, msg=case['name'])
+            shx, shy = AS.crop_shift(got, c)
+            self.assertAlmostEqual(shx, want['center_shift'][0], delta=1e-3, msg=case['name'])
+            self.assertAlmostEqual(shy, want['center_shift'][1], delta=1e-3, msg=case['name'])
+            if 'pxdeg_centre' in want:
+                l, r, d, u = got[case['eye']]
+                w, h = want['render_px']
+                self.assertAlmostEqual(min(w / (l + r), h / (d + u)) * math.pi / 180, want['pxdeg_centre'], delta=0.1, msg=case['name'])
+
+    def test_bbox_margin_clamp_by_hand(self):
+        t = lambda d: math.tan(math.radians(d))
+        c = lambda d: math.cos(math.radians(d))
+        p = AS.load()
+        # bbox at offset 0: left ray 195 ecc 42.5, right ray 0 ecc 37.5, down ray 270 ecc 32.5, up ray 105 ecc 32.5
+        for g, w in zip(AS.crop_tan(p, 'L', 0, 0), (-t(42.5) * c(195), t(37.5), t(32.5), t(32.5) * c(15))):
+            self.assertAlmostEqual(g, w, places=9)
+        # margin 2: each side 2 deg wider; R mirrored
+        for g, w in zip(AS.crop_tan(p, 'L', 0, 2), (0.949373, 0.824336, 0.687281, 0.664564)):
+            self.assertAlmostEqual(g, w, places=5)
+        for g, w in zip(AS.crop_tan(p, 'R', 0, 2), (0.824336, 0.949373, 0.687281, 0.664564)):
+            self.assertAlmostEqual(g, w, places=5)
+        # offset +20: past the device frustum on every side -> the device's
+        self.assertEqual(AS.crop_tan(p, 'L', 20, 2), [1.7321, 1.0, 1.1918, 1.0])
+        # defaults come from avp-field.json crop (offset 0, margin 2)
+        self.assertEqual((p['crop']['offset_deg'], p['crop']['margin_deg']), (0, 2))
+        self.assertEqual(AS.crop_tan(p, 'L'), AS.crop_tan(p, 'L', 0, 2))
+
+    def test_crop_shift_by_hand(self):
+        # band centre 0.5 + s c0 on the axis: s = (temporal / (temporal + nasal) - 0.5) / c0, y with up / (up + down)
+        p = AS.load()
+        fv = AS.derive(p, 1.0, 'crop')
+        self.assertEqual(fv, (0.5, 0.45, 3, 3, 0.141, -0.031))
+        self.assertAlmostEqual((0.949373 / (0.949373 + 0.824336) - 0.5) / 0.25, 0.141, places=3)
+        self.assertAlmostEqual((0.664564 / (0.664564 + 0.687281) - 0.5) / 0.275, -0.031, places=3)
+        # the device frustum gives the axis rows' shift
+        dev = {e: p['frustum_tan_LRDU'][e] for e in 'LR'}
+        self.assertEqual(tuple(round(v, 3) for v in AS.crop_shift(dev, (0.5, 0.45))), (0.536, -0.159))
+
+    def test_crop_points_rows(self):
+        p = AS.load()
+        pts = {q['name']: q for q in fm.parse_points(AS.points(p).splitlines())}
+        k = math.pi / 180
+        for name, (w, h), budget, centre in (('a100-crop-C', (4176, 3334), (2784, 2240), 41.1),
+                                             ('a100-crop-A', (3648, 2912), (2432, 1856), 35.9)):
+            q = pts[name]
+            self.assertEqual((q['fov_scale'], q['foveation'], q['eye_tangents'], q['bitrate_mbps'], q['fps'], q['flag']),
+                             (1.0, (0.5, 0.45, 3.0, 3.0, 0.141, -0.031), CROP_EYES, 100.0, 90.0, 'dump'))
+            self.assertAlmostEqual(q['render_scale'], w / 3648, places=4)
+            ax, ay = AS.axes_for(q['foveation'], w, h)
+            self.assertLessEqual(ax['coded'], budget[0])
+            self.assertLessEqual(ay['coded'], budget[1])
+            # centre px/deg by hand: render px over the cropped |tan| span (h binds), vs the frustum's at the same render
+            hand = min(w / (0.9494 + 0.8243), h / (0.6873 + 0.6646)) * k
+            self.assertEqual(round(hand, 1), centre)
+            row = AS.crop_rows(p)[name]
+            self.assertAlmostEqual(row['centre'], hand, places=2)
+            self.assertAlmostEqual(row['frustum_centre'], min(w / 2.7321, h / 2.1918) * k, places=2)
+        text = AS.points(p)
+        self.assertIn('# a100-crop-C: predicted centre 41.1 px/deg (frustum 26.5 at the same render, x1.54 h / x1.62 v)', text)
+        self.assertIn('# a100-crop-A: predicted centre 35.9 px/deg (frustum 23.2 at the same render, x1.54 h / x1.62 v)', text)
 
 
 class SettingsTest(unittest.TestCase):

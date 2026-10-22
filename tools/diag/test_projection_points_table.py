@@ -26,14 +26,20 @@ def swift_rows():
             for name, scale, values in re.findall(r'\("([^"]+)", ([0-9.]+), \[([^\]]+)\]\)', table)]
 
 
+DEVICE_EYES = 'eye_tangents=L:1.7321,1,1.1918,1;R:1,1.7321,1.1918,1'
+
+
 def tsv_rows(text):
-    """fov_scale 1 rows: name, fov_scale, render_scale, foveation(cx,cy,rx,ry,shx,shy|off), ... tab-separated."""
+    """fov_scale 1 rows on the device frustum: name, fov_scale, render_scale, foveation(cx,cy,rx,ry,shx,shy|off), ...
+    tab-separated. Rows with other eye_tangents (the crop rows) render a different frustum than the overlay draws."""
     rows = []
     for line in text.splitlines():
         if not line.strip() or line.startswith('#'):
             continue
         cells = line.split('\t')
         if float(cells[1]) != 1 or cells[3] == 'off':
+            continue
+        if any(c.startswith('eye_tangents=') and c != DEVICE_EYES for c in cells[6:]):
             continue
         rows.append((cells[0], float(cells[2]), tuple(float(v) for v in cells[3].split(','))))
     return rows
