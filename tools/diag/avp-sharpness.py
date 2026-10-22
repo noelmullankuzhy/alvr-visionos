@@ -8,7 +8,8 @@ visible field, fov scales, foveation sizes). Replace the visible field there (e.
 
 Variants: asrun (fixed size, no shift); axis (fixed size, band centred on the eye axis); centred (fixed size, band centred
 on the visible field); wider (band spans the whole visible field, centred on it); off; crop (points rows a100-crop-C/-A
-only: the frame is the model lens's inset rectangle + margin, the client's "Crop FOV to outline", band on its eye axis). Each candidate's render is the
+only: the frame is the model lens's inset rectangle + margin, the client's "Crop FOV to outline", band on its eye axis);
+crop-T (row a100-crop-T: the crop-C frame and render, the band flush with the nasal edge and reaching crop.band_T deg temporal/up/down). Each candidate's render is the
 largest at the 3648:2912 aspect whose foveated coded size fits the per-eye budget; px/deg is fov-overlay.py's page
 prediction (render px per degree over the foveation squeeze). Standard library only; `--field FILE` overrides the file."""
 import importlib.util
@@ -111,6 +112,18 @@ def crop_shift(tans, c):
     shx = mean([axis_shift(tans[e][temporal_nasal[e][0]], tans[e][temporal_nasal[e][1]], c[0]) for e in 'LR'])
     shy = mean([axis_shift(tans[e][3], tans[e][2], c[1]) for e in 'LR'])     # up, down
     return shx, shy
+
+
+def band_fv(tans, band, edge_ratio):
+    """(cx, cy, rx, ry, shx, shy) for a band flush with the nasal edge of the L box `tans` (|tan| L,R,D,U; R mirrors) and
+    reaching band['temporal_deg'] temporal, band['up_deg'] up, band['down_deg'] down: centre size = band / frame per axis,
+    shift from the band centre's fraction across the frame (shift_for). Eye UV runs from the temporal edge and the top."""
+    left, right, down, up = tans['L']
+    tan = lambda d: math.tan(math.radians(d))
+    x0 = (left - tan(band['temporal_deg'])) / (left + right)        # band temporal edge, fraction from the temporal side
+    y0, y1 = (up - tan(band['up_deg'])) / (up + down), (up + tan(band['down_deg'])) / (up + down)
+    cx, cy = round(1 - x0, 4), round(y1 - y0, 4)
+    return (cx, cy, edge_ratio[0], edge_ratio[1], round(shift_for((x0 + 1) / 2, cx), 3), round(shift_for((y0 + y1) / 2, cy), 3))
 
 
 def derive(p, s, variant):
@@ -224,7 +237,7 @@ def recommend(rows):
 
 
 def crop_rows(p):
-    """a100-crop-C/-A: the crop frame at budget C/A's render (the axis rows' foveation sizes, band on the cropped axis) and
+    """a100-crop-C/-A (and -T): the crop frame at budget C/A's render (the axis rows' foveation sizes, band on the cropped axis) and
     the centre px/deg against the full frustum's at the same render."""
     tans, fv = crop_eyes(p), derive(p, 1.0, 'crop')
     axis = derive(p, 1.0, 'axis')
@@ -239,6 +252,12 @@ def crop_rows(p):
             'centre': min(det[e][k] for e in 'LR' for k in ('h0', 'v0')),
             'frustum_centre': min(full[e][k] for e in 'LR' for k in ('h0', 'v0')),
             'ratio': ((f[0] + f[1]) / (tans['L'][0] + tans['L'][1]), (f[2] + f[3]) / (tans['L'][2] + tans['L'][3]))}
+    # crop-T: crop-C's frame and render, the band moved to the nasal edge and widened temporally (docs/lumen/crop-fov.md)
+    t_fv, (w, h) = band_fv(tans, p['crop']['band_T'], p['centred']['edge_ratio']), rows['a100-crop-C']['render']
+    ax, ay = axes_for(t_fv, w, h)
+    det = {e: eye_detail(p, e, 1.0, t_fv, w, h, tans=tans[e]) for e in 'LR'}
+    rows['a100-crop-T'] = dict(rows['a100-crop-C'], fv=t_fv, coded=(ax['coded'], ay['coded']), det=det,
+                               centre=min(det[e][k] for e in 'LR' for k in ('h0', 'v0')))
     return rows
 
 
@@ -266,7 +285,8 @@ def points(p):
     for name, r in crop_rows(p).items():
         crop_eyes_text = 'L:%s;R:%s' % tuple(','.join('%g' % v for v in r['tans'][k]) for k in 'LR')
         out.append('# %s: predicted centre %.1f px/deg (frustum %.1f at the same render, x%.2f h / x%.2f v)' % (
-            name, r['centre'], r['frustum_centre'], r['ratio'][0], r['ratio'][1]))
+            name, r['centre'], r['frustum_centre'], r['ratio'][0], r['ratio'][1]) + (
+            '; coded %dx%d vs budget C %dx%d' % (r['coded'] + BUDGETS['C']) if name.endswith('-T') else ''))
         out.append('%s\t1\t%g\t%s\t%g\t%g\teye_tangents=%s' % (name, round(r['render'][0] / ASPECT[0], 4), fvtext(r['fv']),
                                                              pt['bitrate_mbps'], pt['fps'], crop_eyes_text))
     return '\n'.join(out) + '\n'

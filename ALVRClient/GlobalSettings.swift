@@ -46,8 +46,8 @@ struct GlobalSettings: Codable {
     var resolutionChart: String = CornerChartMode.off.rawValue
     var resolutionFoveation: Bool = true
     // Crop FOV to outline (CropFov.swift, docs/lumen/crop-fov.md): report the model lens's inset rectangle + margin as each eye's
-    // FOV instead of the device frustum; read when the view config is sent (stream start).
-    var cropFovToOutline: Bool = false
+    // FOV instead of the device frustum; on by default (CropFov.defaultEnabled); read when the view config is sent (stream start).
+    var cropFovToOutline: Bool = CropFov.defaultEnabled
     var cropMarginDeg: Double = CropFov.defaultMarginDeg
     // Golden frame set (GoldenFrame.swift): a Documents/diag/golden/<set> directory name, or Off; Diagnostics only, both
     // charts off; read at renderer start.

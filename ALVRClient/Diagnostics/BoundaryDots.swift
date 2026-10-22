@@ -47,7 +47,7 @@ struct BoundaryDotsSession {
     private(set) var marks: [BoundaryDotsEye: Set<BoundaryDot>] = [:]
     private var insets: [BoundaryDotsEye: Double] = [:]
     private var offsets: [BoundaryDotsEye: Double] = [:]
-    private var lensInsets: [BoundaryDotsEye: Double] = [:]
+    private var sharedLensInset = BoundaryDotsOutline.defaultInsetDeg
     /// Outline style for every eye; a quick right pinch on the centre cross (no cursor) cycles it.
     var shape = BoundaryDotsOutlineShape.lens
 
@@ -57,10 +57,11 @@ struct BoundaryDotsSession {
         set { if newValue.isFinite { insets[eye] = BoundaryDotsOutline.clampInset(newValue) } }
     }
 
-    /// Model lens inset of the selected eye (style lens); snaps to 0.5 deg within 0...30, default 15.
+    /// Model lens inset (style lens), one value for both eyes (the slider on either eye sets it, and "Crop FOV to outline"
+    /// sends mirrored boxes); snaps to 0.5 deg within 0...30, default 15.
     var lensInset: Double {
-        get { lensInsets[eye] ?? BoundaryDotsOutline.defaultInsetDeg }
-        set { if newValue.isFinite { lensInsets[eye] = BoundaryDotsOutline.clampInset(newValue) } }
+        get { sharedLensInset }
+        set { if newValue.isFinite { sharedLensInset = BoundaryDotsOutline.clampInset(newValue) } }
     }
 
     /// Measured outline offset of the selected eye (positive = outward); snaps to 0.5 deg within -10...+20.
@@ -111,20 +112,20 @@ struct BoundaryDotsSession {
         foveationPoint = rows[(index + 1) % rows.count].name
     }
 
-    /// One eye's drawn outline at its own slider value (lens: the model in the inset rectangle; rect: frustum - inset;
+    /// One eye's drawn outline at its slider value (lens, shared by both eyes: the model in the inset rectangle; rect: frustum - inset;
     /// measured: reference + offset); nil for Both.
     func outline(_ eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum) -> [BoundaryDot]? {
         guard eye != .both else { return nil }
         switch shape {
-        case .lens: return BoundaryDotsLensModel.outline(eye, frustum: frustum, insetDeg: lensInsets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
+        case .lens: return BoundaryDotsLensModel.outline(eye, frustum: frustum, insetDeg: lensInset)
         case .rect: return frustum.outline(insetDeg: insets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
         case .measured: return BoundaryDotsLensReference.outline(eye, offsetDeg: offsets[eye] ?? 0)
         }
     }
 
-    /// The model lens's inset rectangle for one eye (style lens), at that eye's model inset.
+    /// The model lens's inset rectangle for one eye (style lens), at the shared model inset.
     func lensRect(_ eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum) -> BoundaryDotsLensRect? {
-        BoundaryDotsLensModel.insetRect(eye, frustum: frustum, insetDeg: lensInsets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
+        BoundaryDotsLensModel.insetRect(eye, frustum: frustum, insetDeg: lensInset)
     }
 
     /// One eye's side limits in the current style (lens: the inset rectangle's).

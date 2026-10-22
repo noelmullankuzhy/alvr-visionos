@@ -235,7 +235,7 @@ private final class BoundaryDotsScene {
                     // A slider step changes only the outline and its labels: no dot materials.
                     session.sliderValue = value
                     // The model lens inset is what "Crop FOV to outline" crops to on the next stream.
-                    if session.shape == .lens { CropFov.recordInset(session.eye, deg: session.lensInset) }
+                    if session.shape == .lens { CropFov.recordInset(session.lensInset) }
                     refreshOutline()
                     refreshStatus()
                 case nil:

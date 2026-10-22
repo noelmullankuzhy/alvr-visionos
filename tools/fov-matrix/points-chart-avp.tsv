@@ -19,3 +19,5 @@ a100-wider-A	1	0.8246	0.563,0.618,2.5,2.5,0.335,-0.168	100	90	eye_tangents=L:1.7
 a100-crop-C	1	1.1447	0.5,0.45,3,3,0.527,-0.17	100	90	eye_tangents=L:1.0724,0.6249,0.7536,0.6249;R:0.6249,1.0724,0.7536,0.6249
 # a100-crop-A: predicted centre 36.9 px/deg (frustum 23.2 at the same render, x1.61 h / x1.59 v)
 a100-crop-A	1	1	0.5,0.45,3,3,0.527,-0.17	100	90	eye_tangents=L:1.0724,0.6249,0.7536,0.6249;R:0.6249,1.0724,0.7536,0.6249
+# a100-crop-T: predicted centre 42.2 px/deg (frustum 26.5 at the same render, x1.61 h / x1.59 v); coded 3360x2816 vs budget C 2784x2240
+a100-crop-T	1	1.1447	0.7083,0.7571,3,3,1,-0.053	100	90	eye_tangents=L:1.0724,0.6249,0.7536,0.6249;R:0.6249,1.0724,0.7536,0.6249

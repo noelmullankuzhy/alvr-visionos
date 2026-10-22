@@ -967,9 +967,9 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 // Otherwise "Crop FOV to outline" packs the model lens's inset rectangle + margin (CropFov, docs/lumen/crop-fov.md).
                 // The frame quad is drawn on the sent tangents (uniforms.tangents) under the device projection.
                 let debugEyes = DebugEyeTangents.current
-                let cropInsets = CropFov.insets
+                let cropInset = CropFov.inset
                 let sent = CropFov.choose(device: [tangentsLeft, tangentsRight], debug: debugEyes?.tangents,
-                                          crop: settings.cropFovToOutline, insets: cropInsets, marginDeg: settings.cropMarginDeg)
+                                          crop: settings.cropFovToOutline, insetDeg: cropInset, marginDeg: settings.cropMarginDeg)
                 let leftAngles = ViewLayout.fovAngles(tangents: sent.tangents[0], scale: settings.fovRenderScale)
                 let rightAngles = debugEyes != nil || mainDrawable.views.count > 1
                     ? ViewLayout.fovAngles(tangents: sent.tangents[1], scale: settings.fovRenderScale) : leftAngles
@@ -985,11 +985,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 let axisShift = foveation.map { CropFov.centerShift(left: sentGimme[0], right: sentGimme[1],
                                                                      centerSize: [Double($0.centerSizeX), Double($0.centerSizeY)]) }
                 let sessionShift = foveation.map { SIMD2<Double>(Double($0.centerShiftX), Double($0.centerShiftY)) }
-                for (index, (eye, fov)) in [("L", leftFovCorrected), ("R", rightFovCorrected)].enumerated() {
+                for (eye, fov) in [("L", leftFovCorrected), ("R", rightFovCorrected)] {
                     let crop = sent.source == "crop"
                     Diag.log("fov_sent", ViewLayout.fovSentFields(eye: eye, left: fov.left, right: fov.right, up: fov.up, down: fov.down,
                                                                   source: sent.source, marginDeg: crop ? settings.cropMarginDeg : nil,
-                                                                  offsetDeg: crop ? cropInsets[index] : nil,  // fov_sent offset_deg carries the model inset
+                                                                  insetDeg: crop ? cropInset : 0, offsetDeg: crop ? 0 : nil,
                                                                   axisCenterShift: axisShift, sessionCenterShift: sessionShift))
                 }
 
