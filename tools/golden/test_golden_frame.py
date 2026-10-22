@@ -117,6 +117,23 @@ class TangentGrid(unittest.TestCase):
         self.assertAlmostEqual(x, (1.7321 - math.tan(40 * D)) * f.px_per_tan, places=9)
         self.assertAlmostEqual(y, 1.0 * f.px_per_tan, places=9)
 
+    def test_lens_outline_ndc_hand_values(self):
+        # A 45 deg circle (tan 1) on the L frustum (1.7321, 1, 1.1918, 1), CornerTangents.ndc by hand:
+        # ray 0 (1, 0) -> x (2 - 1 + 1.7321) / 2.7321 = 1, y 0.1918 / 2.1918; ray 90 (0, 1) -> y (2 - 1 + 1.1918) / 2.1918
+        # = 1; ray 180 (-1, 0) -> x (-2 - 1 + 1.7321) / 2.7321 = -0.4640752.
+        f = gf.Frame(DEV_L, 3)
+        ref = {'left': {0.0: 45.0, 90.0: 45.0, 180.0: 45.0, 270.0: 45.0}, 'right': None}
+        pts = {p['ray_deg']: p for p in gf.lens_outline(ref, 'L', f)}
+        self.assertAlmostEqual(pts[0]['ndc'][0], 1.0, places=6)
+        self.assertAlmostEqual(pts[0]['ndc'][1], 0.087507984, places=6)
+        self.assertAlmostEqual(pts[90]['ndc'][0], 0.267962373, places=6)
+        self.assertAlmostEqual(pts[90]['ndc'][1], 1.0, places=6)
+        self.assertAlmostEqual(pts[180]['ndc'][0], -0.464075253, places=6)
+        # px is the same point: ((x + 1) / 2 w, (1 - y) / 2 h).
+        x, y = pts[180]['ndc']
+        self.assertAlmostEqual(pts[180]['px'][0], (x + 1) / 2 * f.rect_px()[2], places=1)
+        self.assertAlmostEqual(pts[180]['px'][1], (1 - y) / 2 * f.rect_px()[3], places=1)
+
 
 FOV = (0.5, 0.45, 3, 3, 0.536, -0.159)          # a100-axis (points-chart-avp.tsv)
 
@@ -204,6 +221,36 @@ class Foveation(unittest.TestCase):
         self.assertEqual([[round(v, 9) for v in r] for r in s], [[0.75] * 4, [0.0] * 4])
 
 
+FIXTURE = HERE / 'fixtures' / 'ffr-expand-a100-axis-C.tsv'
+
+
+class MetalFixture(unittest.TestCase):
+    """The client's expansion from the real shader: tests/swift/DiagFFRExpandFixtureTests.swift runs
+    decompressAxisAlignedCoord (Shaders.metal:148-189) on the Mac GPU and writes the fixture."""
+
+    def test_client_expand_matches_the_shader_fixture(self):
+        if not FIXTURE.exists():
+            self.skipTest('%s absent: run sh tests/swift/run-tests.sh DiagFFRExpandFixtureTests on the Mac' % FIXTURE)
+        lines = [l for l in FIXTURE.read_text().splitlines() if l and not l.startswith('#')]
+        self.assertEqual(lines[0].split('\t'), ['uv_in_x', 'uv_in_y', 'eye', 'uv_out_x', 'uv_out_y'])
+        rows = [l.split('\t') for l in lines[1:]]
+        self.assertEqual(len(rows), 2 * 9 * 9)
+        ax, ay = gf.fov_axes(FOV, 4176, 3333)             # a100-axis-C: render 1.1447 x 3648x2912
+        worst = 0.0
+        for ux, uy, eye, ox, oy in rows:
+            got = gf.client_texture_uv(float(ux), float(uy), ax, ay, eye)
+            err = max(abs(got[0] - float(ox)), abs(got[1] - float(oy)))
+            worst = max(worst, err)
+            self.assertLess(err, 1e-4, '%s (%s, %s): tool %s, shader (%s, %s)' % (eye, ux, uy, got, ox, oy))
+        print('ffr fixture: %d points, worst |tool - shader| %.2e' % (len(rows), worst))
+
+    def test_texture_uv_hand_values(self):
+        # Foveation off: the identity, with the R half on the right (Shaders.metal:136-145, :217-221).
+        ax, ay = gf.fov_axes(None, 100, 80)
+        self.assertEqual(gf.client_texture_uv(0.25, 0.5, ax, ay, 'L'), (0.25, 0.5))
+        self.assertEqual(gf.client_texture_uv(0.75, 0.5, ax, ay, 'R'), (0.75, 0.5))
+
+
 class LensOutline(unittest.TestCase):
     LOG = ('DIAG dots_summary t_ms=1 eye=L points=11 rays=45:35,75:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,'
            '180:40,195:42.5,210:40,225:40\n'
@@ -268,6 +315,22 @@ class MetaAndCli(unittest.TestCase):
             self.assertEqual(len(meta['overlays']['lens_outline']['L']['polygon']), 72)
             self.assertEqual(meta['overlays']['frustum_rect']['L']['tangents_LRBT'], list(DEV_L))
             self.assertEqual(len(meta['chart']['patches']['R']), 24)
+            # Every overlay element also in eye NDC (CornerTangents.ndc, CornerChart.swift:69-71), by hand:
+            # L axis x = (0 - 1 + 1.7321) / 2.7321, y = (0 - 1 + 1.1918) / 2.1918; R x mirrored.
+            ov = meta['overlays']
+            self.assertIn('CornerChart.swift:69-71', ov['ndc_convention'])
+            for eye in 'LR':
+                self.assertEqual(ov['frustum_rect'][eye]['ndc'], [-1.0, -1.0, 1.0, 1.0])
+            self.assertAlmostEqual(ov['eye_axis']['L']['ndc'][0], 0.267962373, places=8)
+            self.assertAlmostEqual(ov['eye_axis']['L']['ndc'][1], 0.087507984, places=8)
+            self.assertAlmostEqual(ov['eye_axis']['R']['ndc'][0], -0.267962373, places=8)
+            self.assertEqual(ov['eye_axis']['L']['tan'], [0.0, 0.0])
+            p = ov['lens_outline']['L']['polygon'][0]
+            tx, ty = p['tan']
+            self.assertAlmostEqual(p['ndc'][0], (2 * tx - 1 + 1.7321) / 2.7321, places=6)
+            self.assertAlmostEqual(p['ndc'][1], (2 * ty - 1 + 1.1918) / 2.1918, places=6)
+            self.assertTrue(all('ndc' in q for q in ov['lens_outline']['R']['polygon']))
+            self.assertEqual(len(meta['chart']['patches']['L'][0]['ndc_rect']), 4)
             w, h, ch, _ = gf.read_png(s / 'L.server.png')
             self.assertEqual((w, h), tuple(meta['server']['size']))
             text = buf.getvalue()

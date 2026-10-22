@@ -248,7 +248,14 @@ def fick(az_deg, el_deg):
     return math.tan(az_deg * D), math.tan(el_deg * D) / math.cos(az_deg * D)
 
 
+NDC_CONVENTION = ('eye NDC as the client draws overlays, CornerTangents.ndc (ALVRClient/Diagnostics/CornerChart.swift:69-71): '
+                  'x = (2 tan_x - right + left) / (left + right), y = (2 tan_y - top + bottom) / (bottom + top), '
+                  '+y up, the frustum is [-1, 1]^2; chart patches via GratingChart.quad(...).rect (ResolutionChart.swift:'
+                  '212-230). Golden px = ((x + 1) / 2 * width, (1 - y) / 2 * height).')
+
+
 def ndc(t, x, y):
+    """CornerTangents.ndc (CornerChart.swift:69-71): view tangents -> eye NDC, +y up."""
     l, r, b, top = t
     return (2 * x - r + l) / (l + r), (2 * y - top + b) / (b + top)
 
@@ -605,15 +612,21 @@ def encode_image(img, ax, ay, eye, span_x=(0.0, 1.0), span_y=(0.0, 1.0)):
     return Image(e.nx, len(e.ys), ch, out)
 
 
+def client_texture_uv(tex_x, tex_y, ax, ay, eye):
+    """decompressAxisAlignedCoord (Shaders.metal:148-189) on a side-by-side texture UV of `eye`: the side-by-side UV of
+    the coded frame it samples. Checked against the shader by tools/golden/fixtures/ffr-expand-*.tsv."""
+    right = eye == 'R'
+    eye_x = (tex_x + float(right) * (1 - 2 * tex_x)) * 2                 # TextureToEyeUV
+    cx = client_expand(eye_x, ax) * (ax['opt'] / ax['coded'])
+    cy = client_expand(tex_y, ay) * (ay['opt'] / ay['coded'])
+    return cx * 0.5 + float(right) * (1 - cx), cy                        # EyeToTextureUV
+
+
 def client_sample(coded, u, v, ax, ay, eye):
     """What the client shows at eye image fraction (u, v): the side-by-side target UV (Shaders.metal:217-221),
     decompressAxisAlignedCoord (:148-189), then a bilinear sample of this eye's coded half. coded: rows of floats."""
     right = eye == 'R'
-    tex_x = u * 0.5 + (0.5 if right else 0.0)
-    eye_x = (tex_x + float(right) * (1 - 2 * tex_x)) * 2                 # TextureToEyeUV
-    cx = client_expand(eye_x, ax) * (ax['opt'] / ax['coded'])
-    cy = client_expand(v, ay) * (ay['opt'] / ay['coded'])
-    sx = cx * 0.5 + float(right) * (1 - cx)                              # EyeToTextureUV
+    sx, cy = client_texture_uv(u * 0.5 + (0.5 if right else 0.0), v, ax, ay, eye)
     half = (sx - 0.5) * 2 if right else sx * 2
     h, w = len(coded), len(coded[0])
     px, py = half * w - 0.5, cy * h - 0.5
@@ -686,8 +699,9 @@ def lens_outline(ref, eye, frame):
         e = lens_ecc(ref, eye, ray)
         tx, ty = math.tan(e * D) * math.cos(ray * D), math.tan(e * D) * math.sin(ray * D)
         x, y = frame.tan_to_px(tx, ty)
+        nx, ny = ndc(frame.tangents, tx, ty)
         pts.append({'ray_deg': ray, 'ecc_deg': round(e, 4), 'tan': [round(tx, 6), round(ty, 6)],
-                    'px': [round(x, 2), round(y, 2)]})
+                    'ndc': [round(nx, 7), round(ny, 7)], 'px': [round(x, 2), round(y, 2)]})
     return pts
 
 
@@ -756,9 +770,14 @@ def cmd_render(a):
         'golden': {e: {'png': '%s.png' % e, 'size': [f.width, f.height], 'render_s': times[e]} for e, f in frames.items()},
         'content': content,
         'overlays': {
-            'frustum_rect': {e: {'tangents_LRBT': list(f.tangents), 'px': f.rect_px(), 'note': 'identity: the whole image'}
+            'ndc_convention': NDC_CONVENTION,
+            'frustum_rect': {e: {'tangents_LRBT': list(f.tangents), 'px': f.rect_px(),
+                                 'ndc': [round(v, 9) for v in ndc(f.tangents, -f.tangents[0], -f.tangents[2]) +
+                                         ndc(f.tangents, f.tangents[1], f.tangents[3])],
+                                 'note': 'identity: the whole image'}
                              for e, f in frames.items()},
-            'eye_axis': {e: {'px': list(f.axis_px())} for e, f in frames.items()},
+            'eye_axis': {e: {'tan': [0.0, 0.0], 'ndc': list(ndc(f.tangents, 0.0, 0.0)), 'px': list(f.axis_px())}
+                         for e, f in frames.items()},
             'lens_outline': ({e: {'polygon': lens_outline(ref, e, f)} for e, f in frames.items()} if ref else None),
             'lens_source': ref['source'] if ref else 'none found',
             'lens_measured_rays': ({'L': ref['left'], 'R': ref['right'] or 'mirror of L: R(phi) = L(180 - phi)'}

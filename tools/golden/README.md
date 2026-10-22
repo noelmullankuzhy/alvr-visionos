@@ -5,13 +5,16 @@ renderer produces. It also makes the server frame the client would receive for t
 smoothness and sharpness can be compared against a known truth on the device. Python 3.9+, standard library only.
 
 ```sh
-python3 tools/golden/golden-frame.py render --set chart80                    # L.png, R.png at 80 px/deg (about 3 s/eye)
-python3 tools/golden/golden-frame.py encode --set chart80 --point a100-axis-C # L/R.server.png (about 9 s/eye)
+python3 tools/golden/golden-frame.py render --set chart80                    # L.png, R.png at 80 px/deg (5.4 s/eye)
+python3 tools/golden/golden-frame.py encode --set chart80 --point a100-axis-C # L/R.server.png (12.8 s/eye)
 python3 tools/golden/golden-frame.py push --set chart80 --device <id>         # prints the devicectl command only
 python3 tools/golden/golden-frame.py measure <capture dir> --set chart80      # W33 capture of the displayed set
 ```
 
 The output goes to `tools/golden/out/<set>/{L.png,R.png,L.server.png,R.server.png,meta.json}`. `out/` is git-ignored.
+
+At 80 px/deg each eye covers the full device frustum: a 12523x10046 PNG, about 2.1 MB for the chart. On the Mac
+(review r1 timings) render takes 5.4 s per eye and encode takes 12.8 s per eye.
 
 ## Render
 
@@ -51,6 +54,9 @@ the fov scale.
   - Padding is black.
 - **Tests.**
   - The inverse matches ALVR's server map (`fov-overlay.py u_of_c`).
+  - The client mapping matches the real shader within 1e-4 on `fixtures/ffr-expand-a100-axis-C.tsv`. That file is
+    written on the Mac GPU by `sh tests/swift/run-tests.sh DiagFFRExpandFixtureTests`, which runs
+    `decompressAxisAlignedCoord` from Shaders.metal on a 9x9 grid per eye. Without the file the test skips.
   - A round trip through an emulated client (shader maths plus a bilinear sample) puts every pixel within one target
     pixel. The exceptions are pixels whose sample point is past the outermost coded pixel centre, where the sampler
     clamps.
@@ -69,8 +75,13 @@ meta.json records:
 - the codec status
 - the sha256 of every PNG
 - the chart patches per eye (NDC and golden px rects)
-- overlays as data: the frustum rectangle (identity), the eye-axis px, and a lens outline polygon per eye (every 5 deg:
-  ray, ecc, tan, px)
+- overlays as data: the frustum rectangle (identity), the eye axis, and a lens outline polygon per eye (every 5 deg:
+  ray, ecc, tan, ndc, px)
+
+Every overlay element has an `ndc` form next to its px and tangent forms. It is in eye NDC as the client draws:
+`CornerTangents.ndc` (`ALVRClient/Diagnostics/CornerChart.swift:69-71`), with +y up and the frustum at [-1, 1].
+Chart patches use `GratingChart.quad(...).rect` (`ResolutionChart.swift:212-230`). Golden px =
+((x + 1) / 2 * width, (1 - y) / 2 * height).
 
 The lens outline comes from W34's `BoundaryDotsLensReference` table in `ALVRClient/Diagnostics/BoundaryDots.swift`
 when the client has one. Otherwise it comes from the 21 Oct dots log
