@@ -630,6 +630,86 @@ class ZoneStats(Base):
         self.assertIn('stream px/deg', buf.getvalue())
 
 
+class PoseDelta(Base):
+    """capture.json pose.delta_deg (display minus render, right-handed, yaw +Y, pitch +X, roll +Z, intrinsic Y-X-Z)."""
+    EXTRA = ['--render', '912x728', '--fov-scale', '0.65', '--phys', '1216x1184']
+
+    def test_conventions(self):
+        yaw = fo.Pose(10, 0, 0)
+        self.assertAlmostEqual(yaw.warp('x', 0.0), math.tan(math.radians(10)), places=9)     # straight ahead shows to the right
+        self.assertAlmostEqual(yaw.warp('x', math.tan(math.radians(20))), math.tan(math.radians(30)), places=9)
+        pitch = fo.Pose(0, 10, 0)
+        self.assertAlmostEqual(pitch.warp('y', 0.0), math.tan(math.radians(10)), places=9)   # display pitched up: ahead shows lower
+        for p in (fo.Pose(3, -2, 1), fo.Pose(0.4, 0.2, 0.3)):
+            for axis in 'xy':
+                for tau in (-1.2, -0.3, 0.0, 0.7):
+                    self.assertAlmostEqual(p.warp(axis, p.warp(axis, tau), inverse=True), tau, places=9)
+        m = fo.Pose(90, 90, 0).matrix                      # intrinsic Y-X-Z: Ry(90) Rx(90) applied to forward (0, 0, -1)
+        v = [sum(m[i][j] * (0, 0, -1)[j] for j in range(3)) for i in range(3)]
+        self.assertEqual([round(c, 9) for c in v], [0.0, 1.0, 0.0])
+
+    def synth(self, pose, drop=False):
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d, '--pose-delta', pose] + self.EXTRA), 0)
+        cap = json.loads((d / 'capture.json').read_text())
+        if drop:
+            del cap['pose']
+            (d / 'capture.json').write_text(json.dumps(cap))
+        return d
+
+    def measure(self, d, name='p'):
+        out = self.dir / (name + '.json')
+        code = self.run_main(['drawable', '--capture-dir', d, '--out-json', out, '--render', '912x728', '--fov-scale', '0.65'])
+        return code, json.loads(out.read_text())['summary']
+
+    def test_pose_in_capture_json_is_compensated(self):
+        d = self.synth('0.4,0.25,0.3')
+        self.assertEqual(json.loads((d / 'capture.json').read_text())['pose']['delta_deg'], {'yaw': 0.4, 'pitch': 0.25, 'roll': 0.3})
+        code, s = self.measure(d)
+        self.assertEqual(s['verdict'], 'PASS', s['verdict_reasons'])
+        self.assertEqual(code, 0)
+        self.assertLessEqual(s['median_abs_residual_deg'], 0.05)
+        self.assertEqual(s['params']['pose']['source'], 'capture.json')
+        self.assertIsNone(s.get('fitted_yaw_deg'))
+
+    def test_wrong_pose_fails(self):
+        d = self.synth('0.4,0,0')
+        cap = json.loads((d / 'capture.json').read_text())
+        cap['pose']['delta_deg']['yaw'] = 0.0                  # the capture claims no pose difference but the image carries 0.4 deg
+        (d / 'capture.json').write_text(json.dumps(cap))
+        code, s = self.measure(d)
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertIn('x median residual', ' '.join(s['verdict_reasons']))
+        self.assertNotEqual(code, 0)
+
+    def test_no_pose_falls_back_to_fitted_yaw_and_says_so(self):
+        d = self.synth('0.4,0,0', drop=True)
+        code, s = self.measure(d)
+        self.assertEqual(s['verdict'], 'PASS-after-fitted-yaw', s['verdict_reasons'])
+        self.assertEqual(code, 0)
+        self.assertAlmostEqual(s['fitted_yaw_deg'], 0.4, delta=0.05)
+        self.assertEqual(s['params']['pose']['source'], 'fitted-yaw')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_main(['drawable', '--capture-dir', d, '--render', '912x728', '--fov-scale', '0.65'])
+        self.assertIn('PASS-after-fitted-yaw', buf.getvalue())
+        self.assertRegex(buf.getvalue(), r'fitted yaw 0\.[34]\d* deg')
+
+    def test_fitted_yaw_does_not_hide_a_wrong_s(self):
+        d = self.synth('0.4,0,0', drop=True)
+        out = self.dir / 'w.json'
+        code = self.run_main(['drawable', '--capture-dir', d, '--out-json', out, '--render', '912x728', '--fov-scale', '0.6'])
+        self.assertEqual(json.loads(out.read_text())['summary']['verdict'], 'FAIL')
+        self.assertNotEqual(code, 0)
+
+    def test_bad_pose_exits_2(self):
+        d = self.synth('0,0,0')
+        cap = json.loads((d / 'capture.json').read_text())
+        cap['pose'] = {'delta_deg': {'yaw': 'left', 'pitch': 0, 'roll': 0}}
+        (d / 'capture.json').write_text(json.dumps(cap))
+        self.assertEqual(self.run_main(['drawable', '--capture-dir', d, '--render', '912x728', '--fov-scale', '0.65']), 2)
+
+
 REAL = Path('/Users/noel/Projects/Management/goals/rdr2-vr/evidence/chart-matrix-20261022/m1/f100-asrun/dump')
 
 
