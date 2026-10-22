@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/DebugEyeTangents.swift
+// SOURCES: ALVRClient/DebugEyeTangents.swift ALVRClient/ViewLayout.swift
 // DebugEyeTangents: -ALVRDebugEyeTangents "L:l,r,d,u;R:l,r,d,u" -> per-eye |tan| in gimmeTangents slot order
 // (left, right, bottom, top), the order W32's ViewLayout.fovAngles packs (up from .w, down from .z);
 // anything malformed is off (nil), so production keeps the drawable's own tangents.
@@ -15,6 +15,18 @@ enum DebugEyeTangentsTests {
         expectEqual(t[0], simd_float4(1.7321, 1.0, 1.1918, 1.0), "left eye: down goes to z, up to w")
         expectEqual(t[1], simd_float4(1.0, 1.7321, 1.1918, 1.0), "right eye")
         expectEqual(DebugEyeTangents.parse(" R:1.0,1.7321,1.1918,1.0 ; L:1.7321,1.0,1.1918,1.0 ")!, t, "eye order and spaces free")
+
+        // Override through the corrected packing (Renderer: ViewLayout.fovAngles, then DIAG fov_sent): d reaches down,
+        // u reaches up, ALVR signs (left and down negative), at fovRenderScale 1.
+        for (eye, v, left, right) in [("L", t[0], "-60.00", "45.00"), ("R", t[1], "-45.00", "60.00")] {
+            let a = ViewLayout.fovAngles(tangents: v, scale: 1.0)
+            let sent = Dictionary(ViewLayout.fovSentFields(eye: eye, left: a.left, right: a.right, up: a.up, down: a.down)
+                .map { ($0.key, "\($0.value)") }, uniquingKeysWith: { x, _ in x })
+            expectEqual(sent["up"], "45.00", "\(eye) override sends up 45.00 (u = 1.0)")
+            expectEqual(sent["down"], "-50.00", "\(eye) override sends down -50.00 (d = 1.1918)")
+            expectEqual(sent["left"], left, "\(eye) left")
+            expectEqual(sent["right"], right, "\(eye) right")
+        }
 
         expect(DebugEyeTangents.parse(nil) == nil, "absent: off")
         expect(DebugEyeTangents.parse("") == nil, "empty: off")

@@ -265,7 +265,7 @@ def doc(p):
         'the W32 fix (up and down swapped, below) after the per-eye canting circumscription (L x1.0118, R x1.0205), not the device '
         'frustum (W32 report, logs/w32-report.md).', '',
         '## FOV up/down correction', '',
-        '- Before W32 (`bugfix/fov-updown` 78bf427, not yet on develop) the client sent CompositorServices\' bottom tangent as '
+        '- Before W32 (`bugfix/fov-updown` 78bf427, merged to develop in 45f0079) the client sent CompositorServices\' bottom tangent as '
         '`Fov.up`: every stream so far was rendered %.0f deg up / %.0f deg down. With the fix it is %.0f up / %.0f down, the device\'s, '
         'and the eye axis sits %.1f deg above the frame\'s centre.' % (fdeg(t[2]), fdeg(t[3]), fdeg(t[3]), fdeg(t[2]),
                                                                        fdeg((t[2] - t[3]) / 2)),
