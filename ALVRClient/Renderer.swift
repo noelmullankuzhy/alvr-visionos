@@ -802,9 +802,14 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             sched_yield()
 
             // If visionOS skipped our last frame, let the queue fill up a bit
-            if EventHandler.shared.lastQueuedFrame != nil {
-                if EventHandler.shared.lastQueuedFrame!.timestamp != EventHandler.shared.lastSubmittedTimestamp && EventHandler.shared.frameQueue.count < 2 {
-                    queuedFrame = EventHandler.shared.lastQueuedFrame
+            // One locked copy: EventHandler.stop() clears lastQueuedFrame on another thread (a nil check then `!` crashed).
+            objc_sync_enter(EventHandler.shared.frameQueueLock)
+            let last = EventHandler.shared.lastQueuedFrame
+            let queueCount = EventHandler.shared.frameQueue.count
+            objc_sync_exit(EventHandler.shared.frameQueueLock)
+            if let last = last {
+                if FramePacing.shouldRetry(lastTimestamp: last.timestamp, lastSubmitted: EventHandler.shared.lastSubmittedTimestamp, queueCount: queueCount) {
+                    queuedFrame = last
                     EventHandler.shared.framesRendered -= 1
                     isReprojected = false
                     selectionSource = .retry
@@ -827,9 +832,12 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         }
 
         // Recycle old frame with old timestamp/anchor (visionOS doesn't do timewarp for us?)
-        if queuedFrame == nil && EventHandler.shared.lastQueuedFrame != nil {
+        objc_sync_enter(EventHandler.shared.frameQueueLock)
+        let lastForReuse = EventHandler.shared.lastQueuedFrame
+        objc_sync_exit(EventHandler.shared.frameQueueLock)
+        if queuedFrame == nil, let lastForReuse = lastForReuse {
             //print("Using last frame...")
-            queuedFrame = EventHandler.shared.lastQueuedFrame
+            queuedFrame = lastForReuse
             EventHandler.shared.framesRendered -= 1
             isReprojected = true
             selectionSource = .reuse
