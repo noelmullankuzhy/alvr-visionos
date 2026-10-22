@@ -174,6 +174,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     let resolutionChart: ResolutionChartRenderer?
     private var diagEye: DiagEyeRenderer?
     let diagFrameCapture: DiagFrameCaptureSession?
+    // Sharpness-chain capture (DiagStreamStages): the planes and state this frame's stream was drawn with. Set only while
+    // frame capture is on, cleared after the capture encode so no decoded frame is held past its frame.
+    var diagStreamSource: (planes: [MTLTexture], cvTextures: [CVMetalTexture], secret: Bool, colour: StreamColourState,
+                           chromaKey: ChromaKeySnapshot, pixelFormat: OSType)?
     var hdrEnabled = false
     var currentRenderColorFormat = renderColorFormatSDR
     var currentDrawableRenderColorFormat = renderColorFormatDrawableSDR
@@ -592,11 +596,12 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                                                           foveationVars: FoveationVars,
                                                           colour: StreamColourState,
                                                           chromaKey: ChromaKeySnapshot,
-                                                          variantName: String) throws -> MTLRenderPipelineState {
+                                                          variantName: String,
+                                                          vertexShaderName: String = "videoFrameVertexShader") throws -> MTLRenderPipelineState {
         
 
         let library = device.makeDefaultLibrary()
-        let vertexFunction = library?.makeFunction(name: "videoFrameVertexShader")
+        let vertexFunction = library?.makeFunction(name: vertexShaderName)
         let fragmentConstants = FFR.makeFunctionConstants(foveationVars)
         
         var enabled = chromaKey.enabled
@@ -1265,7 +1270,9 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         }
         diagFrameCapture?.encode(buffer: commandBuffer, drawables: drawables,
                                  idle: !renderingStreaming && !EventHandler.shared.streamingActive,
-                                 streamFrame: diagStreamFrame, pose: diagPose, chart: cornerChart)
+                                 streamFrame: diagStreamFrame, pose: diagPose, chart: cornerChart,
+                                 stages: { self.diagStreamStageTargets(commandBuffer: commandBuffer) })
+        diagStreamSource = nil
         for drawable in drawables {
             drawable.encodePresent(commandBuffer: commandBuffer)
         }
@@ -1984,6 +1991,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         //print("Pixel format \(formatStr) (\(format))")
         StreamTelemetry.shared.noteDecoderOutput(pixelFormat: format, lumaTextureFormat: textureTypes[0].rawValue, chromaTextureFormat: textureTypes[1].rawValue, name: formatStr)
 
+        var diagPlanes: [MTLTexture] = [], diagCVTextures: [CVMetalTexture] = []
         for i in 0...1 {
             var textureOut:CVMetalTexture! = nil
             var err:OSStatus = 0
@@ -2017,6 +2025,13 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 print("NO COMPRESSION ON VT FRAME!!!! AAAAAAAAA go file feedback again :(")
             }
             renderEncoder.setFragmentTexture(metalTexture, index: i)
+            if diagFrameCapture != nil { diagPlanes.append(metalTexture); diagCVTextures.append(textureOut) }
+        }
+        if diagFrameCapture != nil {
+            var secret = false
+            if case .explicitPlanes = colour.binding {} else { secret = VideoHandler.isFormatSecret(format) }
+            diagStreamSource = (diagPlanes, diagCVTextures, secret, colour,
+                                frameChromaKey ?? ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings), format)
         }
         if HDRProbe.enabled {
             HDRProbe.shared.sample(pixelBuffer: pixelBuffer, colour: colour)
@@ -2104,5 +2119,70 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         if !isRealityKit && ALVRClientApp.gStore.settings.showPerformanceHud {
             renderPerformanceHud(commandBuffer: commandBuffer, renderTargetColor: renderTargetColor, renderTargetDepth: renderTargetDepth, viewports: viewports, rasterizationRateMap: rasterizationRateMap, simdDeviceAnchor: simdDeviceAnchor)
         }
+    }
+}
+
+// Sharpness-chain capture stages (docs/lumen/sharpness-chain.md, DiagStreamStages): on a capture frame, draws the decoded
+// and the FFR-expanded stream of each eye with the stream's own fragment shader (same planes, sampler and colour
+// constants) through diagStageVertexShader (no warp) into private textures of the stream pipeline's colour format.
+// Pipelines are built per capture: debug path only, and captures are rare.
+extension Renderer {
+    func diagStreamStageTargets(commandBuffer: MTLCommandBuffer) -> [DiagFrameCapture.Target] {
+        guard let source = diagStreamSource, let luma = source.planes.first,
+              let foveation = videoFramePipelines.buildInputs()?.payload ?? nil else {
+            Diag.log("capture", ["error": "stages_unavailable", "why": diagStreamSource == nil ? "no_stream_planes" : "no_foveation_vars"])
+            return []
+        }
+        let variant = source.secret ? "SecretYpCbCrFormats" : "YpCbCrBiPlanar"
+        let colorFormat = layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat
+        let unfoveated = FoveationVars(enabled: false, targetEyeWidth: foveation.targetEyeWidth, targetEyeHeight: foveation.targetEyeHeight,
+                                       optimizedEyeWidth: foveation.optimizedEyeWidth, optimizedEyeHeight: foveation.optimizedEyeHeight,
+                                       eyeWidthRatio: foveation.eyeWidthRatio, eyeHeightRatio: foveation.eyeHeightRatio,
+                                       centerSizeX: foveation.centerSizeX, centerSizeY: foveation.centerSizeY,
+                                       centerShiftX: foveation.centerShiftX, centerShiftY: foveation.centerShiftY,
+                                       edgeRatioX: foveation.edgeRatioX, edgeRatioY: foveation.edgeRatioY)
+        func pipeline(_ vars: FoveationVars) -> MTLRenderPipelineState? {
+            try? buildRenderPipelineForVideoFrameWithDevice(device: device, mtlVertexDescriptor: mtlVertexDescriptor, colorFormat: colorFormat,
+                                                            viewCount: 1, foveationVars: vars, colour: source.colour, chromaKey: source.chromaKey,
+                                                            variantName: variant, vertexShaderName: "diagStageVertexShader")
+        }
+        guard let decodedPipeline = pipeline(unfoveated), let expandedPipeline = pipeline(foveation) else {
+            Diag.log("capture", ["error": "stage_pipeline_failed", "variant": variant])
+            return []
+        }
+        let planes = source.planes.map { (format: DiagFrameCapture.formatName($0.pixelFormat), width: $0.width, height: $0.height) }
+        let decoderFormat = ColourPipeline.fourCC(source.pixelFormat)
+        var targets: [DiagFrameCapture.Target] = []
+        for plan in DiagStreamStages.plans(decodedWidth: luma.width, decodedHeight: luma.height, viewWidth: Int(foveation.targetEyeWidth),
+                                           viewHeight: Int(foveation.targetEyeHeight), ffr: foveation.enabled) {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: colorFormat, width: plan.width, height: plan.height, mipmapped: false)
+            descriptor.storageMode = .private
+            descriptor.usage = .renderTarget
+            let pass = MTLRenderPassDescriptor()
+            guard let texture = device.makeTexture(descriptor: descriptor) else {
+                Diag.log("capture", ["error": "stage_texture_allocation_failed", "stage": plan.stage, "eye": plan.eye])
+                return []
+            }
+            pass.colorAttachments[0].texture = texture
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return [] }
+            encoder.label = "Diagnostic stream stage \(plan.stage) \(plan.eye)"
+            encoder.setRenderPipelineState(plan.ffr ? expandedPipeline : decodedPipeline)
+            var rect = plan.uvRect
+            encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+            for (index, plane) in source.planes.enumerated() {
+                encoder.setFragmentTexture(plane, index: index)
+            }
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            encoder.endEncoding()
+            targets.append(DiagFrameCapture.Target(texture: texture, views: [], rateMap: nil, drawableIndex: -1,
+                                                   stage: DiagStreamStages.record(plan, planes: planes, shader: "videoFrameFragmentShader_" + variant,
+                                                                                  decoderPixelFormat: decoderFormat)))
+        }
+        let retained = source.cvTextures   // the planes' CoreVideo backing lives until the stage passes have run
+        commandBuffer.addCompletedHandler { _ in _ = retained }
+        return targets
     }
 }

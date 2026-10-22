@@ -481,3 +481,15 @@ fragment float4 diagEyeFragment(DiagEyeVertexOut in [[stage_in]], constant float
     bool ink = cell.x >= 0 && cell.x < 3 && cell.y >= 0 && cell.y < 5 && ((glyph >> uint(cell.y * 3 + cell.x)) & 1u);
     return ink ? float4(0, 0, 0, 1) : colour;
 }
+
+// Sharpness-chain capture stages (DiagStreamStages, Renderer.diagStreamStageTargets): a full-target quad (4-vertex strip)
+// whose texCoord spans uvRect (x, y, w, h) of the decoded frame, no warp, for the stream fragment shaders. The target is
+// sized so pixel centres land on texel centres when uvRect covers one eye at 1:1.
+vertex ColorInOut diagStageVertexShader(ushort vertexID [[vertex_id]], constant float4 &uvRect [[buffer(0)]])
+{
+    ColorInOut out;
+    float2 uv = float2(float((vertexID << ushort(1)) & 2u) * 0.5, float(vertexID & ushort(2)) * 0.5);
+    out.position = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+    out.texCoord = uvRect.xy + uv * uvRect.zw;
+    return out;
+}
