@@ -10,11 +10,15 @@ Modes (first argument):
   encoded   foveated eye image: forward foveation map
   drawable  DiagFrameCapture directory: view tangents -> logical screen -> physical via the rate tables; the stream
             covers s x the view tangents, black outside
+            (assumption: when the views are canted the client sends circumscribed tangents, larger than s x view,
+            RealityKit.swift:98-160 / Renderer.swift:962; pass --stream-tangents L,R,D,U to override)
   synth     write a synthetic image (--kind render|encoded|drawable) from the same parameters, for tests
 
 --tangents L,R,D,U are literal |tan| of the render FOV's left/right/down/up (screen sides). Default device: left eye
 1.7321,1.0,1.1918,1.0 (temporal, nasal, down, up); the right eye is mirrored (1.0,1.7321,1.1918,1.0). The render FOV
-is s x these tangents (--fov-scale). drawable mode reads the view tangents from capture.json.
+is s x these tangents (--fov-scale). --stream-tangents overrides that stream extent. --foveation is off unless given
+(or --meta says "foveation": true): ALVR pads to 32 px whenever it is enabled, even at c=1. resolved px/deg is 1/PSF, per
+degree of the PSF width, not a pixel count. drawable mode reads the view tangents from capture.json.
 --region crops one eye out of a side-by-side frame (the overlay PNG is that crop); predicted_px and measured_px are in
 source-image coordinates. residual_deg is signed in the image direction (+ right/down). Linear RGB is written as 8-bit
 values directly (no gamma). Exit code 0 PASS, 1 FAIL, 2 bad input. Python 3.9+, standard library only.
@@ -91,10 +95,8 @@ def f32(x):
 
 
 def fov_axis(c, s, r, n):
-    """ALVR foveation per axis (FFR.cpp CalculateFoveationVars): c centre size, s shift, r edge ratio, n render px."""
-    if c >= 0.999 or r <= 1.0001:
-        # foveation off: ALVR passes the composition texture through, no 32 px padding
-        return {'c': 1.0, 's': 0.0, 'r': 1.0, 'f': 1.0, 'opt': float(n), 'coded': int(n)}
+    """ALVR foveation per axis (FFR.cpp CalculateFoveationVars): c centre size, s shift, r edge ratio, n render px.
+    Foveation enabled pads to 32 even at c=1 (use fov_off for foveation disabled)."""
     # float32 as in FFR.cpp: settings and results are floats, the 1. / 2. literals promote to double
     c, s, r, n = f32(c), f32(s), f32(r), f32(n)
     edge = f32(n - f32(c * n))
@@ -105,6 +107,11 @@ def fov_axis(c, s, r, n):
     opt = f32(f * n)
     coded = int(math.ceil(f32(opt / 32.)) * 32)
     return {'c': ca, 's': sa, 'r': r, 'f': f, 'opt': opt, 'coded': coded}
+
+
+def fov_off(n):
+    """Foveation disabled (enableFoveatedEncoding false): the texture passes through, no 32 px padding."""
+    return {'c': 1.0, 's': 0.0, 'r': 1.0, 'f': 1.0, 'opt': float(n), 'coded': int(n)}
 
 
 def u_of_c(C, a):
@@ -232,7 +239,7 @@ class Axis:
         return min(a, b), max(a, b)
 
     def fov_or_off(self):
-        return self.fov or fov_axis(1, 0, 1, self.n_render)
+        return self.fov or fov_off(self.n_render)
 
     def band_t(self):
         """Span of the 1:1 band in stream fractions t (render image, left to right)."""
@@ -309,7 +316,7 @@ def make_axis(kind, mode, lo, hi, n_render, fov=None, drawable=None, shift=0, mi
     if mode == 'render':
         return RenderAxis(lo, hi, n_render, shift, fov, mirror)
     if mode == 'encoded':
-        return EncodedAxis(lo, hi, n_render, fov or fov_axis(1, 0, 1, n_render), shift, mirror)
+        return EncodedAxis(lo, hi, n_render, fov or fov_off(n_render), shift, mirror)
     return DrawableAxis(lo, hi, n_render, *drawable, fov=fov, mirror=mirror)
 
 
@@ -393,7 +400,18 @@ def synth_encoded(w, h, tangents, s, eye, fov):
     left, right, down, up = tangents
     x = make_axis('h', 'encoded', -s * left, s * right, w, fov=fov[0], mirror=eye == 'R')
     y = make_axis('v', 'encoded', -s * up, s * down, h, fov=fov[1])
-    return synth_image(x, y, eye), x.length, y.length
+    img = bytearray(synth_image(x, y, eye))
+    # ALVR's padding holds stray full-width/height colour (seen on real frames): a line-like artefact the search must ignore
+    xs, ys = x.span(), y.span()
+    cx = max(0, int(xs[0]) - 8) if eye == 'R' else min(x.length - 1, int(xs[1]) + 8)
+    cy = min(y.length - 1, int(ys[1]) + 8)
+    if (cx < xs[0] - 2) if eye == 'R' else (cx > xs[1] + 2):
+        for j in range(y.length):
+            img[(j * x.length + cx) * 4:(j * x.length + cx) * 4 + 3] = b'\x00\xff\x00'
+    if cy > ys[1] + 2:
+        for i in range(x.length):
+            img[(cy * x.length + i) * 4:(cy * x.length + i) * 4 + 3] = b'\xff\x00\xff'
+    return bytes(img), x.length, y.length
 
 
 def rate_table(logical, physical, rmin=0.35):
@@ -532,10 +550,10 @@ def stream_edges(pix, width, region, axis_kind, span):
         else:
             base = (y0 * width + x0 + k) * 4
             v = [max(pix[base + 4 * width * i:base + 4 * width * i + 3]) for i in range(n)]
-        idx = [i for i in range(n - 2) if v[i] > 6 and v[i + 1] > 6 and v[i + 2] > 6]
+        idx = [i for i in range(n) if v[i] > 6 and v[min(i + 1, n - 1)] > 6 and v[min(i + 2, n - 1)] > 6]
         if idx:
             firsts.append(idx[0])
-            lasts.append(idx[-1] + 1)
+            lasts.append(min(n, idx[-1] + 3))
     if not firsts:
         return None, None
     a, b = statistics.median(firsts) + (x0 if horizontal else y0), statistics.median(lasts) + (x0 if horizontal else y0)
@@ -553,8 +571,8 @@ def analyse(pix, width, region, xaxis, yaxis):
     rel_x = (max(0.0, xspan[0] - x0) + 2, min(w, xspan[1] - x0) - 2)
     rel_y = (max(0.0, yspan[0] - y0) + 2, min(h, yspan[1] - y0) - 2)
     lines = []
-    for kind, name, axname, axis, off, other, n_axis in (('v', 'vertical', 'x', xaxis, x0, rel_y, w),
-                                                         ('h', 'horizontal', 'y', yaxis, y0, rel_x, h)):
+    for kind, name, axname, axis, off, other, n_axis, span in (('v', 'vertical', 'x', xaxis, x0, rel_y, w, xspan),
+                                                               ('h', 'horizontal', 'y', yaxis, y0, rel_x, h, yspan)):
         axkind = 'h' if kind == 'v' else 'v'
         specs = chart_lines(axkind, axis.lo, axis.hi, axis.n_render)
         preds = sorted(((s, axis.px(s[1]) - off) for s in specs if 0 <= axis.px(s[1]) - off < n_axis), key=lambda sp: sp[1])
@@ -567,7 +585,9 @@ def analyse(pix, width, region, xaxis, yaxis):
             next_p = preds[idx + 1][1] if idx + 1 < len(preds) else None
             below = (p - prev_p) / 2 if prev_p is not None else ((next_p - p) / 2 if next_p is not None else 10)
             above = (next_p - p) / 2 if next_p is not None else below
-            found = find_line(prof, p - below, p + above) if used else None
+            # never search the padding beyond the stream (ALVR pads to 32 px; that area is not image content)
+            lo_win, hi_win = max(p - below, span[0] - off), min(p + above, span[1] - off)
+            found = find_line(prof, lo_win, hi_win) if used else None
             t = axis.t_of(tau)
             zone = 'band' if t0 - 1e-9 <= t <= t1 + 1e-9 else 'edge'
             scale = local_scale(axis, tau_of, angle)
@@ -779,7 +799,7 @@ def size_arg(text, name):
 
 def parse_foveation(text, render):
     if text is None or text.lower() == 'off':
-        return [fov_axis(1, 0, 1, render[0]), fov_axis(1, 0, 1, render[1])]
+        return [fov_off(render[0]), fov_off(render[1])]
     cx, cy, rx, ry, shx, shy = pair(text, float, 6, '--foveation')
     return [fov_axis(cx, shx, rx, render[0]), fov_axis(cy, shy, ry, render[1])]
 
@@ -795,6 +815,8 @@ def build_parser():
     p.add_argument('--fov-scale', type=float, default=1.0)
     p.add_argument('--render', help='WxH per eye (default: 3648x2912; render mode: the region size)')
     p.add_argument('--foveation', help='cx,cy,rx,ry,shx,shy or off (default off)')
+    p.add_argument('--stream-tangents', help='L,R,D,U |tan| the stream really covers (default fov-scale x tangents; the client sends '
+                   'larger circumscribed tangents when the views are canted)')
     p.add_argument('--meta', type=Path, help='ALVR angle-chart dump meta.json: tangents, render size, foveation, coded size')
     p.add_argument('--out-png')
     p.add_argument('--out-json')
@@ -880,6 +902,9 @@ def run_measure(a):
         render = (w, h) if mode == 'render' else REN
     left, right, down, up = tangents
     lo_x, hi_x, lo_y, hi_y = -s * left, s * right, -s * up, s * down
+    if a.stream_tangents:                       # the stream's own |tan| L,R,D,U (already s x view): replaces s x tangents
+        sl_, sr_, sd_, su_ = pair(a.stream_tangents, float, 4, '--stream-tangents')
+        lo_x, hi_x, lo_y, hi_y = -sl_, sr_, -su_, sd_
     fov = parse_foveation(foveation, render)
     mirror = a.eye == 'R'
     if mode == 'render':
@@ -938,7 +963,7 @@ def print_summary(summary, mode, eye, s):
         z = summary['zones'][zone]
         if not z['n_predicted']:
             continue
-        print('  {}: found {}/{}, resolvable {}, sharpness {} px/deg (predicted {}), PSF {} deg, resolved {} px/deg'.format(
+        print('  {}: found {}/{}, resolvable {}, sharpness {} px/deg (predicted {}), PSF {} deg, resolved (1/PSF, per deg) {}'.format(
             zone, z['n_found'], z['n_predicted'], z['n_resolvable'], f(z['sharpness_px_per_deg'], '%.1f'),
             f(z['predicted_px_per_deg'], '%.1f'), f(z['psf_deg'], '%.4f'), f(z['resolved_px_per_deg'], '%.1f')))
     for side, e in summary['stream_extent_deg'].items():

@@ -382,7 +382,7 @@ class ReviewFixes(Base):
 
     # 7. NITs
     def test_foveation_off_has_no_padding_and_shift_not_clamped(self):
-        off = fo.fov_axis(1, 0, 1, 1830)
+        off = fo.fov_off(1830)
         self.assertEqual(off['coded'], 1830)
         self.assertGreater(fo.fov_axis(0.5, 1.4, 3, 3648)['s'], 1.0)
 
@@ -440,18 +440,96 @@ class MetaOption(Base):
         self.assertEqual(j['summary']['params']['foveation'], 'off')
 
 
+class Fix2(Base):
+    RENDER = ['--render', '1824x1456']
+    PAD = ['--foveation', '0.6,0.6,2.5,2.5,0.3,0.3']
+    TAN = ['--tangents', '1.7321,1.0,0.3839,1.0']       # bottom edge 21 deg: the -20 deg line sits next to the padding
+
+    def synth(self, kind, extra, name=None):
+        png = self.dir / ((name or kind) + '.png')
+        self.assertEqual(self.run_main(['synth', '--kind', kind, '--out-png', png] + list(extra)), 0)
+        return png
+
+    def test_padding_artefact_is_not_searched(self):
+        for eye in 'LR':
+            args = self.RENDER + self.PAD + self.TAN + ['--eye', eye]
+            png = self.synth('encoded', args, 'pad' + eye)
+            w, h, pix = fo.vc.read_png(png)
+            yx = fo.parse_foveation(self.PAD[1], (1824, 1456))
+            self.assertGreater(h, yx[1]['opt'] + 3)               # padding exists
+            cy = int(yx[1]['opt']) + 8
+            self.assertEqual(bytes(pix[(cy * w + 5) * 4:(cy * w + 5) * 4 + 3]), b'\xff\x00\xff')  # artefact present
+            code, j = self.measure('encoded', png, args, 'pad' + eye)
+            self.assertEqual(code, 0, (eye, j['summary']['verdict_reasons']))
+            self.assertLess(j['summary']['axes']['y']['max_abs_residual_deg'], 0.5)
+
+    def test_stream_edges_with_lifted_surround(self):
+        extra = ['--render', '912x728', '--fov-scale', '0.65', '--phys', '1216x1184']
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + extra), 0)
+        cap = json.loads((d / 'capture.json').read_text())
+        sl = cap['slices'][0]
+        w, h, pix = fo.vc.read_png(d / sl['png'])
+        lifted = bytearray(pix)
+        for k in range(0, len(lifted), 4):
+            if max(lifted[k:k + 3]) == 0:
+                lifted[k:k + 3] = b'\x0a\x0a\x0a'
+        fo.vc.write_png(d / sl['png'], w, h, bytes(lifted))
+        out = self.dir / 'lift.json'
+        self.run_main(['drawable', '--capture-dir', d, '--out-json', out] + extra)
+        j = json.loads(out.read_text())
+        self.assertEqual(j['summary']['verdict'], 'PASS', j['summary']['verdict_reasons'])
+
+    def test_foveation_enabled_at_c1_pads(self):
+        a = fo.fov_axis(1.0, 0.0, 3.0, 1824)
+        self.assertEqual(a['coded'] % 32, 0)
+        self.assertEqual(fo.fov_off(1830)['coded'], 1830)
+        self.assertEqual(fo.parse_foveation('off', (1830, 1456))[0]['coded'], 1830)
+        self.assertEqual(fo.parse_foveation('1,1,3,3,0,0', (1830, 1456))[0]['coded'], 1856)
+
+    def test_stream_tangents_override(self):
+        extra = ['--render', '912x728', '--fov-scale', '0.65', '--phys', '1216x1184']
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + extra), 0)
+        base = ['--capture-dir', d, '--fov-scale', '0.9', '--render', '912x728']
+        out = self.dir / 'w.json'
+        self.run_main(['drawable', '--out-json', out] + base)
+        self.assertEqual(json.loads(out.read_text())['summary']['verdict'], 'FAIL')
+        tg = json.loads((d / 'capture.json').read_text())['slices'][0]['tangents']
+        st = ','.join(repr(0.65 * v) for v in tg)
+        self.run_main(['drawable', '--out-json', out, '--stream-tangents', st] + base)
+        j = json.loads(out.read_text())
+        self.assertEqual(j['summary']['verdict'], 'PASS', j['summary']['verdict_reasons'])
+
+
+
 REAL = Path('/Users/noel/Projects/Management/goals/rdr2-vr/evidence/chart-matrix-20261022/m1/f100-asrun/dump')
 
 
 @unittest.skipUnless((REAL / 'meta.json').exists(), 'real sample not present')
 class RealSample(Base):
-    def test_render_and_encoded_both_eyes_pass(self):
+    def check(self, point):
+        d = REAL.parent.parent / point / 'dump'
+        if not (d / 'meta.json').exists():
+            self.skipTest('no ' + point)
         for eye in 'LR':
-            code, j = self.measure('render', REAL / ('chart-%s.png' % eye), ['--meta', REAL / 'meta.json', '--eye', eye], 'r' + eye)
-            self.assertEqual(code, 0, (eye, j['summary']['verdict_reasons']))
-            code, j = self.measure('encoded', REAL / 'encoder-input.png', ['--meta', REAL / 'meta.json', '--eye', eye], 'e' + eye)
-            self.assertEqual(code, 0, (eye, j['summary']['verdict_reasons']))
+            code, j = self.measure('render', d / ('chart-%s.png' % eye), ['--meta', d / 'meta.json', '--eye', eye], point + 'r' + eye)
+            self.assertEqual(code, 0, (point, eye, j['summary']['verdict_reasons']))
+            code, j = self.measure('encoded', d / 'encoder-input.png', ['--meta', d / 'meta.json', '--eye', eye], point + 'e' + eye)
+            self.assertEqual(code, 0, (point, eye, j['summary']['verdict_reasons']))
             self.assertLessEqual(j['summary']['median_abs_residual_deg'], 0.05)
+
+    def test_render_and_encoded_both_eyes_pass(self):
+        self.check('f100-asrun')
+
+    def test_f070_wider(self):
+        self.check('f070-wider')
+
+    def test_f060_centred(self):
+        self.check('f060-centred')
+
+    def test_oneone(self):
+        self.check('oneone')
 
 
 class Spec(unittest.TestCase):
