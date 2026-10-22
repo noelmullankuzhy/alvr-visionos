@@ -155,13 +155,84 @@ class EyeTangentsTest(unittest.TestCase):
             text = f.read()
         pts = fm.parse_points(text.splitlines())
         names = ['a%s-%s' % (s, v) for s in ('100', '085', '070') for v in ('asrun', 'centred', 'wider')]
-        self.assertEqual([p['name'] for p in pts], names)
-        for p in pts:
+        rec = ['a100-axis-C', 'a100-axis-A', 'a100-wider-A']          # the doc's three recommended settings
+        self.assertEqual([p['name'] for p in pts], names + rec)
+        for p in pts[:len(names)]:
             scale, variant = p['name'][1:].split('-')
             self.assertEqual(p['fov_scale'], int(scale) / 100)
             self.assertEqual(p['eye_tangents'], AVP_EYES)
             self.assertEqual((p['render_scale'], p['bitrate_mbps'], p['fps'], p['extra'], p['flag']), (1.0, 100.0, 90.0, [], 'dump'))
+        # recommended: full frustum, the budget's render size (4176x3334 C axis, 3648x2912 A axis, 3008x2402 A wider)
+        by = {p['name']: p for p in pts}
+        for name, fv, rs, budget in (('a100-axis-C', (0.5, 0.45, 3.0, 3.0, 0.536, -0.159), 4176 / 3648, (2784, 2240)),
+                                     ('a100-axis-A', (0.5, 0.45, 3.0, 3.0, 0.536, -0.159), 1.0, (2432, 1856)),
+                                     ('a100-wider-A', (0.563, 0.618, 2.5, 2.5, 0.335, -0.168), 3008 / 3648, (2432, 1856))):
+            p = by[name]
+            self.assertEqual((p['fov_scale'], p['foveation'], p['eye_tangents'], p['bitrate_mbps'], p['fps'], p['flag']),
+                             (1.0, fv, AVP_EYES, 100.0, 90.0, 'dump'))
+            self.assertAlmostEqual(p['render_scale'], rs, places=4)
+            ax, ay = AS.axes_for(fv, *fm.render_size(p['render_scale']))
+            self.assertLessEqual(ax['coded'], budget[0])                          # the matrix's render fits the budget
+            self.assertLessEqual(ay['coded'], budget[1])
         self.assertEqual(text, AS.points(AS.load()), 'regenerate: python3 tools/diag/avp-sharpness.py points > tools/fov-matrix/points-chart-avp.tsv')
+
+    def test_device_density_by_hand(self):
+        # viewport 6261x5023 over the device's |tan| spans (1.7321 + 1.0, 1.1918 + 1.0)
+        px_x, px_y, deg = AS.device_density(AS.load())
+        self.assertAlmostEqual(px_x, 6261 / 2.7321, places=6)
+        self.assertEqual(round(px_x, 1), 2291.6)
+        self.assertEqual(round(px_y, 1), 2291.7)
+        self.assertEqual(round(deg, 1), 40.0)                   # 2291.6 x pi / 180 on the axis
+
+    def test_axis_shift_by_hand(self):
+        # Band centre on the eye axis (tan 0). ALVR eye UV: x from the temporal edge, y from the top (Shaders.metal);
+        # shift = (t_lo - t_hi) / (t_lo + t_hi) / (1 - c).
+        self.assertAlmostEqual((1.7321 - 1.0) / (1.7321 + 1.0), 0.2680, places=4)
+        self.assertEqual(round(AS.axis_shift(1.7321, 1.0, 0.5), 3), 0.536)        # x: temporal 1.7321, nasal 1.0
+        self.assertAlmostEqual(AS.axis_shift(1.7321, 1.0, 0.5), 0.2680 / 0.5, places=3)
+        self.assertEqual(round(AS.axis_shift(1.0, 1.1918, 0.45), 3), -0.159)      # y: up 1.0, down 1.1918 (W32)
+        self.assertAlmostEqual(AS.axis_shift(1.0, 1.1918, 0.45), (1.0 - 1.1918) / 2.1918 / 0.55, places=6)
+        self.assertEqual(round(AS.axis_shift(1.1918, 1.0, 0.45), 3), 0.159)       # pre-W32 stream: up 1.1918, down 1.0
+        self.assertEqual(AS.axis_shift(1.3, 1.3, 0.45), 0.0)
+        self.assertEqual(AS.derive(AS.load(), 1.0, 'axis'), (0.5, 0.45, 3, 3, 0.536, -0.159))
+        # the shift follows the tangents in the parameter file, not a literal
+        p = AS.load()
+        p['frustum_tan_LRDU'] = {'L': [1.7321, 1.0, 1.0, 1.1918], 'R': [1.0, 1.7321, 1.0, 1.1918]}
+        self.assertEqual(AS.derive(p, 1.0, 'axis')[4:], (0.536, 0.159))
+
+    def test_wider_exact_by_hand(self):
+        p = AS.load()
+        want = {1.0: (0.563, 0.618, 2.5, 2.5, 0.335, -0.168), 0.85: (0.662, 0.726, 2.5, 2.5, 0.37, -0.22),
+                0.7: (0.805, 0.882, 2.5, 2.5, 0.485, -0.461)}
+        for s, fv in want.items():
+            self.assertEqual(AS.derive(p, s, 'wider'), fv)
+        # s = 1 by hand: the field spans (tan 43 + tan 31) / 2.7321 = 0.5612 of the width and (tan 33 + tan 35) / 2.1918
+        # = 0.6158 of the height; ALVR's 2r-px rounding at 3648/2912 widens them to 0.563/0.618. Centre fractions
+        # (1.7321 - (tan 43 - tan 31) / 2) / 2.7321 and (1.0 - (tan 33 - tan 35) / 2) / 2.1918 give the shifts.
+        t = lambda d: math.tan(math.radians(d))
+        self.assertAlmostEqual((t(43) + t(31)) / 2.7321, 0.5612, places=4)
+        self.assertAlmostEqual((t(33) + t(35)) / 2.1918, 0.6158, places=4)
+        fx = (1.7321 - (t(43) - t(31)) / 2) / 2.7321
+        fy = (1.0 - (t(33) - t(35)) / 2) / 2.1918
+        self.assertEqual(round((fx - 0.5) / ((1 - 0.563) / 2), 3), 0.335)
+        self.assertEqual(round((fy - 0.5) / ((1 - 0.618) / 2), 3), -0.168)
+
+    def test_recommended_centre_by_hand(self):
+        # Centre px/deg = render px over the |tan| span x pi/180 (1:1 band at the axis); min of horizontal and vertical.
+        rec = AS.recommend(list(AS.candidates(AS.load())))
+        self.assertEqual([(r['budget'], r['fov'], r['render']) for r in rec],
+                         [('C', 'axis', (4176, 3334)), ('A', 'axis', (3648, 2912)), ('A', 'wider', (3008, 2402))])
+        k = math.pi / 180
+        for r, (w, h), want in zip(rec, ((4176, 3334), (3648, 2912), (3008, 2402)), (26.5, 23.2, 19.1)):
+            hand = min(w / 2.7321 * k, h / 2.1918 * k)
+            self.assertEqual(round(hand, 1), want)
+            self.assertAlmostEqual(r['centre'], hand, places=2)
+        # the render sizes from the budgets by hand: axis codes x at 0.5 + 0.5/3 = 2/3 (2784 / (2/3) = 4176, 2432 / (2/3)
+        # = 3648); wider is height-bound at 0.618 + 0.382/2.5 = 0.7708 (1856 / 0.7708 = 2408 rows -> 3008x2402 after
+        # ALVR's 32-px coded padding)
+        self.assertEqual(round(2784 / (0.5 + 0.5 / 3)), 4176)
+        self.assertEqual(round(2432 / (0.5 + 0.5 / 3)), 3648)
+        self.assertEqual(round(1856 / (0.618 + 0.382 / 2.5)), 2408)
 
     def test_variants_derive_from_the_visible_field(self):
         p = AS.load()

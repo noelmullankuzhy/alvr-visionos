@@ -86,9 +86,12 @@ disabled): `enc-base100` (flag `dump`, split ForceTwo, 100 Mbps: normal chart as
 
 ## Vision Pro frustum in the simulator
 
-`points-chart-avp.tsv` (`a100`/`a085`/`a070` x `asrun`/`centred`/`wider`, 100 Mbps) makes the simulator client report
+`points-chart-avp.tsv` (`a100`/`a085`/`a070` x `asrun`/`centred`/`wider`, plus the doc's three recommended settings
+`a100-axis-C`/`a100-axis-A`/`a100-wider-A` at their budget's render scale; 100 Mbps) makes the simulator client report
 the device AVP per-eye frustum (CompositorServices |tan| L,R,D,U: L 1.7321,1,1.1918,1; R 1,1.7321,1.1918,1) x `fov_scale`
-instead of its own view. Needs a client with `-ALVRDebugEyeTangents` (debug/simulator builds).
+instead of its own view. Needs a client with `-ALVRDebugEyeTangents` (debug/simulator builds) and the W32 up/down fix
+(`bugfix/fov-updown`): the argument fills the (left, right, bottom, top) slots, which only the fixed packing sends as
+up = top.
 
 The file is generated: the frustum, the visible field (default the 21 Oct seal-on 31/43/33/35 deg nasal/temporal/up/down)
 and the foveation sizes live in `avp-field.json`; `centred` (band on the field centre) and `wider` (band spans the field)

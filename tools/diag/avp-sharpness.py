@@ -60,8 +60,24 @@ def field_fractions(p, eye, s):
     return (x0, x1), (y0, y1)
 
 
+def device_density(p):
+    """visionOS logical px per tan unit (x, y) and px/deg on the axis: the viewport over the left eye's |tan| spans."""
+    l, r, d, u = p['frustum_tan_LRDU']['L']
+    vw, vh = p['frustum_tan_LRDU']['viewport']
+    return vw / (l + r), vh / (d + u), vw / (l + r) * math.pi / 180
+
+
 def shift_for(frac, c):
+    """ALVR center_shift for a band centred at `frac` of the eye: the band spans [c0(1 + s), 1 - c0(1 - s)] with
+    c0 = (1 - c)/2, so its centre is 0.5 + s c0 (ALVRClient/Shaders.metal:152-157; FFR.swift:88-89 only rounds s)."""
     return (frac - 0.5) / (((1 - c) / 2) or 1)
+
+
+def axis_shift(t_lo, t_hi, c):
+    """center_shift that centres the band on the eye axis (tan 0) of an axis spanning |tan| t_lo at eye UV 0 to t_hi at
+    UV 1: (t_lo - t_hi) / (t_lo + t_hi) / (1 - c). Eye UV x runs from the temporal edge (R mirrored, Shaders.metal:136-140),
+    y from the top (texture row 0), so t_lo is temporal for x and up for y; negative y moves the band up."""
+    return shift_for(t_lo / (t_lo + t_hi), c)
 
 
 def mean(v):
@@ -77,9 +93,9 @@ def derive(p, s, variant):
         return (cx, cy, rx, ry, 0.0, 0.0)
     if variant == 'axis':                   # eye axis = tan 0
         (cx, cy), (rx, ry) = p['centred']['size'], p['centred']['edge_ratio']
-        fx = mean([sides(p, e, s)[0] / sum(sides(p, e, s)[:2]) for e in 'LR'])
-        fy = mean([sides(p, e, s)[2] / sum(sides(p, e, s)[2:]) for e in 'LR'])
-        return (cx, cy, rx, ry, round(shift_for(fx, cx), 3), round(shift_for(fy, cy), 3))
+        shx = mean([axis_shift(*sides(p, e, s)[:2], cx) for e in 'LR'])     # temporal, nasal
+        shy = mean([axis_shift(*sides(p, e, s)[2:], cy) for e in 'LR'])     # up, down
+        return (cx, cy, rx, ry, round(shx, 3), round(shy, 3))
     fr = [field_fractions(p, e, s) for e in 'LR']
     fx, fy = mean([mean(x) for x, _ in fr]), mean([mean(y) for _, y in fr])
     if variant == 'centred':
@@ -187,6 +203,10 @@ def points(p):
         for v in ('asrun', 'centred', 'wider'):
             out.append('a%03d-%s\t%g\t%g\t%s\t%g\t%g\teye_tangents=%s' % (round(s * 100), v, s, pt['render_scale'], fvtext(derive(p, s, v)),
                                                                       pt['bitrate_mbps'], pt['fps'], eyes))
+    out.append('# The three recommended settings (doc "Recommendation"): render scale = the budget\'s render width / 3648.')
+    for r in recommend(list(candidates(p))):
+        out.append('a%03d-%s-%s\t%g\t%g\t%s\t%g\t%g\teye_tangents=%s' % (round(r['s'] * 100), r['fov'], r['budget'], r['s'], round(r['render'][0] / ASPECT[0], 4),
+                                                                         fvtext(r['fv']), pt['bitrate_mbps'], pt['fps'], eyes))
     return '\n'.join(out) + '\n'
 
 
@@ -237,16 +257,37 @@ def doc(p):
         'not checked against the SPS) | w6-encoder-plan.md:123-125 |',
         '| Game density | R.E.A.L. renders 989 px/tan: %.1f px/deg at the centre; 989 x (1 + tan^2) x pi/180 = %.1f / %.1f / %.1f at '
         '10 / 20 / 30 deg | GOAL.md:366 |' % ((game(0),) + tuple(game(a) for a in ANGLES)),
-        '| AVP display density | visionOS asks for 40.0 logical px/deg on the axis (6261x5023 = 2291.6 px per tan unit at render '
-        'quality 1.0). That 40 reaches the eye is **not established** (physical texture 2432x2368 under a rate map not logged). '
-        'Panel ~36 PPD is **unverified** | avp-frustum-reference.md; GOAL.md:230 |', '',
-        'The R.E.A.L. log tangents (L U1.217 D1.019 L1.782 R1.019, R mirrored) are not used: they come downstream of SteamVR/OpenVR, '
-        'are slightly larger than the device\'s CompositorServices values, and their up and down appear swapped relative to them (unverified).', '',
+        '| AVP display density | visionOS asks for %.1f logical px/deg on the axis (%dx%d = %.1f px per tan unit at render '
+        'quality 1.0). That it reaches the eye is **not established** (physical texture 2432x2368 under a rate map not logged). '
+        'Panel ~36 PPD is **unverified** | avp-frustum-reference.md; GOAL.md:230 |' % (
+            device_density(p)[2], e['viewport'][0], e['viewport'][1], device_density(p)[0]), '',
+        'The R.E.A.L. log tangents (L U1.217 D1.019 L1.782 R1.019, R mirrored) are not used: they are what our client sent before '
+        'the W32 fix (up and down swapped, below) after the per-eye canting circumscription (L x1.0118, R x1.0205), not the device '
+        'frustum (W32 report, logs/w32-report.md).', '',
+        '## FOV up/down correction', '',
+        '- Before W32 (`bugfix/fov-updown` 78bf427, not yet on develop) the client sent CompositorServices\' bottom tangent as '
+        '`Fov.up`: every stream so far was rendered %.0f deg up / %.0f deg down. With the fix it is %.0f up / %.0f down, the device\'s, '
+        'and the eye axis sits %.1f deg above the frame\'s centre.' % (fdeg(t[2]), fdeg(t[3]), fdeg(t[3]), fdeg(t[2]),
+                                                                       fdeg((t[2] - t[3]) / 2)),
+        '- ALVR\'s convention: the 1:1 band spans eye UV [c0(1 + s), 1 - c0(1 - s)], c0 = (1 - c)/2, centre 0.5 + s c0 '
+        '(`ALVRClient/Shaders.metal:152-157`; `FFR.swift:88-89` only rounds s to 2r px). Eye UV x runs from the temporal edge '
+        '(R mirrored, `Shaders.metal:136-140`) and y from the top row, so a negative `center_shift_y` moves the band up. '
+        'The axis-centred shift is (t_lo - t_hi)/(t_lo + t_hi)/(1 - c) with t_lo the temporal (x) or up (y) |tan| '
+        '(`axis_shift` in the generator).',
+        '- `center_shift_y` for the axis variant (c %g): pre-W32 stream (up %g, down %g) %+.3f; corrected stream (up %g, down %g) '
+        '%+.3f. This analysis has always used the device frustum, so its -0.159 is unchanged, but it suits only a client with the '
+        'W32 fix; on a pre-W32 client (axis below the centre) it centres the band above the axis by twice the axis offset. '
+        '`center_shift_x` is unaffected (%+.3f).' % (
+            p['centred']['size'][1], t[2], t[3], axis_shift(t[2], t[3], p['centred']['size'][1]), t[3], t[2],
+            axis_shift(t[3], t[2], p['centred']['size'][1]), derive(p, 1.0, 'axis')[4]),
+        '- The simulator emulation assumes the W32 fix is on the client: `-ALVRDebugEyeTangents "L:<l>,<r>,<d>,<u>;R:..."` fills '
+        'the gimmeTangents slots (left, right, bottom, top), which W32\'s `ViewLayout.fovAngles` packs as up = .w, down = .z. '
+        'Without the fix the client sends d as up.', '',
         '## Variants (derived from the visible field per fov scale)', '',
         '- `asrun`: c %s, r %s, no shift. `off`: no foveation (coded = render).' % (
             '/'.join('%g' % v for v in p['asrun']['size']), '/'.join('%g' % v for v in p['asrun']['edge_ratio'])),
-        '- `axis`: c and r as `centred`, band centre on the eye axis (tan 0): shift %g/%g at s = 1 (the simulator points use '
-        '0.536/-0.159).' % derive(p, 1.0, 'axis')[4:],
+        '- `axis`: c and r as `centred`, band centre on the eye axis (tan 0): shift %g/%g at s = 1, from the tangents '
+        '(see "FOV up/down correction").' % derive(p, 1.0, 'axis')[4:],
         '- `centred`: c %s, r %s, band centre on the visible field\'s centre (midpoint of its edge tangents), shift = '
         '(fraction - 0.5)/((1 - c)/2), x from the temporal edge, y from the top.' % (
             '/'.join('%g' % v for v in p['centred']['size']), '/'.join('%g' % v for v in p['centred']['edge_ratio'])),
@@ -265,6 +306,8 @@ def doc(p):
         lines.append('| %d | budget %s, `%s` %s | %dx%d / %dx%d | %.1f/%.1f, %.1f/%.1f | %.1f / %.1f / %.1f | %.1f | %s |' % (
             i, c['budget'], c['fov'], fvtext(c['fv']), c['render'][0], c['render'][1], c['coded'][0], c['coded'][1],
             L['h0'], L['v0'], R['h0'], R['v0'], c['worst'][10], c['worst'][20], c['worst'][30], c['edge'], 'yes' if c['game_ok'] else 'no'))
+    lines += ['', 'The simulator matrix runs these as `%s` in `points-chart-avp.tsv`.' % '`, `'.join(
+        'a%03d-%s-%s' % (round(c['s'] * 100), c['fov'], c['budget']) for c in rec)]
     lines += ['', 'With RDR2 at 989 px/tan, centre detail above %.1f px/deg is resampling margin, not new detail. None of these '
               'reaches the 40 logical px/deg that visionOS asks for.' % game(0), '',
               '## All candidates (min over both eyes)', '',

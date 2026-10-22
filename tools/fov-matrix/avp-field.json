@@ -2,6 +2,7 @@
   "frustum_tan_LRDU": {
     "L": [1.7321, 1.0, 1.1918, 1.0],
     "R": [1.0, 1.7321, 1.1918, 1.0],
+    "viewport": [6261, 5023],
     "source": "CompositorServices view tangents, device log evidence/device-20261021/diag-20261021T135020Z.log DIAG corner (avp-frustum-reference.md); viewport 6261x5023 at render quality 1.0"
   },
   "visible_field_deg": {
