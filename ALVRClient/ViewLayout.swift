@@ -44,16 +44,20 @@ enum ViewLayout {
     // DIAG fov_sent fields for one eye's Fov as sent to the server: degrees, ALVR signs; where the tangents came from
     // (frustum, crop or debug; CropFov.choose), the crop margin, the model lens inset in force (inset_deg; 0 without crop), the measured-style offset (offset_deg;
     // 0 for the lens), and the center_shift that puts the
-    // foveation band on the eye axis of the sent frame next to the session's (docs/lumen/crop-fov.md).
+    // foveation band on the eye axis of the sent frame next to the session's, the 1:1 render size of the frame now sent
+    // (render_1to1) and the view size recommended at connect (recommended), both "WxH" or off (docs/lumen/crop-fov.md).
     static func fovSentFields(eye: String, left: Float, right: Float, up: Float, down: Float, source: String = "frustum",
                               marginDeg: Double? = nil, insetDeg: Double = 0, offsetDeg: Double? = nil, axisCenterShift: SIMD2<Double>? = nil,
-                              sessionCenterShift: SIMD2<Double>? = nil) -> KeyValuePairs<String, Any> {
+                              sessionCenterShift: SIMD2<Double>? = nil, render1to1: (Int, Int)? = nil,
+                              recommended: (Int, Int)? = nil) -> KeyValuePairs<String, Any> {
         func deg(_ rad: Float) -> String { String(format: "%.2f", Double(rad) * 180 / Double.pi) }
         func compact(_ value: Double?) -> String { value.map { String(format: "%g", $0) } ?? "off" }
         func shift(_ s: SIMD2<Double>?) -> String { s.map { String(format: "%.3f,%.3f", $0.x, $0.y) } ?? "off" }
+        func size(_ s: (Int, Int)?) -> String { s.map { "\($0.0)x\($0.1)" } ?? "off" }
         return ["eye": eye, "up": deg(up), "down": deg(down), "left": deg(left), "right": deg(right), "units": "deg",
                 "source": source, "margin_deg": compact(marginDeg), "inset_deg": compact(insetDeg), "offset_deg": compact(offsetDeg),
-                "axis_center_shift": shift(axisCenterShift), "session_center_shift": shift(sessionCenterShift)]
+                "axis_center_shift": shift(axisCenterShift), "session_center_shift": shift(sessionCenterShift),
+                "render_1to1": size(render1to1), "recommended": size(recommended)]
     }
 
     // The video quad's |tan| (left, right, up, down) from a sent Fov: Renderer puts these in Uniforms.tangents.

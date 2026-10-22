@@ -261,7 +261,7 @@ class EyeTangentsTest(unittest.TestCase):
 
 
 CROP_FIXTURE = os.path.join(HERE, '..', 'diag', 'fixtures', 'crop-fov.json')
-CROP_EYES = 'L:1.0724,0.6249,0.7536,0.6249;R:0.6249,1.0724,0.7536,0.6249'   # model inset 15 rectangle + 2 deg, |tan| L,R,D,U
+CROP_EYES = 'L:1.0913,0.6371,0.7674,0.6371;R:0.6371,1.0913,0.7674,0.6371'   # model inset 15 rectangle + 2.5 deg, |tan| L,R,D,U
 
 
 class CropTest(unittest.TestCase):
@@ -276,6 +276,7 @@ class CropTest(unittest.TestCase):
         self.assertEqual(fx['model'], AS.lm.MODEL)
         self.assertEqual(fx['device_tan_LRDU'], {e: p['frustum_tan_LRDU'][e] for e in 'LR'})
         c = fx['center_size']
+        self.assertEqual(fx['viewport'], p['frustum_tan_LRDU']['viewport'])
         for case in fx['cases']:
             want = case['expect']
             got = {e: AS.crop_tan(p, e, case['inset_deg'], case['margin_deg']) for e in 'LR'}
@@ -288,6 +289,8 @@ class CropTest(unittest.TestCase):
                 l, r, d, u = got[case['eye']]
                 w, h = want['render_px']
                 self.assertAlmostEqual(min(w / (l + r), h / (d + u)) * math.pi / 180, want['pxdeg_centre'], delta=0.1, msg=case['name'])
+            if 'one_to_one_px' in want:
+                self.assertEqual(list(AS.one_to_one(p, got)), want['one_to_one_px'], msg=case['name'])
 
     def test_inset_margin_clamp_by_hand(self):
         t = lambda d: math.tan(math.radians(d))
@@ -297,10 +300,16 @@ class CropTest(unittest.TestCase):
         # inset 15 margin 0: the inset rectangle, L temporal is left
         for g, w in zip(AS.crop_tan(p, 'L', 15, 0), (t(T0 - 15), t(30), t(D0 - 15), t(30))):
             self.assertAlmostEqual(g, w, places=9)
-        # margin 2: each side 2 deg wider (47/32/37/32 for L); R mirrored
-        for g, w in zip(AS.crop_tan(p, 'L', 15, 2), (1.072395, 0.624869, 0.753584, 0.624869)):
+        # margin 2.5: each side 2.5 deg wider (47.5/32.5/37.5/32.5 for L, the left and bottom sides from the device edges 60.0007
+        # and 50.0011 deg); R mirrored
+        for g, w in zip(AS.crop_tan(p, 'L', 15, 2.5), (t(T0 - 12.5), t(32.5), t(D0 - 12.5), t(32.5))):
+            self.assertAlmostEqual(g, w, places=9)
+        for g, w in zip(AS.crop_tan(p, 'L', 15, 2.5), (1.091335, 0.637070, 0.767357, 0.637070)):
             self.assertAlmostEqual(g, w, places=5)
-        for g, w in zip(AS.crop_tan(p, 'R', 15, 2), (0.624869, 1.072395, 0.753584, 0.624869)):
+        for g, w in zip(AS.crop_tan(p, 'R', 15, 2.5), (0.637070, 1.091335, 0.767357, 0.637070)):
+            self.assertAlmostEqual(g, w, places=5)
+        # margin 2 is still available
+        for g, w in zip(AS.crop_tan(p, 'L', 15, 2), (1.072395, 0.624869, 0.753584, 0.624869)):
             self.assertAlmostEqual(g, w, places=5)
         # inset 0 or 1 + margin 2: past the device frustum on every side -> the device's
         self.assertEqual(AS.crop_tan(p, 'L', 0, 2), [1.7321, 1.0, 1.1918, 1.0])
@@ -308,17 +317,17 @@ class CropTest(unittest.TestCase):
         # inset 50: every edge stops at 1 deg, then + margin
         for g, w in zip(AS.crop_tan(p, 'L', 50, 2), (t(T0 - 48), t(3), t(3), t(3))):
             self.assertAlmostEqual(g, w, places=9)
-        # defaults come from avp-field.json crop (inset 15, margin 2)
-        self.assertEqual((p['crop']['inset_deg'], p['crop']['margin_deg']), (15, 2))
-        self.assertEqual(AS.crop_tan(p, 'L'), AS.crop_tan(p, 'L', 15, 2))
+        # defaults come from avp-field.json crop (inset 15, margin 2.5 = CropFov.defaultMarginDeg)
+        self.assertEqual((p['crop']['inset_deg'], p['crop']['margin_deg']), (15, 2.5))
+        self.assertEqual(AS.crop_tan(p, 'L'), AS.crop_tan(p, 'L', 15, 2.5))
 
     def test_crop_shift_by_hand(self):
         # band centre 0.5 + s c0 on the axis: s = (temporal / (temporal + nasal) - 0.5) / c0, y with up / (up + down)
         p = AS.load()
         fv = AS.derive(p, 1.0, 'crop')
-        self.assertEqual(fv, (0.5, 0.45, 3, 3, 0.527, -0.17))
-        self.assertAlmostEqual((1.072395 / (1.072395 + 0.624869) - 0.5) / 0.25, 0.527, places=3)
-        self.assertAlmostEqual((0.624869 / (0.624869 + 0.753584) - 0.5) / 0.275, -0.170, places=3)
+        self.assertEqual(fv, (0.5, 0.45, 3, 3, 0.526, -0.169))
+        self.assertAlmostEqual((1.091335 / (1.091335 + 0.637070) - 0.5) / 0.25, 0.526, places=3)
+        self.assertAlmostEqual((0.637070 / (0.637070 + 0.767357) - 0.5) / 0.275, -0.169, places=3)
         # the device frustum gives the axis rows' shift
         dev = {e: p['frustum_tan_LRDU'][e] for e in 'LR'}
         self.assertEqual(tuple(round(v, 3) for v in AS.crop_shift(dev, (0.5, 0.45))), (0.536, -0.159))
@@ -327,41 +336,55 @@ class CropTest(unittest.TestCase):
         p = AS.load()
         pts = {q['name']: q for q in fm.parse_points(AS.points(p).splitlines())}
         k = math.pi / 180
-        for name, (w, h), budget, centre in (('a100-crop-C', (4176, 3334), (2784, 2240), 42.2),
-                                             ('a100-crop-A', (3648, 2912), (2432, 1856), 36.9)):
+        # crop-C renders at the 1:1 size (3968x3232), crop-A at budget A's (3648x2912)
+        for name, (w, h), budget, centre in (('a100-crop-C', (3968, 3232), (2784, 2240), 40.1),
+                                             ('a100-crop-A', (3648, 2912), (2432, 1856), 36.2)):
             q = pts[name]
             self.assertEqual((q['fov_scale'], q['foveation'], q['eye_tangents'], q['bitrate_mbps'], q['fps'], q['flag']),
-                             (1.0, (0.5, 0.45, 3.0, 3.0, 0.527, -0.17), CROP_EYES, 100.0, 90.0, 'dump'))
+                             (1.0, (0.5, 0.45, 3.0, 3.0, 0.526, -0.169), CROP_EYES, 100.0, 90.0, 'dump'))
             self.assertAlmostEqual(q['render_scale'], w / 3648, places=4)
+            if name == 'a100-crop-C':
+                self.assertEqual(q['render_scale'], 1.0877)         # 3968 / 3648 = 1.087719
             ax, ay = AS.axes_for(q['foveation'], w, h)
             self.assertLessEqual(ax['coded'], budget[0])
             self.assertLessEqual(ay['coded'], budget[1])
             # centre px/deg by hand: render px over the cropped |tan| span (h binds), vs the frustum's at the same render
-            hand = min(w / (1.0724 + 0.6249), h / (0.7536 + 0.6249)) * k
+            hand = min(w / (1.0913 + 0.6371), h / (0.7674 + 0.6371)) * k
             self.assertEqual(round(hand, 1), centre)
             row = AS.crop_rows(p)[name]
             self.assertAlmostEqual(row['centre'], hand, places=2)
             self.assertAlmostEqual(row['frustum_centre'], min(w / 2.7321, h / 2.1918) * k, places=2)
         text = AS.points(p)
-        self.assertIn('# a100-crop-C: predicted centre 42.2 px/deg (frustum 26.5 at the same render, x1.61 h / x1.59 v)', text)
-        self.assertIn('# a100-crop-A: predicted centre 36.9 px/deg (frustum 23.2 at the same render, x1.61 h / x1.59 v)', text)
+        self.assertIn('# a100-crop-C: render 3968x3232; predicted centre 40.1 px/deg (frustum 25.3 at the same render, x1.58 h / x1.56 v)', text)
+        self.assertIn('# a100-crop-A: render 3648x2912; predicted centre 36.2 px/deg (frustum 23.2 at the same render, x1.58 h / x1.56 v)', text)
+
+    def test_one_to_one_by_hand(self):
+        # grid density 6261 / 2.7321 = 2291.64 and 5023 / 2.1918 = 2291.72 px per tangent unit; L frame 1.728406 x 1.404428
+        p = AS.load()
+        dx, dy = 6261 / 2.7321, 5023 / 2.1918
+        self.assertAlmostEqual(dx, 2291.64, places=2)
+        self.assertAlmostEqual(dx * 1.728406, 3960.89, places=1)
+        self.assertAlmostEqual(dy * 1.404428, 3218.56, places=1)
+        self.assertEqual(AS.one_to_one(p), (3968, 3232))        # 3960.89 -> 3968, 3218.56 -> 3232 (multiples of 32)
+        self.assertEqual([AS.round_up_32(v) for v in (1, 32, 33, 3968, 3968.5)], [32, 32, 64, 3968, 4000])
+        self.assertAlmostEqual(3968 / 3648, 1.087719, places=6)
 
 
 class CropBandTest(unittest.TestCase):
-    """`a100-crop-T`: the crop-C frame (inset 15 + 2 deg, render 4176x3334) with the full-detail band flush with the nasal
+    """`a100-crop-T`: the crop-C frame (inset 15 + 2.5 deg, render 3968x3232, the 1:1 size) with the full-detail band flush with the nasal
     edge and reaching 30 deg temporal, 25 deg up, 30 deg down (avp-field.json crop.band_T)."""
     def test_band_by_hand(self):
         t = lambda d: math.tan(math.radians(d))
         p = AS.load()
         self.assertEqual(p['crop']['band_T'], {'temporal_deg': 30, 'up_deg': 25, 'down_deg': 30})
-        # L frame |tan| temporal 1.0724, nasal 0.6249, up 0.6249, down 0.7536; x spans tan30 + 0.6249, y tan25 + tan30
-        cx = (t(30) + 0.6249) / (1.0724 + 0.6249)
-        cy = (t(25) + t(30)) / (0.6249 + 0.7536)
-        self.assertAlmostEqual(cx, 0.7083, places=4)
-        self.assertAlmostEqual(cy, 0.7571, places=4)
+        # L frame |tan| temporal 1.0913, nasal 0.6371, up 0.6371, down 0.7674; x spans tan30 + 0.6371, y tan25 + tan30
+        cx = (t(30) + 0.6371) / (1.0913 + 0.6371)
+        cy = (t(25) + t(30)) / (0.6371 + 0.7674)
+        self.assertAlmostEqual(cx, 0.7026, places=4)
+        self.assertAlmostEqual(cy, 0.7431, places=4)
         # band centre fraction across the frame, from the temporal edge / from the top; s = (f - 0.5) / ((1 - c) / 2)
-        fx = ((1.0724 - t(30)) / 1.6973 + 1) / 2
-        fy = ((0.6249 - t(25)) / 1.3785 + (0.6249 + t(30)) / 1.3785) / 2
+        fx = ((1.0913 - t(30)) / 1.7284 + 1) / 2
+        fy = ((0.6371 - t(25)) / 1.4045 + (0.6371 + t(30)) / 1.4045) / 2
         sx, sy = (fx - 0.5) / ((1 - cx) / 2), (fy - 0.5) / ((1 - cy) / 2)
         self.assertAlmostEqual(sx, 1.0, places=2)           # flush with the nasal edge
         self.assertAlmostEqual(sy, -0.053, places=3)
@@ -378,16 +401,16 @@ class CropBandTest(unittest.TestCase):
         q, c = pts['a100-crop-T'], pts['a100-crop-C']
         self.assertEqual((q['fov_scale'], q['render_scale'], q['eye_tangents'], q['bitrate_mbps'], q['fps']),
                          (c['fov_scale'], c['render_scale'], c['eye_tangents'], c['bitrate_mbps'], c['fps']))
-        self.assertAlmostEqual(q['render_scale'], 4176 / 3648, places=4)
+        self.assertAlmostEqual(q['render_scale'], 3968 / 3648, places=4)
         cx, cy, rx, ry, shx, shy = q['foveation']
         self.assertEqual((rx, ry), (3.0, 3.0))
-        self.assertAlmostEqual(cx, 0.7083, places=3)
-        self.assertAlmostEqual(cy, 0.7571, places=3)
+        self.assertAlmostEqual(cx, 0.7026, places=3)
+        self.assertAlmostEqual(cy, 0.7431, places=3)
         self.assertAlmostEqual(shx, 1.0, places=2)
         self.assertAlmostEqual(shy, -0.053, places=3)
         text = AS.points(p)
-        self.assertIn('# a100-crop-T: predicted centre 42.2 px/deg (frustum 26.5 at the same render, x1.61 h / x1.59 v); '
-                      'coded 3360x2816 vs budget C 2784x2240', text)
+        self.assertIn('# a100-crop-T: render 3968x3232; predicted centre 40.1 px/deg (frustum 25.3 at the same render, x1.58 h / x1.56 v); '
+                      'coded 3200x2688 vs budget C 2784x2240', text)
         # the band keeps the 1:1 density on the axis: same centre px/deg as crop-C (render and frame are the same)
         rows = AS.crop_rows(p)
         self.assertAlmostEqual(rows['a100-crop-T']['centre'], rows['a100-crop-C']['centre'], places=2)

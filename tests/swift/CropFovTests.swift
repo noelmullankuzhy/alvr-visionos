@@ -26,13 +26,16 @@ enum CropFovTests {
         // gimmeTangents slots (left, right, bottom, top).
         let rectL = [tand(deg(1.7321) - 15), tand(30), tand(deg(1.1918) - 15), tand(30)]
         near4(CropFov.tangents(eye: .left, device: deviceL, insetDeg: 15, marginDeg: 0), rectL, "L inset 15 margin 0 = inset rect")
-        // Margin 2 widens each side by 2 deg: 47 / 32 / 37 / 32 (L left, right, bottom, top).
-        let cropL = CropFov.tangents(eye: .left, device: deviceL, insetDeg: 15, marginDeg: 2)
-        near4(cropL, [tand(47), tand(32), tand(37), tand(32)], "L inset 15 margin 2 = tan 47/32/37/32")
-        near4(cropL, [1.072395, 0.624869, 0.753584, 0.624869], "L inset 15 margin 2 in numbers", tolerance: 1e-5)
+        // Margin 2.5 (the default) widens each side by 2.5 deg: 47.5 / 32.5 / 37.5 / 32.5 (L left, right, bottom, top).
+        let cropL = CropFov.tangents(eye: .left, device: deviceL, insetDeg: 15, marginDeg: 2.5)
+        near4(cropL, [tand(47.5), tand(32.5), tand(37.5), tand(32.5)], "L inset 15 margin 2.5 = tan 47.5/32.5/37.5/32.5")
+        near4(cropL, [1.091335, 0.637070, 0.767357, 0.637070], "L inset 15 margin 2.5 in numbers", tolerance: 1e-5)
         // R mirrors L about the vertical: left and right swap.
-        let cropR = CropFov.tangents(eye: .right, device: deviceR, insetDeg: 15, marginDeg: 2)
-        near4(cropR, [0.624869, 1.072395, 0.753584, 0.624869], "R inset 15 margin 2 mirrored", tolerance: 1e-5)
+        let cropR = CropFov.tangents(eye: .right, device: deviceR, insetDeg: 15, marginDeg: 2.5)
+        near4(cropR, [0.637070, 1.091335, 0.767357, 0.637070], "R inset 15 margin 2.5 mirrored", tolerance: 1e-5)
+        // A 2 deg margin is still available: 47 / 32 / 37 / 32.
+        near4(CropFov.tangents(eye: .left, device: deviceL, insetDeg: 15, marginDeg: 2),
+              [tand(47), tand(32), tand(37), tand(32)], "L inset 15 margin 2 = tan 47/32/37/32")
         // Clamp: inset 0 or 1 + margin 2 puts every side past the device frustum, so the sent box is the device's.
         near4(CropFov.tangents(eye: .left, device: deviceL, insetDeg: 0, marginDeg: 2), [1.7321, 1.0, 1.1918, 1.0], "L inset 0 clamps")
         near4(CropFov.tangents(eye: .left, device: deviceL, insetDeg: 1, marginDeg: 2), [1.7321, 1.0, 1.1918, 1.0], "L inset 1 clamps")
@@ -46,7 +49,7 @@ enum CropFovTests {
         // A negative or non-finite margin is no margin.
         near4(CropFov.tangents(eye: .left, device: deviceL, insetDeg: 15, marginDeg: -3), rectL, "negative margin = 0")
         near4(CropFov.tangents(eye: .left, device: deviceL, insetDeg: 15, marginDeg: .nan), rectL, "nan margin = 0")
-        expectEqual(CropFov.defaultMarginDeg, 2.0, "default margin")
+        expectEqual(CropFov.defaultMarginDeg, 2.5, "default margin")
         // The setting's default (GlobalSettings.cropFovToOutline): on, so the lens style streams cropped unless turned off.
         expectEqual(CropFov.defaultEnabled, true, "crop defaults on")
 
@@ -61,18 +64,18 @@ enum CropFovTests {
         near(device.y, (1.0 / 2.1918 - 0.5) / 0.275, "device shift y")
         near(device.x, 0.536, "device shift x = a100-axis", tolerance: 5e-4)
         near(device.y, -0.159, "device shift y = a100-axis", tolerance: 5e-4)
-        // Inset 15 rect + 2 deg: x (1.072395/1.697264 - 0.5)/0.25 = 0.527350; y (0.624869/1.378453 - 0.5)/0.275 = -0.169775.
+        // Inset 15 rect + 2.5 deg: x (1.091335/1.728406 - 0.5)/0.25 = 0.525646; y (0.637070/1.404428 - 0.5)/0.275 = -0.168671.
         let crop = CropFov.centerShift(left: cropL!, right: cropR!, centerSize: size)
-        near(crop.x, (1.072395 / (1.072395 + 0.624869) - 0.5) / 0.25, "crop shift x", tolerance: 1e-4)
-        near(crop.y, (0.624869 / (0.624869 + 0.753584) - 0.5) / 0.275, "crop shift y", tolerance: 1e-4)
-        near(crop.x, 0.527350, "crop shift x in numbers", tolerance: 1e-4)
-        near(crop.y, -0.169775, "crop shift y in numbers", tolerance: 1e-4)
+        near(crop.x, (1.091335 / (1.091335 + 0.637070) - 0.5) / 0.25, "crop shift x", tolerance: 1e-4)
+        near(crop.y, (0.637070 / (0.637070 + 0.767357) - 0.5) / 0.275, "crop shift y", tolerance: 1e-4)
+        near(crop.x, 0.525646, "crop shift x in numbers", tolerance: 1e-4)
+        near(crop.y, -0.168671, "crop shift y in numbers", tolerance: 1e-4)
         // One shift for both eyes (ALVR mirrors x for R): the mean of the per-eye shifts, equal for mirrored eyes.
         let lOnly = CropFov.centerShift(left: cropL!, right: simd_float4(cropL!.y, cropL!.x, cropL!.z, cropL!.w), centerSize: size)
         near(lOnly.x, crop.x, "mirrored eyes give the same shift", tolerance: 1e-6)
         // The band centre lands on the axis: 0.5 + s c0 = temporal / (temporal + nasal).
-        near(0.5 + crop.x * 0.25, 1.072395 / 1.697264, "band centre x on the axis", tolerance: 1e-5)
-        near(0.5 + crop.y * 0.275, 0.624869 / 1.378453, "band centre y on the axis", tolerance: 1e-5)
+        near(0.5 + crop.x * 0.25, 1.091335 / 1.728406, "band centre x on the axis", tolerance: 1e-5)
+        near(0.5 + crop.y * 0.275, 0.637070 / 1.404428, "band centre y on the axis", tolerance: 1e-5)
         // Centre size 1 (no edges): no shift.
         expectEqual(CropFov.centerShift(left: cropL!, right: cropR!, centerSize: [1, 1]), SIMD2<Double>(0, 0), "c 1: no shift")
 
@@ -194,6 +197,57 @@ enum CropFovTests {
         } else {
             expect(false, "fixture \(fixture.path) readable with cases")
         }
+
+        // 1:1 render request. The logical grid is 6261x5023 at render quality 1.0 on the device frustum (2.7321 x 2.1918
+        // tangent units wide), so 6261 / 2.7321 = 2291.64 and 5023 / 2.1918 = 2291.72 px per tangent unit. The sent L frame
+        // at inset 15 + 2.5 spans 1.728406 x 1.404428 tangent units: 3960.89 x 3218.56 px, up to 3968 x 3232 (multiple of 32).
+        let density = CropFov.gridDensity(screenWidth: 6261, screenHeight: 5023, device: deviceL)
+        near(density.x, 6261 / 2.7321, "grid density x", tolerance: 1e-3)
+        near(density.y, 5023 / 2.1918, "grid density y", tolerance: 1e-3)
+        near(density.x, 2291.64, "grid density x in numbers", tolerance: 0.01)
+        near(density.y, 2291.72, "grid density y in numbers", tolerance: 0.01)
+        let oneToOne = CropFov.oneToOne(density: density, sent: cropL!)
+        expectEqual(oneToOne.width, 3968, "L 1:1 width 2291.64 x 1.728406 = 3960.89 -> 3968")
+        expectEqual(oneToOne.height, 3232, "L 1:1 height 2291.72 x 1.404428 = 3218.56 -> 3232")
+        let oneToOneR = CropFov.oneToOne(density: density, sent: cropR!)
+        expectEqual(oneToOneR.width, 3968, "R mirrors L: same width")
+        expectEqual(oneToOneR.height, 3232, "R mirrors L: same height")
+        // Rounded up to a multiple of 32, never down: an exact multiple stays, one pixel over goes up a step.
+        expectEqual(CropFov.roundUp32(3968), 3968, "3968 stays")
+        expectEqual(CropFov.roundUp32(3968.5), 4000, "3968.5 -> 4000")
+        expectEqual(CropFov.roundUp32(3960.89), 3968, "3960.89 -> 3968")
+        expectEqual(CropFov.roundUp32(1), 32, "1 -> 32")
+        // The recommendation: crop on = the 1:1 size of the sent frames (the larger of the two eyes per side); crop off,
+        // or the -ALVRDebugEyeTangents override, leaves the default view size unchanged.
+        let fallback = (width: 3776, height: 3648)
+        let on1 = CropFov.recommendedViewResolution(crop: true, device: [deviceL, deviceR], density: density, insetDeg: 15,
+                                                    marginDeg: 2.5, fallback: fallback)
+        expectEqual(on1.width, 3968, "recommended width, crop on")
+        expectEqual(on1.height, 3232, "recommended height, crop on")
+        let off1 = CropFov.recommendedViewResolution(crop: false, device: [deviceL, deviceR], density: density, insetDeg: 15,
+                                                     marginDeg: 2.5, fallback: fallback)
+        expectEqual(off1.width, 3776, "recommended width, crop off")
+        expectEqual(off1.height, 3648, "recommended height, crop off")
+        // Slider at inset 10 + 2.5: L 1.2800... spans widen the request: (tan 50 + tan 35.. ) by hand 12.5/32.5 deg on the right.
+        let ten = CropFov.recommendedViewResolution(crop: true, device: [deviceL, deviceR], density: density, insetDeg: 10,
+                                                    marginDeg: 2.5, fallback: fallback)
+        expect(ten.width > on1.width && ten.height > on1.height, "a smaller inset asks for a larger render")
+        // The reference grid constants.
+        expectEqual(CropFov.referenceScreen.width, 6261, "reference screen width")
+        expectEqual(CropFov.referenceScreen.height, 5023, "reference screen height")
+        expectEqual(CropFov.referenceDevice[0], deviceL, "reference device L")
+        expectEqual(CropFov.referenceDevice[1], deviceR, "reference device R")
+        // The measured grid, recorded from the layer at runtime; until then the reference device grid.
+        CropFov.resetGrid()
+        let before = CropFov.grid
+        near(before.density.x, 6261 / 2.7321, "unmeasured grid density x", tolerance: 1e-3)
+        expectEqual(before.measured, false, "unmeasured")
+        CropFov.recordGrid(screenWidth: 5479, screenHeight: 4395, device: deviceL)
+        near(CropFov.grid.density.x, 5479 / 2.7321, "measured grid density x (quality 0.75)", tolerance: 1e-3)
+        expectEqual(CropFov.grid.measured, true, "measured")
+        CropFov.recordGrid(screenWidth: 0, screenHeight: 4395, device: deviceL)
+        near(CropFov.grid.density.x, 5479 / 2.7321, "zero screen ignored", tolerance: 1e-3)
+        CropFov.resetGrid()
 
         finishTests("CropFov")
     }

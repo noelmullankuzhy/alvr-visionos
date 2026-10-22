@@ -37,7 +37,7 @@ enum FovPackingTests {
         let fields = ViewLayout.fovSentFields(eye: "L", left: l.left, right: l.right, up: l.up, down: l.down)
         let dict = Dictionary(fields.map { ($0.key, "\($0.value)") }, uniquingKeysWith: { a, _ in a })
         expectEqual(fields.map { $0.key }, ["eye", "up", "down", "left", "right", "units", "source", "margin_deg", "inset_deg", "offset_deg",
-                                            "axis_center_shift", "session_center_shift"], "fov_sent key order")
+                                            "axis_center_shift", "session_center_shift", "render_1to1", "recommended"], "fov_sent key order")
         expectEqual(dict["eye"], "L", "eye")
         expectEqual(dict["up"], "45.00", "up deg")
         expectEqual(dict["down"], "-50.00", "down deg")
@@ -50,14 +50,24 @@ enum FovPackingTests {
         expectEqual(dict["offset_deg"], "off", "no offset without crop")
         expectEqual(dict["axis_center_shift"], "off", "no shift without foveation")
         expectEqual(dict["session_center_shift"], "off", "no session shift without foveation")
+        expectEqual(dict["render_1to1"], "off", "no 1:1 size without crop")
+        expectEqual(dict["recommended"], "off", "no recommendation sent until known")
         let crop = ViewLayout.fovSentFields(eye: "R", left: l.left, right: l.right, up: l.up, down: l.down, source: "crop",
                                             marginDeg: 2, insetDeg: 15, offsetDeg: 0, axisCenterShift: [0.140988, -0.030553],
-                                            sessionCenterShift: [0.536, -0.159])
+                                            sessionCenterShift: [0.536, -0.159], render1to1: (3968, 3232), recommended: (3968, 3232))
         let cropDict = Dictionary(crop.map { ($0.key, "\($0.value)") }, uniquingKeysWith: { a, _ in a })
         expectEqual(cropDict["source"], "crop", "crop source")
         expectEqual(cropDict["margin_deg"], "2", "margin")
         expectEqual(cropDict["inset_deg"], "15", "lens inset in force")
         expectEqual(cropDict["offset_deg"], "0", "measured-style offset is 0 for the lens")
+        expectEqual(cropDict["render_1to1"], "3968x3232", "1:1 render size")
+        expectEqual(cropDict["recommended"], "3968x3232", "recommended at connect")
+        // A slider change after connect shows as a mismatch: 1:1 now 4064x3264, connect sent 3968x3232.
+        let moved = ViewLayout.fovSentFields(eye: "L", left: l.left, right: l.right, up: l.up, down: l.down, source: "crop",
+                                             render1to1: (4064, 3264), recommended: (3968, 3232))
+        let movedDict = Dictionary(moved.map { ($0.key, "\($0.value)") }, uniquingKeysWith: { a, _ in a })
+        expectEqual(movedDict["render_1to1"], "4064x3264", "1:1 after a slider change")
+        expectEqual(movedDict["recommended"], "3968x3232", "recommended stays what was sent")
         expectEqual(cropDict["axis_center_shift"], "0.141,-0.031", "axis shift, three decimals")
         expectEqual(cropDict["session_center_shift"], "0.536,-0.159", "session shift")
 
