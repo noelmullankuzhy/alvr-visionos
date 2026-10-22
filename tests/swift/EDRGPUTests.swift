@@ -30,7 +30,7 @@ import simd
                                                SIMD4(0.12, 0.04, 0.1 / 99.9, -1), SIMD4(0, 0, 10 / 99.9, 0)))
         let expectedDepth: Float = 0.1 * (100 - 2) / (2 * (100 - 0.1)) // two-metre plane
         func render(_ layout: EDRLayout, _ value: Float, slice: Int, projection: simd_float4x4,
-                    grid: EDRGrid = EDRGrid()) {
+                    grid: EDRGrid = EDRGrid(), surround: Float = 0) {
             let buffer = queue.makeCommandBuffer()!
             drawing.encode(buffer: buffer, colour: colour, depth: depth, slice: slice, viewport: viewport,
                            patches: layout.patches(value: value,
@@ -39,7 +39,7 @@ import simd
                                                                           horizontalScale: Double(projection.columns.0.x),
                                                                           horizontalDegrees: layout == .match ? -12 : 0),
                                                    aspect: viewport.width / viewport.height, grid: grid,
-                                                   pixelHeight: viewport.height), projection: projection)
+                                                   pixelHeight: viewport.height), projection: projection, surround: surround)
             buffer.commit(); buffer.waitUntilCompleted()
             expect(buffer.error == nil, "GPU completed: \(String(describing: buffer.error))")
         }
@@ -131,6 +131,7 @@ import simd
                                         case .fine: expected = Float(1 + Double(index) / 24)
                                         case .coarse: expected = Float(5 + index) / 10
                                         case .knee: expected = Float(1.30 + Double(index) / 60)
+                                        case .wide: expected = Float(100.0 / 203.0 * pow(100, Double(index) / 24))
                                         }
                                     }
                                 }
@@ -160,6 +161,40 @@ import simd
             }
             expect(withinFloat16ULP(Float(Float16(bitPattern: otherColour[0])), 0.25), "other eye colour survives")
             expect(abs(otherDepth - expectedDepth) < 1e-6, "other eye depth survives")
+        }
+        // SDR-white surround (1.0): pixels well outside every cell read 1.0 with finite depth; outside the viewport stays clear.
+        do {
+            let grid = EDRGrid(range: .wide, surround: .sdrWhite, borders: true)
+            render(.gridTen, 4, slice: 1, projection: projection, grid: grid, surround: EDRSurround.sdrWhite.value)
+            var pixels = [UInt16](repeating: 0, count: width * height * 4)
+            let depths = readDepth(slice: 1)
+            pixels.withUnsafeMutableBytes {
+                colour.getBytes($0.baseAddress!, bytesPerRow: width * 8, bytesPerImage: width * height * 8,
+                                from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, slice: 1)
+            }
+            let side = sqrt(0.10 * 200 * 160 / 25), pitch = side + 2
+            var surroundPixels = 0
+            for y in 0..<height {
+                for x in 0..<width {
+                    let u = (Double(x) + 0.5 - 8) / 200, v = (Double(y) + 0.5 - 12) / 160
+                    let inside = u >= 0 && u < 1 && v >= 0 && v < 1
+                    let dx = (u - 0.44) * 200, dy = (v - 0.52) * 160
+                    let nearCells = abs(dx) < 2.5 * pitch + 2 && abs(dy) < 2.5 * pitch + 2
+                    guard !inside || !nearCells else { continue }
+                    let pixel = y * width + x
+                    for channel in 0..<4 {
+                        let actual = Float(Float16(bitPattern: pixels[pixel * 4 + channel]))
+                        if channel == 3 {
+                            expectEqual(actual, inside ? 1 : 0, "surround 1 alpha at \(x),\(y)")
+                        } else {
+                            expect(withinFloat16ULP(actual, inside ? 1 : 0), "surround 1 pixel \(x),\(y) channel \(channel) reads \(inside ? 1 : 0), got \(actual)")
+                        }
+                    }
+                    expect(abs(depths[pixel] - (inside ? expectedDepth : 0)) < 1e-6, "surround 1 finite reverse-Z at \(x),\(y): \(depths[pixel])")
+                    if inside { surroundPixels += 1 }
+                }
+            }
+            expect(surroundPixels > 20000, "surround 1 case checked the pixels outside the cells")
         }
         // The shader must receive each current projection, rather than a fixed raw depth.
         let infiniteProjection = simd_float4x4(columns: (SIMD4(1, 0, 0, 0), SIMD4(0, 1, 0, 0),

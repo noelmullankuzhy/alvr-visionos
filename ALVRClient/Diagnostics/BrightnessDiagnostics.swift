@@ -117,6 +117,7 @@ private struct BrightnessControls: View {
     @State private var coarse = false
     @State private var fine = false
     @State private var gridRange = EDRGridRange.fine
+    @State private var surround = EDRSurround.black
     @State private var mirror = false
     @State private var borders = false
     @State private var automatic = false
@@ -126,7 +127,7 @@ private struct BrightnessControls: View {
     private func configure() {
         EDRSession.shared.setImmersion(edr.immersion.rawValue)
         EDRSession.shared.configure(layout: layout, automatic: automatic, sustained: sustained,
-                                    fine: fine, gridRange: gridRange, mirror: mirror, borders: borders, coarse: coarse)
+                                    fine: fine, gridRange: gridRange, mirror: mirror, borders: borders, coarse: coarse, surround: surround)
     }
     private func enter(_ id: String, clip: URL? = nil) async {
         busy = true
@@ -222,7 +223,11 @@ private struct BrightnessControls: View {
             }.pickerStyle(.menu)
             if visible.contains(.gridOptions) {
                 Picker("Range", selection: $gridRange) {
-                    ForEach([EDRGridRange.coarse, .fine, .knee], id: \.self) { Text($0.rawValue).tag($0) }
+                    ForEach([EDRGridRange.coarse, .fine, .knee, .wide], id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented)
+                Picker("Surround", selection: $surround) {
+                    Text("Black").tag(EDRSurround.black)
+                    Text("SDR white").tag(EDRSurround.sdrWhite)
                 }.pickerStyle(.segmented)
                 Toggle("Mirror", isOn: $mirror)
                 Toggle("Borders", isOn: $borders)
@@ -239,7 +244,7 @@ private struct BrightnessControls: View {
         } header: {
             Text("Pattern")
         } footer: {
-            Text(layout == .match ? "Match uses 0.02 steps, or 0.10 with Coarse." : layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70." :
+            Text(layout == .match ? "Match uses 0.02 steps, or 0.10 with Coarse." : layout.gridArea != nil ? "Borders off joins cells; knee focuses on 1.30–1.70. Wide: 100–10,000 nits as the video grid, ×1.21 steps, surround selectable." :
                     "Automatic advances every 4 seconds, or 60 seconds with Sustained.")
         }
     }
