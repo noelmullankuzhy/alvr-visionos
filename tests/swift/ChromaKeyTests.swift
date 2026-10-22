@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/GlobalSettings.swift ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/CornerChart.swift
+// SOURCES: ALVRClient/GlobalSettings.swift ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/CornerChart.swift ALVRClient/CropFov.swift ALVRClient/ViewLayout.swift ALVRClient/Diagnostics/ResolutionChart.swift ALVRClient/Diagnostics/GoldenFrame.swift ALVRClient/StreamReprojection.swift ALVRClient/ColourPipeline.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/BoundaryDotsLensModel.swift ALVRClient/Diagnostics/ProjectionOverlay.swift
 import Foundation
 
 @main enum ChromaKeyTests {
