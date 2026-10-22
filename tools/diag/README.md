@@ -656,8 +656,9 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    when switching back. Close the other eye yourself for L/R; Both labels a
    binocular observation, not two monocular measurements.
    **Outline slider (about 1 min per eye; do this first).** Select **L** or **R** and
-   close the other eye. A thin (0.3°) bright green line, head-locked like the dots,
-   shows one of two outline styles; a **quick right pinch on the centre cross** (no
+   close the other eye. A thin (0.3°) line in the eye's hue (L cyan, R orange),
+   head-locked like the dots, shows one of two outline styles, inside the projection
+   overlay (frustum rectangle, bbox, foveation rect: see **Projection overlay** below); a **quick right pinch on the centre cross** (no
    cursor selected) toggles between them, and the status line names the active one.
    - **lens** (default; for matching today's edge): the shape of that eye's measured
      visible field, the per-ray boundary eccentricities of the 21 Oct seal-on run
@@ -692,7 +693,9 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    (one per step, not per frame) and the release logs the settled value once more.
    Drag until the line sits on the edge you can just see all round, then **hold the
    right pinch >= 0.5 s** (no cursor) to log it again as the deliberate mark. Each eye
-   keeps its own offset and inset; Both shows no outline (it is monocular). When a ray
+   keeps its own offset and inset; Both draws both eyes' overlays, each at its own
+   value, but has no slider, value labels or `dots_outline` line (the outline is
+   monocular). When a ray
    cursor is selected the left drag moves the cursor (step 3) instead (status shows
    `left drag: cursor`); quick right pinch the centre cross to deselect it and get the
    slider back. The dots stay as a dim 0.5° reference for per-ray checks.
@@ -732,6 +735,61 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    frustum area), the latest lens line's per-ray eccentricities (reference + offset) and,
    when the same logs hold confirmed dots for that eye, `max_dev_deg` plus a per-ray
    table of dot eccentricity minus outline (positive: seen outside the outline).
+   The same table carries the projection columns `bbox_deg`, `fov_source`,
+   `fov_rect_deg`, `pxdeg_frustum`, `pxdeg_bbox` and `projection_check` (the report
+   recomputes the bbox, both px/deg and the foveation rect from the logged inputs:
+   `ok`, `mismatch: <fields>`, or `not logged` for lines from before the overlay),
+   and a **Projection** part lists one line per Boundary dots session with the last
+   logged readout per eye, e.g.
+   `projection session=diag-x.log:1 eye=L source=diag-x.log:2 fov_source=a100-axis-C bbox_deg=41.512,37.5,31.607,32.5 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=44.108 gain=1.66 check=ok; eye=R no data`.
+
+**Projection overlay** (Noel, 22 Oct: the projection diagram as an interactive overlay).
+Drawn in the same head-frame projection as the dots, for the selected eye, or for
+both in Both. Each eye's elements use its hue: **L cyan** (0, 0.79, 1), **R orange**
+(1, 0.66, 0), at equal relative luminance (about 0.49); the foveation rect is
+**white**. Line widths: frustum 0.4°, lens/rect outline 0.3°, foveation rect 0.2°,
+bbox 0.15° (thinner than the frustum, so the two read apart where they meet).
+
+| Element | What it is |
+|---|---|
+| Frustum rectangle | The rendered edge: the live per-eye `m5_view` tangents (device defaults until a Metal session has run). Fixed. |
+| Lens shape | The outline above (lens or rect style) at the eye's own slider value. |
+| Eye axis | The centre cross (in the selected eye's hue; white in Both) and a 0.5°-radius circle on the axis. |
+| Bounding rectangle (bbox) | The axis-aligned tangent-space box of the drawn outline polygon: min/max tangent over its vertices (the 5° rays, measured and interpolated; the rect style adds its corners). It is the **FOV to send for the highest sharpness**: render the stream over this box instead of the frustum and every rendered pixel lands inside the visible field. W37 adds the setting that sends it. |
+| Foveation rect | The 1:1 centre band of ALVR's foveated encoding mapped onto the frustum: `FFR.swift:79-89` aligns centre size and shift to 2r-pixel steps, the band spans eye UV `c0 (1 + s)` to `c0 (s - 1) + 1`, `c0 = (1 - c)/2` (`Shaders.metal:152-157`), eye UV x from the temporal edge (R mirrored), y from the top. |
+
+Foveation source: the live session's `foveated_encoding` settings and per-eye view size
+when a stream is up (`fov_source=live`); otherwise a points row compiled from
+`tools/fov-matrix/points-chart-avp.tsv` (the six `fov_scale` 1 rows: `a100-asrun`,
+`a100-centred`, `a100-wider`, `a100-axis-C`, `a100-axis-A`, `a100-wider-A`; default
+**a100-axis-C**). A quick right pinch on the **fov** button (right of **Both**) cycles
+the row and logs a `dots_outline` line. Boundary dots only shows with no connection
+or stream, so in practice the row is what is drawn; the live branch reads
+`EventHandler.shared.streamEvent` and the cached settings and does not touch the stream path.
+The render size is the live view size or `round(3648 × render_scale) × round(2912 ×
+render_scale)` (as `fovmatrix.py`), e.g. 4176×3333 for a100-axis-C.
+
+Readout (three lines per eye, in the eye's hue, below **Done**):
+
+```text
+L bbox L 41.5 R 37.5 U 31.6 D 32.5 deg  tan 0.885/0.767/0.615/0.637
+L fov rect L 34.3 R 34.4 U 26.2 D 26.3 deg  (a100-axis-C, 4176x3333)
+L px/deg axis: frustum 26.5 → bbox 44.1 (×1.66)
+```
+
+Left/right are head-frame sides as the client reports fov tangents (L's left is
+temporal, R's left nasal); degrees are `atan` of the edge tangent from the eye axis.
+px/deg on the eye axis is `avp-sharpness.py`'s centre value: render px over the tan
+span × π/180 (inside the 1:1 band, so no foveation squeeze), the lower of horizontal
+and vertical, for the same render size spread over (a) the frustum and (b) the bbox.
+One formula per language: `ProjectionOverlay.pxPerDegAxis` (Swift) and `pxdeg_axis`
+in `diag-report.py`; `fixtures/projection-overlay.json` pins both (tan to 0.001,
+px/deg to 0.1). Hand values (L lens offset 0, a100-axis-C): bbox tan
+0.885108/0.767327/0.615363/0.637070 (extremes on rays 195, 0, 105, 270), frustum
+26.54 px/deg, bbox 44.11 px/deg. Offset +5 moves the bbox right and down edges by
+exactly 5° and the left and up edges by 4.997° and 4.939°, because those extremes
+lie off the axis rays. Code: `ProjectionOverlay.swift`, tested by
+`tests/swift/ProjectionOverlayTests.swift`.
 
 Geometry: 1104 dots lie at radius **10 m** on 48 rays 7.5° apart: the 24 main
 rays (multiples of 15°) carry 25 dots at eccentricities 10°, 12.5°, …, 70° from
@@ -782,8 +840,8 @@ DIAG dots t_ms=102 eye=L action=confirm ray_deg=45.000 ecc_deg=60.000 yaw_deg=50
 DIAG dots_summary t_ms=103 eye=L points=2 rays=0:30,90:32.5
 DIAG dots_summary t_ms=103 eye=R points=0 rays=none
 DIAG dots_summary t_ms=103 eye=Both points=0 rays=none
-DIAG dots_outline t_ms=104 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5
-DIAG dots_outline t_ms=105 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000
+DIAG dots_outline t_ms=104 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5 bbox_deg=41.512,37.500,31.607,32.500 bbox_tan=0.8851,0.7673,0.6154,0.6371 fov_source=a100-axis-C foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=44.108
+DIAG dots_outline t_ms=105 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 bbox_deg=45.001,30.489,30.489,35.058 bbox_tan=1.0000,0.5888,0.5888,0.7017 fov_source=a100-axis-C foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=45.077
 ```
 
 `dots_outline` (each left slider step, the slider release, and a right hold with no
@@ -793,7 +851,10 @@ ray, reference + offset); their limits are read from that polygon at 0/90/180/27
 `shape=rect` lines carry `inset_deg`; their limits are the frustum side minus the
 inset, clamped at 0. Lines without `shape` (before the lens style) are rect.
 `tangent_source` is `m5_view` or `device_default`; `tangents` (left,right,bottom,top)
-is the frustum used for the rect outline and for `area_frac`.
+is the frustum used for the rect outline and for `area_frac`. Both styles end with the
+projection readout: `bbox_deg`/`bbox_tan` (left,right,up,down), `fov_source` (points
+row or `live`), `foveation` (cx,cy,rx,ry,shx,shy or `off`), `fov_rect_deg`
+(left,right,up,down or `off`), `render_px` (w,h), `pxdeg_frustum` and `pxdeg_bbox`.
 Outline code: `BoundaryDotsLensReference`, `BoundaryDotsFrustum`, `BoundaryDotsSlider` in `BoundaryDots.swift`,
 tested by `tests/swift/BoundaryOutlineTests.swift` and
 `tools/diag/test_boundary_outline_report.py`.

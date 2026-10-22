@@ -616,17 +616,109 @@ def lens_area_frac(rays, tangents):
     return abs(twice) / 2 / ((left + right) * (bottom + top))
 
 
+PROJECTION_BASE_RENDER = (3648, 2912)    # per-eye render at render_scale 1.0 (tools/fov-matrix/fovmatrix.py)
+_FOV_OVERLAY = []
+
+
+def fov_overlay():
+    """fov-overlay.py (same directory), loaded once: ALVR's foveation model (fov_axis, band_fractions)."""
+    if not _FOV_OVERLAY:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('fov_overlay', Path(__file__).with_name('fov-overlay.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _FOV_OVERLAY.append(module)
+    return _FOV_OVERLAY[0]
+
+
+def render_size(scale):
+    """Per-eye render (w, h) at a points row's render_scale, rounded per side as fovmatrix.py render_size."""
+    return int(round(PROJECTION_BASE_RENDER[0] * scale)), int(round(PROJECTION_BASE_RENDER[1] * scale))
+
+
+def outline_bbox(points):
+    """Tangent box (left, right, up, down; positive away from the eye axis) of a closed (ray, ecc) polygon:
+    its vertices bound the drawn shape (ProjectionOverlay.bbox)."""
+    xy = [(math.tan(math.radians(e)) * math.cos(math.radians(r)), math.tan(math.radians(e)) * math.sin(math.radians(r)))
+          for r, e in points]
+    return -min(x for x, _ in xy), max(x for x, _ in xy), max(y for _, y in xy), -min(y for _, y in xy)
+
+
+def foveation_rect(eye, tangents, foveation, render):
+    """ALVR's 1:1 foveation band (cx, cy, rx, ry, shx, shy at render (w, h)) as a tangent box (left, right, up, down)
+    of the eye's frustum (left, right, bottom, top): eye UV x from the temporal edge (R mirrored), y from the top."""
+    fo = fov_overlay()
+    left, right, bottom, top = tangents
+    cx, cy, rx, ry, shx, shy = foveation
+    u0, u1 = fo.band_fractions(fo.fov_axis(cx, shx, rx, render[0]))
+    v0, v1 = fo.band_fractions(fo.fov_axis(cy, shy, ry, render[1]))
+    span_x, span_y = left + right, top + bottom
+    up, down = top - v0 * span_y, v1 * span_y - top
+    if eye == 'L':
+        return left - u0 * span_x, u1 * span_x - left, up, down
+    return u1 * span_x - right, right - u0 * span_x, up, down
+
+
+def pxdeg_axis(render, box):
+    """Predicted px/deg on the eye axis if `render` (w, h) pixels span `box` (left, right, up, down tangents):
+    avp-sharpness.py's "centre", render px over the tan span x pi/180 inside the 1:1 band, the lower of h and v.
+    The Swift twin is ProjectionOverlay.pxPerDegAxis; fixtures/projection-overlay.json pins both."""
+    left, right, up, down = box
+    return min(render[0] / (left + right), render[1] / (up + down)) * math.pi / 180
+
+
+def number_list(text, count):
+    values = [number(v) for v in (text or '').split(',')]
+    return tuple(values) if len(values) == count and all(v is not None for v in values) else None
+
+
+def projection_fields(f, points, tangents, eye):
+    """The logged projection readout of a `dots_outline` line and its check against this file's formulas
+    (bbox from the drawn polygon, px/deg from render_px, the foveation rect from the logged setting)."""
+    out = dict(bbox_deg=number_list(f.get('bbox_deg'), 4), bbox_tan=number_list(f.get('bbox_tan'), 4),
+               fov_source=f.get('fov_source'), foveation=number_list(f.get('foveation'), 6),
+               fov_rect_deg='off' if f.get('fov_rect_deg') == 'off' else number_list(f.get('fov_rect_deg'), 4),
+               render_px=number_list(f.get('render_px'), 2),
+               pxdeg_frustum=number(f.get('pxdeg_frustum')), pxdeg_bbox=number(f.get('pxdeg_bbox')))
+    if out['render_px']:
+        out['render_px'] = tuple(int(v) for v in out['render_px'])
+    if any(out[k] is None for k in ('bbox_tan', 'render_px', 'pxdeg_frustum', 'pxdeg_bbox')):
+        out['projection_check'] = 'not logged'
+        return out
+    left, right, bottom, top = tangents
+    wrong = []
+    if any(abs(a - b) > 1e-3 for a, b in zip(outline_bbox(points), out['bbox_tan'])):
+        wrong.append('bbox')
+    if abs(pxdeg_axis(out['render_px'], (left, right, top, bottom)) - out['pxdeg_frustum']) > 0.05:
+        wrong.append('pxdeg_frustum')
+    if abs(pxdeg_axis(out['render_px'], out['bbox_tan']) - out['pxdeg_bbox']) > 0.05:
+        wrong.append('pxdeg_bbox')
+    if out['foveation'] and isinstance(out['fov_rect_deg'], tuple):
+        rect = foveation_rect(eye, tangents, out['foveation'], out['render_px'])
+        if any(abs(math.degrees(math.atan(a)) - b) > 0.01 for a, b in zip(rect, out['fov_rect_deg'])):
+            wrong.append('fov_rect')
+    out['projection_check'] = 'mismatch: ' + ','.join(wrong) if wrong else 'ok'
+    return out
+
+
 def dots_outlines(records):
     """One row per `dots_outline` line (shape=lens: logged rays = reference + offset; shape=rect or
     absent: frustum minus inset), with the area it implies and, when the same log has confirmed
-    dots for that eye (latest walk), the per-ray deviation dot minus outline."""
+    dots for that eye (latest walk), the per-ray deviation dot minus outline. `session` is the latest
+    `dots_session` begin in the same file; the projection fields are checked by `projection_fields`."""
     boundaries = {}
     for boundary in dots_boundaries(records):
         if boundary['label'] == boundary['eye']:
             boundaries[boundary['eye']] = boundary
     rows = []
+    session, session_file = None, None
     for record in records:
         f = record['fields']
+        source_file = record['source'].rsplit(':', 1)[0]
+        if source_file != session_file:
+            session, session_file = '{} (no dots_session begin)'.format(source_file), source_file
+        if record['topic'] == 'dots_session' and f.get('event') == 'begin':
+            session = record['source']
         if record['topic'] != 'dots_outline' or f.get('eye') not in ('L', 'R'):
             continue
         eye, shape = f['eye'], f.get('shape', 'rect')
@@ -652,7 +744,9 @@ def dots_outlines(records):
                                    outline_ecc_deg=expected(point['ray_deg']),
                                    deviation_deg=point['ecc_deg'] - expected(point['ray_deg'])))
         worst = max(deviations, key=lambda d: abs(d['deviation_deg'])) if deviations else None
-        rows.append(dict(eye=eye, shape=shape, source=record['source'], inset_deg=inset, offset_deg=offset,
+        points = [(r, lens_ecc(r, rays)) for r in range(0, 360, 5)] if rays else outline_points(inset, tangents)
+        rows.append(dict(projection_fields(f, points, tangents, eye), session=session,
+                         eye=eye, shape=shape, source=record['source'], inset_deg=inset, offset_deg=offset,
                          reference=f.get('reference'), rays=rays,
                          nasal_deg=number(f.get('nasal_deg')), temporal_deg=number(f.get('temporal_deg')),
                          up_deg=number(f.get('up_deg')), down_deg=number(f.get('down_deg')),
@@ -675,19 +769,33 @@ def outline_report(records):
              'inset, clamped at 0), in degrees from the head axis. area_frac is the outline polygon area in tangent '
              'space over the frustum area (lens: 5-degree rays; rect: 5-degree rays plus corners, as drawn). '
              'deviation_deg is the confirmed dot eccentricity minus the outline on that ray (positive: the dot was '
-             'seen outside the outline), against the latest walk of the same eye in these logs.', '']
+             'seen outside the outline), against the latest walk of the same eye in these logs.', '',
+             'Projection overlay columns (lines since the overlay): bbox_deg is the axis-aligned tangent box of the drawn '
+             'outline, left,right,up,down degrees from the eye axis (head-frame sides, as the client reports fov '
+             'tangents): the FOV to send for the highest sharpness. fov_rect_deg is the 1:1 band of the foveated '
+             'encoding (fov_source: a points-chart-avp.tsv row, or live) on the rendered frustum. pxdeg_frustum and '
+             'pxdeg_bbox are the predicted px/deg on the eye axis at render_px over the frustum and over the bbox '
+             '(avp-sharpness.py centre: the lower of h and v). projection_check recomputes bbox, px/deg and the '
+             'foveation rect from the logged inputs (ok, mismatch: <fields>, or not logged).', '']
     rows = dots_outlines(records)
+
+    def values(v):
+        return v if isinstance(v, str) or v is None else ','.join(fmt(x) for x in v)
     for eye in ('L', 'R'):
         mine = [r for r in rows if r['eye'] == eye]
         lines += ['Outline eye={}'.format(eye), '']
         lines += table([dict({k: fmt(r[k]) for k in ('inset_deg', 'offset_deg', 'nasal_deg', 'temporal_deg', 'up_deg',
-                                                    'down_deg', 'area_frac', 'max_dev_deg', 'max_dev_ray')},
+                                                    'down_deg', 'area_frac', 'max_dev_deg', 'max_dev_ray',
+                                                    'pxdeg_frustum', 'pxdeg_bbox')},
                              source=r['source'], shape=r['shape'], reference=r['reference'],
                              tangent_source=r['tangent_source'],
                              tangents=','.join('{:g}'.format(t) for t in r['tangents']) +
-                             (' ({})'.format(r['tangent_note']) if r['tangent_note'] else '')) for r in mine],
+                             (' ({})'.format(r['tangent_note']) if r['tangent_note'] else ''),
+                             bbox_deg=values(r['bbox_deg']), fov_source=r['fov_source'],
+                             fov_rect_deg=values(r['fov_rect_deg']), projection_check=r['projection_check']) for r in mine],
                        ('source', 'shape', 'inset_deg', 'offset_deg', 'nasal_deg', 'temporal_deg', 'up_deg', 'down_deg',
-                        'area_frac', 'max_dev_deg', 'max_dev_ray', 'reference', 'tangent_source', 'tangents')) + ['']
+                        'area_frac', 'max_dev_deg', 'max_dev_ray', 'reference', 'tangent_source', 'tangents',
+                        'bbox_deg', 'fov_source', 'fov_rect_deg', 'pxdeg_frustum', 'pxdeg_bbox', 'projection_check')) + ['']
         lens = [r for r in mine if r['rays']]
         if lens:
             lines += ['Per-ray outline, latest lens line ({}; reference + offset):'.format(cell(lens[-1]['source'])), '']
@@ -697,7 +805,33 @@ def outline_report(records):
             lines += ['Per-ray deviation, latest outline ({}):'.format(cell(mine[-1]['source'])), '']
             lines += table([{k: fmt(v) for k, v in d.items()} for d in mine[-1]['deviations']],
                            ('ray_deg', 'dot_ecc_deg', 'outline_ecc_deg', 'deviation_deg')) + ['']
-    return lines
+    return lines + projection_summary(rows)
+
+
+def projection_summary(rows):
+    """One `projection` line per Boundary dots session: the last logged projection readout per eye."""
+    sessions = {}
+    for row in rows:
+        last = sessions.setdefault(row['session'], {})
+        if row['projection_check'] != 'not logged':
+            last[row['eye']] = row
+    lines = ['### Projection', '', 'Last projection readout per eye in each session (gain = pxdeg_bbox / pxdeg_frustum).', '']
+    for session, last in sessions.items():
+        eyes = []
+        for eye in ('L', 'R'):
+            r = last.get(eye)
+            if r is None:
+                eyes.append('eye={} no data'.format(eye))
+                continue
+            rect = r['fov_rect_deg']
+            eyes.append('eye={} source={} fov_source={} bbox_deg={} fov_rect_deg={} render_px={} pxdeg_frustum={} '
+                        'pxdeg_bbox={} gain={:.2f} check={}'.format(
+                            eye, r['source'], r['fov_source'], ','.join(fmt(v) for v in r['bbox_deg'] or ()),
+                            rect if isinstance(rect, str) or rect is None else ','.join(fmt(v) for v in rect),
+                            ','.join(str(v) for v in r['render_px']), fmt(r['pxdeg_frustum']), fmt(r['pxdeg_bbox']),
+                            r['pxdeg_bbox'] / r['pxdeg_frustum'], r['projection_check']))
+        lines += ['projection session={} {}'.format(session, '; '.join(eyes)), '']
+    return lines if sessions else []
 
 
 def dots_report(records):

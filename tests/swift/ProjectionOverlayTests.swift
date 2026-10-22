@@ -189,7 +189,7 @@ enum ProjectionOverlayTests {
         session.eye = .left
         let line = Diag.line(topic: "dots_outline", tMs: 1, fields: session.outlineFields(frustum: left, source: "device_default")!)
         expect(line.hasSuffix(" bbox_deg=41.512,37.500,31.607,32.500 bbox_tan=0.8851,0.7673,0.6154,0.6371 fov_source=a100-axis-C"
-                              + " fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=44.108"),
+                              + " foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=44.108"),
                "projection fields on dots_outline: \(line)")
         session.eye = .right
         session.offset = 5
