@@ -21,6 +21,16 @@ def t(d):
     return math.tan(math.radians(d))
 
 
+def rounded(value):
+    if isinstance(value, float):
+        return round(value, 9)
+    if isinstance(value, dict):
+        return {k: rounded(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [rounded(v) for v in value]
+    return value
+
+
 class LensModelTests(unittest.TestCase):
     def test_inset_rect(self):
         r = lm.inset_rect('L', 15, EXACT)
@@ -80,7 +90,8 @@ class LensModelTests(unittest.TestCase):
                 for got, want in zip(e + lm.head(eye, e), p['eye'] + p['head']):
                     self.assertAlmostEqual(got, want, delta=1e-6, msg='%s phi %s' % (name, p['phi_deg']))
             self.assertAlmostEqual(lm.area_fraction(eye, inset), case['area_fraction'], delta=1e-6, msg=name)
-        self.assertEqual(json.loads(lm.fixture_text(lm.fixture())), fx, 'fixture is what lens_model.py writes')
+        # Regenerated equal to 1e-9 (the last digits of pow differ between Python builds).
+        self.assertEqual(rounded(json.loads(lm.fixture_text(lm.fixture()))), rounded(fx), 'fixture is what lens_model.py writes')
 
     def test_svg(self):
         text = lm.svg()

@@ -202,7 +202,8 @@ class ModelLensReportTests(unittest.TestCase):
             output = report.generate(directory)
         for text in ['inset_deg', 'model', 'superellipse(2,3,1.5,4)', '45.001,30,30,35.001', 'diag-outline.log:8']:
             self.assertIn(text, output)
-        lens_rows = [line for line in output.splitlines() if 'diag-outline.log:8 ' in line and line.startswith('|')]
+        # The outline table row (the raw records table lists the same line by topic).
+        lens_rows = [line for line in output.splitlines() if line.startswith('| diag-outline.log:8 | lens |')]
         self.assertEqual(len(lens_rows), 1)
         self.assertIn('| lens | 15 |', lens_rows[0])
 

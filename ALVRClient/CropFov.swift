@@ -1,20 +1,20 @@
 import Foundation
 import simd
 
-/// "Crop FOV to outline" (Diagnostics setting, off by default): the client reports, per eye, the bounding box of the
-/// lens outline (BoundaryDotsLensReference + the Boundary dots lens offset, ProjectionOverlay.bbox) widened by a margin
-/// and clamped to the device frustum, instead of the whole device frustum. The server renders that box at the
-/// configured render size, so the centre density rises by the tangent-span ratio; the display draws the frame on the
-/// sent box (Renderer uniforms.tangents) and the rest of the drawable stays black. docs/lumen/crop-fov.md.
+/// "Crop FOV to outline" (Diagnostics setting, off by default): the client reports, per eye, the model lens's inset
+/// rectangle (BoundaryDotsLensModel.insetRect at the Boundary dots lens inset: each device frustum edge moved in by the
+/// inset) widened by a margin and clamped to the device frustum, instead of the whole device frustum. The server renders
+/// that box at the configured render size, so the centre density rises by the tangent-span ratio; the display draws the
+/// frame on the sent box (Renderer uniforms.tangents) and the rest of the drawable stays black. docs/lumen/crop-fov.md.
 /// Tangents are gimmeTangents magnitudes, slots (left, right, bottom, top).
 enum CropFov {
     static let defaultMarginDeg = 2.0
 
-    /// One eye's sent tangents: the outline bbox, each side widened by `marginDeg` (in degrees; negative or non-finite
-    /// is 0), then no wider than `device` on any side. Nil for Both.
-    static func tangents(eye: BoundaryDotsEye, device: simd_float4, offsetDeg: Double, marginDeg: Double) -> simd_float4? {
-        guard let outline = BoundaryDotsLensReference.outline(eye, offsetDeg: offsetDeg),
-              let box = ProjectionOverlay.bbox(outline) else { return nil }
+    /// One eye's sent tangents: the inset rectangle of `device`, each side widened by `marginDeg` (in degrees; negative
+    /// or non-finite is 0), then no wider than `device` on any side. Nil for Both.
+    static func tangents(eye: BoundaryDotsEye, device: simd_float4, insetDeg: Double, marginDeg: Double) -> simd_float4? {
+        let frustum = BoundaryDotsFrustum(left: Double(device.x), right: Double(device.y), bottom: Double(device.z), top: Double(device.w))
+        guard let box = BoundaryDotsLensModel.insetRect(eye, frustum: frustum, insetDeg: insetDeg)?.box(eye) else { return nil }
         let margin = marginDeg.isFinite ? max(0, marginDeg) : 0
         func widened(_ t: Double, _ limit: Float) -> Float {
             min(Float(tan(atan(t) + margin * .pi / 180)), limit)
@@ -40,29 +40,30 @@ enum CropFov {
     }
 
     /// The per-eye tangents to report and their source: -ALVRDebugEyeTangents first, then the crop, then the device.
-    static func choose(device: [simd_float4], debug: [simd_float4]?, crop: Bool, offsets: [Double],
+    static func choose(device: [simd_float4], debug: [simd_float4]?, crop: Bool, insets: [Double],
                        marginDeg: Double) -> (tangents: [simd_float4], source: String) {
         if let debug { return (debug, "debug") }
         guard crop else { return (device, "frustum") }
         let eyes: [BoundaryDotsEye] = [.left, .right]
         let cropped = device.indices.map { i in
-            CropFov.tangents(eye: eyes[min(i, 1)], device: device[i], offsetDeg: i < offsets.count ? offsets[i] : 0,
+            CropFov.tangents(eye: eyes[min(i, 1)], device: device[i],
+                             insetDeg: i < insets.count ? insets[i] : BoundaryDotsOutline.defaultInsetDeg,
                              marginDeg: marginDeg) ?? device[i]
         }
         return (cropped, "crop")
     }
 
-    /// Lens outline offset per eye (L, R) last set on the Boundary dots slider in this app session; 0 until then.
+    /// Model lens inset per eye (L, R) last set on the Boundary dots lens slider in this app session; 15 until then.
     private static let lock = NSLock()
-    private static var stored: [Double] = [0, 0]
+    private static var stored: [Double] = [BoundaryDotsOutline.defaultInsetDeg, BoundaryDotsOutline.defaultInsetDeg]
 
-    static var offsets: [Double] {
+    static var insets: [Double] {
         lock.lock()
         defer { lock.unlock() }
         return stored
     }
 
-    static func recordOffset(_ eye: BoundaryDotsEye, deg: Double) {
+    static func recordInset(_ eye: BoundaryDotsEye, deg: Double) {
         guard deg.isFinite else { return }
         lock.lock()
         defer { lock.unlock() }
@@ -73,9 +74,9 @@ enum CropFov {
         }
     }
 
-    static func resetOffsets() {
+    static func resetInsets() {
         lock.lock()
-        stored = [0, 0]
+        stored = [BoundaryDotsOutline.defaultInsetDeg, BoundaryDotsOutline.defaultInsetDeg]
         lock.unlock()
     }
 }

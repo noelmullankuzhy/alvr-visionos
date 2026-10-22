@@ -631,6 +631,36 @@ def fov_overlay():
     return _FOV_OVERLAY[0]
 
 
+_LENS_MODEL = []
+
+
+def lens_model():
+    """lens_model.py (same directory), loaded once: the Boundary dots model lens (BoundaryDotsLensModel.swift)."""
+    if not _LENS_MODEL:
+        spec = importlib.util.spec_from_file_location('lens_model', Path(__file__).with_name('lens_model.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _LENS_MODEL.append(module)
+    return _LENS_MODEL[0]
+
+
+def lens_model_box(eye, inset, tangents):
+    """The model lens's inset rectangle as a head-frame tangent box (left, right, up, down) of the frustum
+    (left, right, bottom, top): the lens's bbox."""
+    lm = lens_model()
+    return lm.box_lrud(eye, lm.inset_rect(eye, inset, tangents))
+
+
+def lens_model_points(eye, inset, tangents):
+    """The model lens's 480 points as head-frame (ray, ecc) degrees, as the app draws them."""
+    lm = lens_model()
+    points = []
+    for p in lm.lens_points(eye, inset, tan_lrdu=tangents):
+        x, y = lm.head(eye, p)
+        points.append((math.degrees(math.atan2(y, x)) % 360, math.degrees(math.atan(math.hypot(x, y)))))
+    return points
+
+
 def render_size(scale):
     """Per-eye render (w, h) at a points row's render_scale, rounded per side as fovmatrix.py render_size."""
     return int(round(PROJECTION_BASE_RENDER[0] * scale)), int(round(PROJECTION_BASE_RENDER[1] * scale))
@@ -702,8 +732,9 @@ def projection_fields(f, points, tangents, eye):
 
 
 def dots_outlines(records):
-    """One row per `dots_outline` line (shape=lens: logged rays = reference + offset; shape=rect or
-    absent: frustum minus inset), with the area it implies and, when the same log has confirmed
+    """One row per `dots_outline` line (shape=lens with inset_deg: the model lens in the frustum minus the inset,
+    lens_model.py; shape=measured, or an older shape=lens line with rays: logged rays = reference + offset;
+    shape=rect or absent: frustum minus inset), with the area it implies and, when the same log has confirmed
     dots for that eye (latest walk), the per-ray deviation dot minus outline. `session` is the latest
     `dots_session` begin in the same file; the projection fields are checked by `projection_fields`."""
     boundaries = {}
@@ -723,13 +754,16 @@ def dots_outlines(records):
             continue
         eye, shape = f['eye'], f.get('shape', 'rect')
         inset, offset, rays = number(f.get('inset_deg')), number(f.get('offset_deg')), None
-        if shape == 'lens':
+        if shape == 'lens' and 'rays' in f:
+            shape = 'measured'    # W34 lines, before the model lens
+        if shape == 'measured':
             rays = outline_rays(f.get('rays'))
             if offset is None or rays is None:
                 continue
             inset = None
-        elif shape != 'rect' or inset is None:
+        elif shape not in ('rect', 'lens') or inset is None:
             continue
+        model = shape == 'lens'
         tangents = tuple(number(v) for v in f.get('tangents', '').split(','))
         note = None
         if len(tangents) != 4 or any(v is None or v <= 0 for v in tangents):
@@ -737,6 +771,8 @@ def dots_outlines(records):
             tangents = OUTLINE_DEVICE_TANGENTS[eye]
 
         def expected(ray):
+            if model:
+                return lens_model().ecc_deg(eye, ray, inset, tangents)
             return lens_ecc(ray, rays) if rays else outline_ecc(ray, inset, tangents)
         deviations = []
         for point in (boundaries.get(eye) or {}).get('points', []):
@@ -744,14 +780,20 @@ def dots_outlines(records):
                                    outline_ecc_deg=expected(point['ray_deg']),
                                    deviation_deg=point['ecc_deg'] - expected(point['ray_deg'])))
         worst = max(deviations, key=lambda d: abs(d['deviation_deg'])) if deviations else None
-        points = [(r, lens_ecc(r, rays)) for r in range(0, 360, 5)] if rays else outline_points(inset, tangents)
+        if model:
+            points = lens_model_points(eye, inset, tangents)
+            area = lens_model().area_fraction(eye, inset, tangents)
+        elif rays:
+            points, area = [(r, lens_ecc(r, rays)) for r in range(0, 360, 5)], lens_area_frac(rays, tangents)
+        else:
+            points, area = outline_points(inset, tangents), outline_area_frac(inset, tangents)
         rows.append(dict(projection_fields(f, points, tangents, eye), session=session,
                          eye=eye, shape=shape, source=record['source'], inset_deg=inset, offset_deg=offset,
-                         reference=f.get('reference'), rays=rays,
+                         reference=f.get('reference'), rays=rays, model=f.get('model') if model else None,
                          nasal_deg=number(f.get('nasal_deg')), temporal_deg=number(f.get('temporal_deg')),
                          up_deg=number(f.get('up_deg')), down_deg=number(f.get('down_deg')),
                          tangent_source=f.get('tangent_source'), tangents=tangents, tangent_note=note,
-                         area_frac=lens_area_frac(rays, tangents) if rays else outline_area_frac(inset, tangents),
+                         area_frac=area,
                          deviations=deviations,
                          max_dev_deg=abs(worst['deviation_deg']) if worst else None,
                          max_dev_ray=worst['ray_deg'] if worst else None))
@@ -761,18 +803,22 @@ def dots_outlines(records):
 def outline_report(records):
     lines = ['### Outline slider', '',
              'Each `dots_outline` line is one LEFT slider step (0.5 deg), the settled value at a slider '
-             'release, or a RIGHT hold with no cursor. shape=lens (default): the measured '
+             'release, or a RIGHT hold with no cursor. shape=lens (default): the model lens (model, '
+             'tools/diag/lens_model.py): the rendered frustum with each edge angle moved in by inset_deg (at least '
+             '1 deg left) and a per-quadrant superellipse inscribed in that rectangle; its limits are the '
+             "rectangle's sides. shape=measured (W34; older lines logged it as shape=lens with rays): the measured "
              'seal-on visible field of that eye (reference) moved radially by offset_deg (positive outward); rays '
              'lists the drawn eccentricity per measured ray and rays between them interpolate linearly in '
              'eccentricity. shape=rect (or no shape, older lines): the rendered frustum inset by inset_deg along '
              'every ray. Limits are the logged values at the 0/90/180/270 rays (rect: frustum sides minus the '
              'inset, clamped at 0), in degrees from the head axis. area_frac is the outline polygon area in tangent '
-             'space over the frustum area (lens: 5-degree rays; rect: 5-degree rays plus corners, as drawn). '
+             'space over the frustum area (lens: its 480 points; measured: 5-degree rays; rect: 5-degree rays plus '
+             'corners, as drawn). '
              'deviation_deg is the confirmed dot eccentricity minus the outline on that ray (positive: the dot was '
              'seen outside the outline), against the latest walk of the same eye in these logs.', '',
              'Projection overlay columns (lines since the overlay): bbox_deg is the axis-aligned tangent box of the drawn '
-             'outline, left,right,up,down degrees from the eye axis (head-frame sides, as the client reports fov '
-             'tangents). It contains the outline, so its corners lie outside the visible field: it is the FOV to send so '
+             'outline (lens: the inset rectangle), left,right,up,down degrees from the eye axis (head-frame sides, as '
+             'the client reports fov tangents). It contains the outline, so its corners lie outside the visible field: it is the FOV to send so '
              'that every visible direction is rendered. fov_rect_deg is the 1:1 band of the foveated encoding '
              '(fov_source: a points-chart-avp.tsv row, fov_live=no, a preset shown when not streaming; or live, '
              'fov_live=yes) on the rendered frustum. pxdeg_frustum and '
@@ -789,18 +835,18 @@ def outline_report(records):
         lines += table([dict({k: fmt(r[k]) for k in ('inset_deg', 'offset_deg', 'nasal_deg', 'temporal_deg', 'up_deg',
                                                     'down_deg', 'area_frac', 'max_dev_deg', 'max_dev_ray',
                                                     'pxdeg_frustum', 'pxdeg_bbox')},
-                             source=r['source'], shape=r['shape'], reference=r['reference'],
+                             source=r['source'], shape=r['shape'], reference=r['reference'], model=r['model'],
                              tangent_source=r['tangent_source'],
                              tangents=','.join('{:g}'.format(t) for t in r['tangents']) +
                              (' ({})'.format(r['tangent_note']) if r['tangent_note'] else ''),
                              bbox_deg=values(r['bbox_deg']), fov_source=r['fov_source'], fov_live=r['fov_live'],
                              fov_rect_deg=values(r['fov_rect_deg']), projection_check=r['projection_check']) for r in mine],
                        ('source', 'shape', 'inset_deg', 'offset_deg', 'nasal_deg', 'temporal_deg', 'up_deg', 'down_deg',
-                        'area_frac', 'max_dev_deg', 'max_dev_ray', 'reference', 'tangent_source', 'tangents',
+                        'area_frac', 'max_dev_deg', 'max_dev_ray', 'reference', 'model', 'tangent_source', 'tangents',
                         'bbox_deg', 'fov_source', 'fov_live', 'fov_rect_deg', 'pxdeg_frustum', 'pxdeg_bbox', 'projection_check')) + ['']
         lens = [r for r in mine if r['rays']]
         if lens:
-            lines += ['Per-ray outline, latest lens line ({}; reference + offset):'.format(cell(lens[-1]['source'])), '']
+            lines += ['Per-ray outline, latest measured line ({}; reference + offset):'.format(cell(lens[-1]['source'])), '']
             lines += table([dict(ray_deg=fmt(ray), outline_ecc_deg=fmt(ecc)) for ray, ecc in sorted(lens[-1]['rays'].items())],
                            ('ray_deg', 'outline_ecc_deg')) + ['']
         if mine and mine[-1]['deviations']:

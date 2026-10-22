@@ -105,6 +105,11 @@ struct ProjectionStream: Equatable {
     }
 }
 
+/// One drawn layer of an eye's overlay, back to front.
+enum ProjectionLayer: Equatable {
+    case frustum, outline, rect, axes, bbox, foveation, circle
+}
+
 enum ProjectionOverlay {
     /// Eye hues at equal relative luminance (about 0.49): L cyan, R orange; white for the foveation rect and the
     /// cross in Both.
@@ -123,8 +128,26 @@ enum ProjectionOverlay {
         return 0.2126 * linear(rgb.x) + 0.7152 * linear(rgb.y) + 0.0722 * linear(rgb.z)
     }
 
-    /// Ribbon widths in degrees: the frustum rectangle widest, the bbox thinnest.
-    static let width = (frustum: 0.4, lens: BoundaryDotsOutline.lineWidthDeg, bbox: 0.15, foveation: 0.2, circle: 0.12)
+    /// Ribbon widths in degrees: the frustum rectangle widest, the bbox thinnest; the model lens's inset rectangle
+    /// thin and its axes thinner.
+    static let width = (frustum: 0.4, lens: BoundaryDotsOutline.lineWidthDeg, bbox: 0.15, foveation: 0.2, circle: 0.12,
+                        rect: 0.15, axes: 0.12)
+
+    /// The layers drawn per eye: the lens style draws its inset rectangle (solid; it is the bbox) and the two axes
+    /// instead of the dashed bbox.
+    static func layers(_ shape: BoundaryDotsOutlineShape) -> [ProjectionLayer] {
+        shape == .lens ? [.frustum, .outline, .rect, .axes, .foveation, .circle] : [.frustum, .outline, .bbox, .foveation, .circle]
+    }
+
+    /// The two axes through the eye axis spanning `box`: horizontal from the left edge to the right edge, vertical
+    /// from the top to the bottom, each split into steps of at most `step` (tangent space).
+    static func axes(_ box: ProjectionBox, step: Double) -> [[SIMD2<Double>]] {
+        func strip(_ a: SIMD2<Double>, _ b: SIMD2<Double>) -> [SIMD2<Double>] {
+            let count = max(1, Int((simd_distance(a, b) / step).rounded(.up)))
+            return (0...count).map { $0 == count ? b : a + (b - a) * Double($0) / Double(count) }
+        }
+        return [strip([-box.left, 0], [box.right, 0]), strip([0, box.up], [0, -box.down])]
+    }
 
     /// The bbox is drawn in short dashes (tangent length, about 1.1 deg near the axis) so a screenshot tells it from
     /// the solid frustum rectangle.
@@ -222,8 +245,10 @@ struct ProjectionReadout: Equatable {
     let stream: ProjectionStream
     let pxdegFrustum, pxdegBbox: Double
 
-    init?(eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum, outline: [BoundaryDot], stream: ProjectionStream) {
-        guard eye != .both, let bbox = ProjectionOverlay.bbox(outline) else { return nil }
+    /// `bbox` nil: the outline's own bbox (the model lens passes its inset rectangle).
+    init?(eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum, outline: [BoundaryDot], stream: ProjectionStream,
+          bbox: ProjectionBox? = nil) {
+        guard eye != .both, let bbox = bbox ?? ProjectionOverlay.bbox(outline) else { return nil }
         self.eye = eye
         self.frustum = ProjectionBox(frustum)
         self.bbox = bbox

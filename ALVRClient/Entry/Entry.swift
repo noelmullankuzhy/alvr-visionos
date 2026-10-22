@@ -458,7 +458,7 @@ struct Entry: View {
                             Stepper("Crop margin \(String(format: "%g", gStore.settings.cropMarginDeg)) deg",
                                     value: $gStore.settings.cropMarginDeg, in: 0...10, step: 0.5)
                                 .onChange(of: gStore.settings.cropMarginDeg) { saveAction() }
-                            Text("Next stream: each eye reports the Boundary dots lens outline's bounding box (reference + lens offset) widened by the margin, not the whole frustum; the rest of the view is black. Set the server's foveation center shift to the DIAG fov_sent axis_center_shift.")
+                            Text("Next stream: each eye reports the Boundary dots model lens's inset rectangle (device frustum minus the lens inset, default 15 deg) widened by the margin, not the whole frustum; the rest of the view is black. Set the server's foveation center shift to the DIAG fov_sent axis_center_shift.")
                                 .font(.system(size: 10))
                             Picker(selection: $gStore.settings.goldenFrameSet) {
                                 ForEach(GoldenFrameSetting.choices() + (GoldenFrameSetting.choices().contains(gStore.settings.goldenFrameSet) ? [] : [gStore.settings.goldenFrameSet]), id: \.self) {

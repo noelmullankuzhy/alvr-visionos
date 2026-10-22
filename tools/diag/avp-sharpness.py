@@ -8,7 +8,7 @@ visible field, fov scales, foveation sizes). Replace the visible field there (e.
 
 Variants: asrun (fixed size, no shift); axis (fixed size, band centred on the eye axis); centred (fixed size, band centred
 on the visible field); wider (band spans the whole visible field, centred on it); off; crop (points rows a100-crop-C/-A
-only: the frame is the lens outline's bbox + margin, the client's "Crop FOV to outline", band on its eye axis). Each candidate's render is the
+only: the frame is the model lens's inset rectangle + margin, the client's "Crop FOV to outline", band on its eye axis). Each candidate's render is the
 largest at the 3648:2912 aspect whose foveated coded size fits the per-eye budget; px/deg is fov-overlay.py's page
 prediction (render px per degree over the foveation squeeze). Standard library only; `--field FILE` overrides the file."""
 import importlib.util
@@ -21,6 +21,9 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('fov_overlay', HERE / 'fov-overlay.py')
 fo = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fo)
+spec = importlib.util.spec_from_file_location('lens_model', HERE / 'lens_model.py')
+lm = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(lm)
 
 FIELD_FILE = HERE.parent / 'fov-matrix' / 'avp-field.json'
 ASPECT = (3648, 2912)
@@ -85,31 +88,16 @@ def mean(v):
     return sum(v) / len(v)
 
 
-def lens_ecc(rays, ray):
-    """Lens reference eccentricity at `ray` deg: linear between the nearest measured rays (BoundaryDotsLensReference.interpolate)."""
-    ray %= 360
-    if ray in rays:
-        return rays[ray]
-    keys = sorted(rays)
-    below = max([k for k in keys if k < ray], default=keys[-1])
-    above = min([k for k in keys if k > ray], default=keys[0])
-    span = (above - below) % 360
-    return rays[below] + (ray - below) % 360 / span * (rays[above] - rays[below])
-
-
-def crop_tan(p, eye, offset=None, margin=None):
-    """|tan| L,R,D,U the client sends with "Crop FOV to outline" (ALVRClient/CropFov.swift): the bbox of the lens outline
-    (reference + offset every 5 deg, R mirrored), each side widened by `margin` deg, no wider than the device frustum."""
+def crop_tan(p, eye, inset=None, margin=None):
+    """|tan| L,R,D,U the client sends with "Crop FOV to outline" (ALVRClient/CropFov.swift): the model lens's inset
+    rectangle (lens_model.py: each frustum edge angle minus `inset` deg, >= 1), each side widened by `margin` deg, no
+    wider than the device frustum."""
     c = p['crop']
-    offset = c['offset_deg'] if offset is None else offset
+    inset = c['inset_deg'] if inset is None else inset
     margin = max(0, c['margin_deg'] if margin is None else margin)
-    rays = {float(k): float(v) for k, v in (x.split(':') for x in c['lens_reference_rays'].split(','))}
-    pts = []
-    for ray in range(0, 360, 5):
-        r = math.tan(math.radians(max(0, lens_ecc(rays, ray if eye == 'L' else 540 - ray) + offset)))
-        pts.append((r * math.cos(math.radians(ray)), r * math.sin(math.radians(ray))))
-    box = (-min(x for x, _ in pts), max(x for x, _ in pts), -min(y for _, y in pts), max(y for _, y in pts))
-    return [min(math.tan(math.atan(t) + math.radians(margin)), lim) for t, lim in zip(box, p['frustum_tan_LRDU'][eye])]
+    frustum = p['frustum_tan_LRDU'][eye]
+    left, right, up, down = lm.box_lrud(eye, lm.inset_rect(eye, inset, frustum))
+    return [min(math.tan(math.atan(t) + math.radians(margin)), lim) for t, lim in zip((left, right, down, up), frustum)]
 
 
 def crop_eyes(p):
@@ -273,8 +261,8 @@ def points(p):
         out.append('a%03d-%s-%s\t%g\t%g\t%s\t%g\t%g\teye_tangents=%s' % (round(r['s'] * 100), r['fov'], r['budget'], r['s'], round(r['render'][0] / ASPECT[0], 4),
                                                                          fvtext(r['fv']), pt['bitrate_mbps'], pt['fps'], eyes))
     c = p['crop']
-    out.append('# Crop FOV to outline (ALVRClient/CropFov.swift, docs/lumen/crop-fov.md): lens outline bbox, offset %g, + %g deg '
-               'margin; eye_tangents = what the client sends.' % (c['offset_deg'], c['margin_deg']))
+    out.append('# Crop FOV to outline (ALVRClient/CropFov.swift, docs/lumen/crop-fov.md): model lens inset rectangle, inset %g, + %g deg '
+               'margin; eye_tangents = what the client sends.' % (c['inset_deg'], c['margin_deg']))
     for name, r in crop_rows(p).items():
         crop_eyes_text = 'L:%s;R:%s' % tuple(','.join('%g' % v for v in r['tans'][k]) for k in 'LR')
         out.append('# %s: predicted centre %.1f px/deg (frustum %.1f at the same render, x%.2f h / x%.2f v)' % (
