@@ -876,6 +876,12 @@ struct VideoHandler {
         }
     }
     
+    // Pipeline variant a frame draws with (Renderer.beginRenderStreamingFrame): explicit planes always take biplanar.
+    static func usesSecretPipeline(_ colour: StreamColourState, format: OSType) -> Bool {
+        if case .explicitPlanes = colour.binding { return false }
+        return isFormatSecret(format)
+    }
+
     // Primaries, transfer, matrix, range and bit depth, each read from its own format description extension.
     // The YCbCr matrix's code depth follows the planes the frame's own pixel format binds at, not BitsPerComponent.
     static func getColourSelectionForVideoFormat(_ videoFormat: CMFormatDescription, planeBitDepth: Int?, output: ColourOutput) -> ColourSelection {

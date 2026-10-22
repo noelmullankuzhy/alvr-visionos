@@ -244,6 +244,40 @@ struct BrightTraceSummary {
     }
 }
 
+// Output grid of one eye in its texture slice: the screen-space cell centres of the viewport mapped through the
+// rasterization rate map (separable: physical x depends on screen x only, y on y), one blit per grid row from xMin
+// over span pixels. luma decodes that readback (rows rowBytes apart) in row-major grid order.
+struct BrightTraceRows {
+    enum Format { case half, rgba8, bgra8, rgba8srgb, bgra8srgb }
+    let rows: [Int], cols: [Int], xMin: Int, span: Int
+
+    init(x: Double, y: Double, width: Double, height: Double, textureWidth: Int, textureHeight: Int,
+         physical: (Double, Double) -> (x: Double, y: Double)) {
+        let cx = x + width / 2, cy = y + height / 2
+        cols = BrightTrace.gridCoordinates(origin: x, length: width).map { min(max(Int(physical($0, cy).x), 0), textureWidth - 1) }
+        rows = BrightTrace.gridCoordinates(origin: y, length: height).map { min(max(Int(physical(cx, $0).y), 0), textureHeight - 1) }
+        xMin = cols.min() ?? 0
+        span = (cols.max() ?? 0) - xMin + 1
+    }
+
+    func luma(_ base: UnsafeRawPointer, rowBytes: Int, format: Format) -> [Double] {
+        rows.indices.flatMap { r in
+            cols.map { c -> Double in
+                let p = base.advanced(by: r * rowBytes + (c - xMin) * (format == .half ? 8 : 4))
+                if format == .half {
+                    let h = p.assumingMemoryBound(to: UInt16.self)
+                    return BrightTrace.outputLuma(r: Double(Float16(bitPattern: h[0])), g: Double(Float16(bitPattern: h[1])), b: Double(Float16(bitPattern: h[2])))
+                }
+                let b = p.assumingMemoryBound(to: UInt8.self)
+                let swap = format == .bgra8 || format == .bgra8srgb
+                let srgb = format == .rgba8srgb || format == .bgra8srgb
+                let rgb = [b[swap ? 2 : 0], b[1], b[swap ? 0 : 2]].map { srgb ? BrightTrace.srgbToLinear(Double($0) / 255) : Double($0) / 255 }
+                return BrightTrace.outputLuma(r: rgb[0], g: rgb[1], b: rgb[2])
+            }
+        }
+    }
+}
+
 // Compact JSON with sorted keys and shortest round-trip numbers (JSONSerialization prints 0.7 as 0.69999999999999996).
 enum BrightTraceJSON {
     static func encode(_ value: Any?) -> String {

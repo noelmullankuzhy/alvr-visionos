@@ -1718,6 +1718,10 @@ class RealityKitClientSystemCorrectlyAssociated : System {
                 renderer.renderStreamingFrame(0, commandBuffer: commandBuffer, renderEncoder: encoder, renderTargetColor: drawableTexture, renderTargetDepth: depthTexture, viewports: allViewports, viewTransforms: allViewTransforms, sentViewTangents: allViewTangents, realViewTangents: allViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
                 
                 renderer.endRenderStreamingFrame(renderEncoder: encoder)
+                if BrightTraceSession.enabled, let queuedFrame {
+                    renderer.brightTrace(commandBuffer: commandBuffer, texture: drawableTexture, views: allViewports.indices.map { ($0, allViewports[$0]) },
+                                         rateMap: rasterizationRateMap, queuedFrame: queuedFrame, renderStartS: lastRoundTripRenderTimestamp, presentS: vsyncTime)
+                }
             }
             
             

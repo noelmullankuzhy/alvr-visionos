@@ -65,6 +65,7 @@ struct GlobalSettings: Codable {
     var hdrReferenceWhiteNits: Double = 0
     var eyeBadges: Bool = false
     var hdrProbe: Bool = false
+    var brightnessTrace: Bool = false
 
     // On in the simulator, where there is no headset to judge decoding by; off on device.
     static let eyeDecodeWindowsDefault: Bool = {
@@ -124,6 +125,7 @@ struct GlobalSettings: Codable {
         self.hdrReferenceWhiteNits = try container.decodeIfPresent(Double.self, forKey: .hdrReferenceWhiteNits) ?? self.hdrReferenceWhiteNits
         self.eyeBadges = try container.decodeIfPresent(Bool.self, forKey: .eyeBadges) ?? self.eyeBadges
         self.hdrProbe = try container.decodeIfPresent(Bool.self, forKey: .hdrProbe) ?? self.hdrProbe
+        self.brightnessTrace = try container.decodeIfPresent(Bool.self, forKey: .brightnessTrace) ?? self.brightnessTrace
     }
 }
 

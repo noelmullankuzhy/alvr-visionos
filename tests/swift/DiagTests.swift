@@ -70,6 +70,16 @@ private func testRotation() {
     long.flush()
     expectEqual(logFiles(dir3).count, 2, "oversize line alone, next line in a new file")
     expectEqual(Diag.maxFileBytes, 20 * 1024 * 1024, "decision 65: rotate at 20 MB")
+
+    // Named sink (brightness trace): <name>-<UTC stamp>.<extension>, same rotation.
+    let dir4 = tempDir("named")
+    let named = DiagSink(directory: dir4, maxBytes: 50, now: { Date(timeIntervalSince1970: 1_792_500_000) }, console: nil,
+                         name: "brighttrace", fileExtension: "jsonl")
+    for _ in 0..<2 { named.write(line) }
+    named.flush()
+    let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir4.path)) ?? []).sorted()
+    expect(names.count == 2 && names.allSatisfy { $0.range(of: #"^brighttrace-\d{8}T\d{6}Z(-\d+)?\.jsonl$"#, options: .regularExpression) != nil },
+           "names are brighttrace-<UTC stamp>.jsonl, rotated: \(names)")
 }
 
 private func testConsoleSink() {

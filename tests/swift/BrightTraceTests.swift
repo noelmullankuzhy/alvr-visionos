@@ -160,6 +160,41 @@ private func testRecordEncoding() {
     expect(jumpLine.hasPrefix("BRIGHTTRACE JUMP t_ms=99 eye=L d_exp=0.25 before={") && jumpLine.contains(" after={"), "jump line: \(jumpLine.prefix(80))")
 }
 
+private func testOutputRows() {
+    // Identity rate map: viewport 0,0 1600x800 in a 1600x800 slice.
+    let identity = BrightTraceRows(x: 0, y: 0, width: 1600, height: 800, textureWidth: 1600, textureHeight: 800) { ($0, $1) }
+    expectEqual(identity.cols, BrightTrace.gridCoordinates(origin: 0, length: 1600).map { Int($0) }, "columns at cell centres")
+    expectEqual(identity.rows.first, 25, "first row")
+    expectEqual(identity.xMin, 50, "copy starts at the first column")
+    expectEqual(identity.span, 1550 - 50 + 1, "copy spans first to last column")
+    // A rate map that halves the physical size, and a viewport offset; coordinates clamp to the texture.
+    let mapped = BrightTraceRows(x: 100, y: 0, width: 1600, height: 800, textureWidth: 400, textureHeight: 400) { ($0 / 2, $1 / 2) }
+    expectEqual(mapped.cols.first, Int((100 + 50) / 2), "screen -> physical columns")
+    expectEqual(mapped.rows.last, Int(775 / 2), "screen -> physical rows")
+    expect(mapped.cols.allSatisfy { $0 < 400 } && mapped.cols.last == 399, "clamped to the texture width")
+    // Readback decode: rgba16Float linear and bgra8Unorm_srgb, rows rowBytes apart, pixels from xMin.
+    let rows = BrightTraceRows(x: 0, y: 0, width: 32, height: 32, textureWidth: 32, textureHeight: 32) { ($0, $1) }
+    let rowBytes = rows.span * 8
+    var half = [UInt16](repeating: 0, count: 16 * rowBytes / 2)
+    for r in 0..<16 {
+        for c in rows.cols {
+            let i = (r * rowBytes + (c - rows.xMin) * 8) / 2
+            let v = Float16(Float(r * 16 + c) / 1000)
+            half[i] = v.bitPattern; half[i + 1] = v.bitPattern; half[i + 2] = v.bitPattern; half[i + 3] = Float16(1).bitPattern
+        }
+    }
+    let lumaHalf = half.withUnsafeBytes { rows.luma($0.baseAddress!, rowBytes: rowBytes, format: .half) }
+    expectEqual(lumaHalf.count, 256, "256 grid values")
+    expect(close(lumaHalf[17], Double(Float16(Float(1 * 16 + rows.cols[1]) / 1000)), 1e-6), "grey half value -> its luma")
+    let bytes8 = rows.span * 4
+    var srgb = [UInt8](repeating: 0, count: 16 * bytes8)
+    for r in 0..<16 { for c in rows.cols { let i = r * bytes8 + (c - rows.xMin) * 4; srgb[i] = 0; srgb[i + 1] = 0; srgb[i + 2] = 255; srgb[i + 3] = 255 } }
+    let lumaBGRA = srgb.withUnsafeBytes { rows.luma($0.baseAddress!, rowBytes: bytes8, format: .bgra8srgb) }
+    expect(close(lumaBGRA[0], 0.2126, 1e-6), "bgra: byte 2 is red, sRGB decoded")
+    let lumaRGBA = srgb.withUnsafeBytes { rows.luma($0.baseAddress!, rowBytes: bytes8, format: .rgba8) }
+    expect(close(lumaRGBA[0], 0.0722, 1e-6), "rgba8Unorm: byte 2 is blue, used as is")
+}
+
 @main
 enum BrightTraceTests {
     static func main() {
@@ -170,6 +205,7 @@ enum BrightTraceTests {
         testJumpDetector()
         testSummary()
         testRecordEncoding()
+        testOutputRows()
         finishTests("BrightTrace")
     }
 }

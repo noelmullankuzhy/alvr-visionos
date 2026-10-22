@@ -120,6 +120,8 @@ final class DiagSink {
     static let retryInterval: TimeInterval = 1
     private let queue = DispatchQueue(label: "uk.lumenio.alvr.diag", qos: .utility)
     private let directory: URL
+    private let name: String   // files are <name>-<UTC stamp>.<fileExtension>
+    private let fileExtension: String
     private let maxBytes: Int
     private let now: () -> Date
     private let console: ((String) -> Void)?
@@ -130,8 +132,11 @@ final class DiagSink {
     private var dropped = 0
 
     // opener: open(2) with O_CREAT | O_EXCL; replaceable to simulate suspension in tests.
-    init(directory: URL, maxBytes: Int, now: @escaping () -> Date, console: ((String) -> Void)?, opener: ((String) -> Int32)? = nil) {
+    init(directory: URL, maxBytes: Int, now: @escaping () -> Date, console: ((String) -> Void)?, opener: ((String) -> Int32)? = nil,
+         name: String = "diag", fileExtension: String = "log") {
         self.directory = directory
+        self.name = name
+        self.fileExtension = fileExtension
         self.maxBytes = maxBytes
         self.now = now
         self.console = console
@@ -204,8 +209,8 @@ final class DiagSink {
         guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil else { return }
         // O_EXCL: an existing name (same second) moves on to -1, -2, ...
         for n in 0..<1000 {
-            let name = n == 0 ? "diag-\(stamp).log" : "diag-\(stamp)-\(n).log"
-            let fd = opener(directory.appendingPathComponent(name).path)
+            let file = n == 0 ? "\(name)-\(stamp).\(fileExtension)" : "\(name)-\(stamp)-\(n).\(fileExtension)"
+            let fd = opener(directory.appendingPathComponent(file).path)
             if fd >= 0 {
                 handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
                 return

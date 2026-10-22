@@ -1222,7 +1222,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         var diagSourceId: UInt64? = nil
         var diagStreamFrame = false   // stream content composited this frame (streaming capture trigger)
         var diagPose: DiagFrameCapture.PoseRecord? = nil   // render vs display head pose of that frame (capture.json "pose")
-        for drawable in drawables {
+        for (drawableIndex, drawable) in drawables.enumerated() {
             drawable.deviceAnchor = deviceAnchor
             
             // TODO: check layerRenderer.configuration.layout == .layered ?
@@ -1268,6 +1268,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                     }
                     renderStreamingFrame(0, commandBuffer: commandBuffer, renderEncoder: encoder, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
                     endRenderStreamingFrame(renderEncoder: encoder)
+                    if BrightTraceSession.enabled, drawableIndex == 0, let queuedFrame {
+                        brightTrace(commandBuffer: commandBuffer, texture: drawable.colorTextures[0],
+                                    views: drawable.views.filter { $0.textureMap.textureIndex == 0 }.map { ($0.textureMap.sliceIndex, $0.textureMap.viewport) },
+                                    rateMap: rasterizationRateMap, queuedFrame: queuedFrame, renderStartS: lastRoundTripRenderTimestamp, presentS: vsyncTime)
+                    }
                 }
                 renderStreamingFrameOverlays(0, commandBuffer: commandBuffer, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor, drawable: drawable)
             }
@@ -2071,9 +2076,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             if diagFrameCapture != nil { diagPlanes.append(metalTexture); diagCVTextures.append(textureOut) }
         }
         if diagFrameCapture != nil, golden == nil {
-            var secret = false
-            if case .explicitPlanes = colour.binding {} else { secret = VideoHandler.isFormatSecret(format) }
-            diagStreamSource = (diagPlanes, diagCVTextures, secret, colour,
+            diagStreamSource = (diagPlanes, diagCVTextures, VideoHandler.usesSecretPipeline(colour, format: format), colour,
                                 frameChromaKey ?? ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings), format)
         }
         if golden == nil {
