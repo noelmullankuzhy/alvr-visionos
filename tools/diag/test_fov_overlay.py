@@ -539,11 +539,73 @@ class DrawableExtent(Base):
         self.assertTrue(all(v is None for v in self.measured(s).values()))
         self.assertNotEqual(code, 0)
 
-    def test_extent_touching_the_crop_is_unverified(self):
+    def test_extent_beyond_the_image_is_out_of_view_and_cannot_pass_alone(self):
         d = self.capture(['--render', '912x728', '--fov-scale', '1.2', '--phys', '1216x1184'])
         code, s = self.run_drawable(d, '1.2')
         self.assertEqual(s['verdict'], 'FAIL')
-        self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+        self.assertNotEqual(code, 0)
+        self.assertIn('no stream edge in view', ' '.join(s['verdict_reasons']))
+        self.assertNotIn('unverified', ' '.join(s['verdict_reasons']))
+        for side, e in s['stream_extent_deg'].items():
+            self.assertEqual(e['status'], 'out_of_view', side)
+            self.assertIsNone(e['measured_deg'], side)
+            self.assertGreater(e['predicted_deg'], e['drawable_edge_deg'], side)
+
+    def stream_capture(self, stream):
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d, '--render', '912x728', '--fov-scale', '1',
+                                        '--phys', '1216x1184', '--stream-tangents', stream]), 0)
+        return d
+
+    def run_stream(self, d, stream, name='d'):
+        out = self.dir / (name + '.json')
+        code = self.run_main(['drawable', '--capture-dir', d, '--out-json', out, '--render', '912x728', '--fov-scale', '1',
+                              '--stream-tangents', stream])
+        return code, json.loads(out.read_text())['summary']
+
+    def test_one_edge_in_view_passes_with_the_others_out_of_view(self):
+        stream = '%s,%s,%s,%s' % (fo.F['T'] * 1.5, fo.F['N'] * 0.7, fo.F['D'] * 1.5, fo.F['U'] * 1.5)
+        d = self.stream_capture(stream)
+        code, s = self.run_stream(d, stream)
+        self.assertEqual(s['verdict'], 'PASS', s['verdict_reasons'])
+        self.assertEqual(code, 0)
+        ext = s['stream_extent_deg']
+        self.assertEqual({k: v['status'] for k, v in ext.items()},
+                         {'left': 'out_of_view', 'right': 'measured', 'up': 'out_of_view', 'down': 'out_of_view'})
+        self.assertLessEqual(abs(ext['right']['error_deg']), 0.5)
+        for side in ('left', 'up', 'down'):
+            self.assertGreater(ext[side]['predicted_deg'], ext[side]['drawable_edge_deg'], side)
+            self.assertIsNone(ext[side]['measured_deg'], side)
+
+    def test_out_of_view_is_printed(self):
+        stream = '%s,%s,%s,%s' % (fo.F['T'] * 1.5, fo.F['N'] * 0.7, fo.F['D'] * 1.5, fo.F['U'] * 1.5)
+        d = self.stream_capture(stream)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_stream(d, stream)
+        self.assertIn('stream left: out of view (predicted ', buf.getvalue())
+        self.assertIn(', drawable edge ', buf.getvalue())
+
+    def test_edge_inside_the_image_but_indistinguishable_is_unverified_not_out_of_view(self):
+        d = self.capture(repaint=[(self.BLACK, self.BG_L)])
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertEqual({v['status'] for v in s['stream_extent_deg'].values()}, {'unverified'})
+        self.assertIn('stream extent unverified (left, right, up, down', ' '.join(s['verdict_reasons']))
+        self.assertNotIn('no stream edge in view', ' '.join(s['verdict_reasons']))
+
+    def test_edge_in_view_undetected_next_to_out_of_view_sides_fails_unverified(self):
+        stream = '%s,%s,%s,%s' % (fo.F['T'] * 1.5, fo.F['N'] * 0.7, fo.F['D'] * 1.5, fo.F['U'] * 1.5)
+        d = self.stream_capture(stream)
+        cap = json.loads((d / 'capture.json').read_text())
+        png = d / cap['slices'][0]['png']
+        w, h, pix = fo.vc.read_png(png)
+        pix = bytes(pix).replace(self.BLACK, self.BG_L)
+        fo.vc.write_png(png, w, h, pix)
+        code, s = self.run_stream(d, stream)
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertEqual(s['stream_extent_deg']['right']['status'], 'unverified')
+        self.assertIn('stream extent unverified (right', ' '.join(s['verdict_reasons']))
 
     def test_linear_capture_is_srgb_encoded_before_measuring(self):
         dim = [(self.BG_L, bytes([2, 2, 4, 255]))]       # a dim chart background as a linear-light capture holds it

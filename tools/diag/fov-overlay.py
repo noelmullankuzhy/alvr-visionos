@@ -21,8 +21,11 @@ is s x these tangents (--fov-scale). --stream-tangents overrides that stream ext
 degree of the PSF width, not a pixel count. --meta tangents already include s: do not also pass --fov-scale there.
 drawable mode reads the view tangents from capture.json. Its pixels are measured sRGB-encoded: capture.json "encoding"
 "srgb" is used as is, absent or "linear" (the client's raw drawable) is encoded first. The head-locked lines cannot test s,
-so the stream extent is the check: an extent that is not measured (touches the crop, or the stream background is not
-separable from the surround) FAILs as "stream extent unverified". capture.json pose.delta_deg {yaw, pitch, roll} (display
+so the stream extent is the check, per side (JSON stream_extent_deg.<side>.status): measured; out_of_view, when the
+predicted edge lands outside the drawable (within 2 px of its border or beyond), which cannot be measured and is not a
+failure ("stream <side>: out of view (predicted .., drawable edge ..)"); unverified, when it is predicted inside but not
+detected (the stream background is not separable from the surround), which FAILs as "stream extent unverified (<sides>)".
+With every side out of view nothing is measured and the point FAILs as "no stream edge in view". capture.json pose.delta_deg {yaw, pitch, roll} (display
 minus render, right-handed, yaw +Y, pitch +X, roll +Z, intrinsic Y-X-Z) is compensated in the predicted positions; without
 it one yaw is fitted to the x lines and a pass is labelled PASS-after-fitted-yaw. Drawable px/deg (client pixels) are
 reported apart from the stream (coded) px/deg that the sharpness and prediction use; resolvability is judged in stream px.
@@ -57,7 +60,8 @@ GREEN, MAGENTA, WHITE = (0, 1, 0), (1, 0, 1), (1, 1, 1)
 MIN_CONTRAST, NOISE_SIGMAS = 0.03, 6.0      # a line must stand 6 sigma of its window's background above it
 PASS_MEDIAN_DEG, PASS_MAX_DEG, PASS_EXTENT_DEG, PASS_FOUND = 0.1, 0.5, 0.5, 0.5
 MIN_RESOLVABLE_PX = 2.0                      # lines narrower than this in the image cannot show sharpness
-SEP_MIN = 8                                  # the stream background must stand this many (sRGB) counts above the surround
+EDGE_MARGIN_PX = 2                           # a predicted stream edge this close to the drawable border (or beyond it) is out of view
+SEP_MIN = 8                                 # the stream background must stand this many (sRGB) counts above the surround
 
 
 # ---- page maths (frustum-pixel-map.html, section 7) --------------------------------------------------------------
@@ -380,10 +384,21 @@ class DrawableAxis(Axis):
         self.fov, self.mirror = fov, mirror
         self.pose = pose                   # (Pose, 'x'|'y'): render frame -> display frame, tau stays the render-frame tangent
 
-    def px(self, tau):
+    def logical(self, tau):
         if self.pose:
             tau = self.pose[0].warp(self.pose[1], tau)
-        return vc.interpolate(self.table, self.origin + self.extent * (tau - self.view_lo) / (self.view_hi - self.view_lo))
+        return self.origin + self.extent * (tau - self.view_lo) / (self.view_hi - self.view_lo)
+
+    def px(self, tau):
+        return vc.interpolate(self.table, self.logical(tau))
+
+    def px_unclamped(self, tau):
+        """px, but continued linearly beyond the drawable (px() clamps to it): where a tangent outside the view would land."""
+        x, last = self.logical(tau), len(self.table) - 1
+        if 0 <= x <= last:
+            return vc.interpolate(self.table, x)
+        edge, slope = (0, self.table[1] - self.table[0]) if x < 0 else (last, self.table[last] - self.table[last - 1])
+        return self.table[edge] + slope * (x - edge)
 
     def tau(self, px):
         logical = vc.inverse(self.table, px)
@@ -509,12 +524,14 @@ def rate_table(logical, physical, rmin=0.35):
     return table
 
 
-def synth_drawable(directory, w, h, logical, tangents, s, render, eye, encoding='linear', pose=None):
+def synth_drawable(directory, w, h, logical, tangents, s, render, eye, encoding='linear', pose=None, stream=None):
+    """stream: |tan| L,R,D,U the stream covers (default s x the view tangents)."""
     directory.mkdir(parents=True, exist_ok=True)
     left, right, down, up = tangents
+    sl_, sr_, sd_, su_ = stream or (s * left, s * right, s * down, s * up)
     xt, yt = rate_table(logical[0], w), rate_table(logical[1], h)
-    x = make_axis('h', 'drawable', -s * left, s * right, render[0], drawable=(-left, right, 0, logical[0], xt), pose=pose)
-    y = make_axis('v', 'drawable', -s * up, s * down, render[1], drawable=(-up, down, 0, logical[1], yt), pose=pose)
+    x = make_axis('h', 'drawable', -sl_, sr_, render[0], drawable=(-left, right, 0, logical[0], xt), pose=pose)
+    y = make_axis('v', 'drawable', -su_, sd_, render[1], drawable=(-up, down, 0, logical[1], yt), pose=pose)
     pix = synth_image(x, y, eye)
     if encoding == 'srgb':
         pix = srgb_encode(pix)
@@ -729,15 +746,28 @@ def analyse(pix, width, region, xaxis, yaxis, drawable=False):
     return lines
 
 
-def extent_report(mode, xaxis, yaxis, edges):
+def extent_report(mode, xaxis, yaxis, edges, region=None):
+    """Per side: predicted and measured angle and, in drawable mode, a status: measured; out_of_view (the predicted edge
+    lands outside the drawable, within EDGE_MARGIN_PX of its border or beyond: it cannot be measured, not a failure; the
+    angle at the drawable's own border is drawable_edge_deg); unverified (predicted inside, not detected)."""
     sides = {'left': (xaxis, xaxis.lo, 0), 'right': (xaxis, xaxis.hi, 1), 'up': (yaxis, yaxis.lo, 0), 'down': (yaxis, yaxis.hi, 1)}
+    x0, y0, w, h = region
+    bounds = {id(xaxis): (x0, x0 + w), id(yaxis): (y0, y0 + h)}
     out = {}
     for side, (axis, tau, hi_side) in sides.items():
         pred = math.degrees(math.atan(abs(tau)))
         meas = None
         if edges and edges.get(side) is not None:
             meas = math.degrees(math.atan(abs(axis.tau(edges[side]))))
-        out[side] = {'predicted_deg': pred, 'measured_deg': meas, 'error_deg': None if meas is None else meas - pred}
+        rec = {'predicted_deg': pred, 'measured_deg': meas, 'error_deg': None if meas is None else meas - pred}
+        if mode == 'drawable':
+            lo, hi = bounds[id(axis)]
+            px = axis.px_unclamped(tau)
+            beyond = lo if px < lo + EDGE_MARGIN_PX else (hi if px > hi - EDGE_MARGIN_PX else None)
+            rec['predicted_px'] = px
+            rec['drawable_edge_deg'] = None if beyond is None else math.degrees(math.atan(abs(axis.tau(beyond))))
+            rec['status'] = 'measured' if meas is not None else ('unverified' if beyond is None else 'out_of_view')
+        out[side] = rec
     return out
 
 
@@ -806,7 +836,9 @@ def summarise(lines, extent, params, foveated):
             reasons.append('stream extent %s off by %.2f deg' % (side, e['error_deg']))
     if params.get('mode') == 'drawable':
         # the head-locked lines cannot test s: the extent is the only check, so an unmeasured one is a failure
-        missing = [side for side, e in extent.items() if e['measured_deg'] is None]
+        missing = [side for side, e in extent.items() if e['status'] == 'unverified']
+        if all(e['status'] == 'out_of_view' for e in extent.values()):
+            reasons.append('no stream edge in view')      # out-of-view sides pass only beside a measured one
         if missing:
             lv, why = params.get('extent_levels'), ''
             if lv and not lv['separable']:
@@ -974,7 +1006,8 @@ def do_synth(a):
     else:
         phys, logical = size_arg(a.phys, '--phys'), size_arg(a.logical, '--logical')
         synth_drawable(a.out_dir, phys[0], phys[1], logical, tangents, a.fov_scale, render, a.eye, a.encoding,
-                      Pose(*pair(a.pose_delta, float, 3, '--pose-delta')))
+                      Pose(*pair(a.pose_delta, float, 3, '--pose-delta')),
+                      tuple(pair(a.stream_tangents, float, 4, '--stream-tangents')) if a.stream_tangents else None)
     return 0
 
 
@@ -1086,7 +1119,7 @@ def run_measure(a):
             xa, xb = stream_edges(pix, width, region, 'h', levels['threshold'])
             ya, yb = stream_edges(pix, width, region, 'v', levels['threshold'])
         edges = {'left': xa, 'right': xb, 'up': ya, 'down': yb}
-    extent = extent_report(mode, xaxis, yaxis, edges)
+    extent = extent_report(mode, xaxis, yaxis, edges, region)
     summary = summarise(lines, extent, params, {'x': fov[0]['f'] < 0.9999, 'y': fov[1]['f'] < 0.9999})
     if fitted is not None:
         summary['fitted_yaw_deg'] = fitted
@@ -1128,6 +1161,8 @@ def print_summary(summary, mode, eye, s):
     for side, e in summary['stream_extent_deg'].items():
         if e['measured_deg'] is not None:
             print('  stream {}: measured {:.2f} deg, predicted {:.2f} deg'.format(side, e['measured_deg'], e['predicted_deg']))
+        elif e.get('status') == 'out_of_view':
+            print('  stream {}: out of view (predicted {:.2f} deg, drawable edge {:.2f} deg)'.format(side, e['predicted_deg'], e['drawable_edge_deg']))
     fit = summary.get('fitted_yaw_deg')
     print('{}{}{}'.format(summary['verdict'], ''.join('; ' + r for r in summary['verdict_reasons']),
                           '' if fit is None else ' (fitted yaw %.3f deg; capture.json has no pose.delta_deg)' % fit))
