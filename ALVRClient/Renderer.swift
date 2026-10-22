@@ -172,6 +172,9 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     let cornerChart: CornerChartRenderer?
     // Resolution chart (ResolutionChart.swift): same conditions, Resolution chart setting; the corner chart wins.
     let resolutionChart: ResolutionChartRenderer?
+    // Golden frame (GoldenFrame.swift): Diagnostics on and a Golden frame set picked, both charts off; drawn in place of
+    // the stream (or the no-stream pass) until its exit control.
+    private(set) var goldenFrame: GoldenFrameRenderer?
     private var diagEye: DiagEyeRenderer?
     let diagFrameCapture: DiagFrameCaptureSession?
     // Sharpness-chain capture (DiagStreamStages): the planes and state this frame's stream was drawn with. Set only while
@@ -315,6 +318,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         )
         
         rebuildRenderPipelines()
+        self.goldenFrame = layerRenderer.flatMap { GoldenFrameRenderer.make(renderer: self, layerRenderer: $0) }
 
         if renderOwnership.publishesRenderStarted {
             EventHandler.shared.handleRenderStarted()
@@ -672,14 +676,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         func uniforms(forViewIndex viewIndex: Int) -> Uniforms {
             let realTangents = realViewTangents[viewIndex]
             let sentTangents = sentViewTangents[viewIndex]
-            
-            var framePoseNoTranslation = framePose
-            var simdDeviceAnchorNoTranslation = simdDeviceAnchor
-            framePoseNoTranslation.columns.3 = simd_float4(0.0, 0.0, 0.0, 1.0)
-            simdDeviceAnchorNoTranslation.columns.3 = simd_float4(0.0, 0.0, 0.0, 1.0)
+
             let viewMatrix = (simdDeviceAnchor * viewTransforms[viewIndex]).inverse
-            let viewMatrixFrame = (framePoseNoTranslation.inverse * simdDeviceAnchorNoTranslation * viewTransforms[viewIndex]).inverse
-            let viewMatrixFrameRk = (framePoseNoTranslation.inverse * simdDeviceAnchorNoTranslation).inverse // RealityKit implicitly applies the view transforms when we draw the quad entity
+            let viewMatrixFrame = StreamReprojection.viewMatrixFrame(framePose: framePose, deviceAnchor: simdDeviceAnchor, viewTransform: viewTransforms[viewIndex])
+            let viewMatrixFrameRk = StreamReprojection.viewMatrixFrameRealityKit(framePose: framePose, deviceAnchor: simdDeviceAnchor)
             var projection = matrix_identity_float4x4
             if #available(visionOS 2.0, *), drawable != nil {
 #if XCODE_BETA_16
@@ -1231,7 +1231,13 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             WorldTracker.shared.unlockDebuggables()
 #endif
             
-            if renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil {
+            if let goldenFrame, goldenFrame.active, let layerRenderer {
+                reprojectedFramesInARow = 0
+                goldenFrame.encode(renderer: self, commandBuffer: commandBuffer, layer: layerRenderer, drawable: drawable, viewports: viewports,
+                                   viewTransforms: viewTransforms, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap,
+                                   simdDeviceAnchor: simdDeviceAnchor)
+            }
+            else if renderingStreaming && frameIsSuitableForDisplaying && queuedFrame != nil {
                 //print("render")
                 if let encoder = beginRenderStreamingFrame(0, commandBuffer: commandBuffer, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor, drawable: drawable) {
                     diagSourceId = Diag.capture(enabled: diagProbe != nil, queuedFrame?.timestamp) ?? nil
@@ -1924,7 +1930,9 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     }
     
     // Sets up rendering a video frame, including uniforms
-    func beginRenderStreamingFrame(_ whichIdx: Int, commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], viewTransforms: [simd_float4x4], sentViewTangents: [simd_float4], realViewTangents: [simd_float4], nearZ: Double, farZ: Double, rasterizationRateMap: MTLRasterizationRateMap?, queuedFrame: QueuedFrame?, framePose: simd_float4x4, simdDeviceAnchor: simd_float4x4, drawable: LayerRenderer.Drawable?) -> (any MTLRenderCommandEncoder)? {
+    // golden (W35b, GoldenFrameRenderer): a static server pair with its own colour state and pipelines, so the stream's
+    // colour cache, pipeline slot and decoder telemetry/taps are not touched; nil (every live call) is the live path.
+    func beginRenderStreamingFrame(_ whichIdx: Int, commandBuffer: MTLCommandBuffer, renderTargetColor: MTLTexture, renderTargetDepth: MTLTexture, viewports: [MTLViewport], viewTransforms: [simd_float4x4], sentViewTangents: [simd_float4], realViewTangents: [simd_float4], nearZ: Double, farZ: Double, rasterizationRateMap: MTLRasterizationRateMap?, queuedFrame: QueuedFrame?, framePose: simd_float4x4, simdDeviceAnchor: simd_float4x4, drawable: LayerRenderer.Drawable?, golden: GoldenStreamSource? = nil) -> (any MTLRenderCommandEncoder)? {
         if currentRenderColorFormat != renderTargetColor.pixelFormat && isRealityKit {
             return nil
         }
@@ -1970,11 +1978,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         // The frame's own colour state and the pipelines built for exactly it (decision 63c (4)); otherwise request
         // them and skip this frame rather than draw it with another state's constants. PQ in a format with no raw
         // plane binding is dropped (decision 63e (1), logged once by VideoHandler).
-        guard let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit, displayHeadroom: displayHeadroom), !colour.dropFrames else {
+        guard let colour = golden?.colour ?? VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit, displayHeadroom: displayHeadroom), !colour.dropFrames else {
             renderEncoder.endEncoding()
             return nil
         }
-        guard let pipelines = videoFramePipelines.pipelines(for: colour) else {
+        guard let pipelines = golden?.pipelines ?? videoFramePipelines.pipelines(for: colour) else {
             if videoPipelinesNeedBuild(for: colour) {
                 let chromaKey = frameChromaKey ?? ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings)
                 let rebuildThread = Thread {
@@ -2005,7 +2013,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         }
 
         //print("Pixel format \(formatStr) (\(format))")
-        StreamTelemetry.shared.noteDecoderOutput(pixelFormat: format, lumaTextureFormat: textureTypes[0].rawValue, chromaTextureFormat: textureTypes[1].rawValue, name: formatStr)
+        if golden == nil { StreamTelemetry.shared.noteDecoderOutput(pixelFormat: format, lumaTextureFormat: textureTypes[0].rawValue, chromaTextureFormat: textureTypes[1].rawValue, name: formatStr) }
 
         var diagPlanes: [MTLTexture] = [], diagCVTextures: [CVMetalTexture] = []
         for i in 0...1 {
@@ -2043,16 +2051,18 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             renderEncoder.setFragmentTexture(metalTexture, index: i)
             if diagFrameCapture != nil { diagPlanes.append(metalTexture); diagCVTextures.append(textureOut) }
         }
-        if diagFrameCapture != nil {
+        if diagFrameCapture != nil, golden == nil {
             var secret = false
             if case .explicitPlanes = colour.binding {} else { secret = VideoHandler.isFormatSecret(format) }
             diagStreamSource = (diagPlanes, diagCVTextures, secret, colour,
                                 frameChromaKey ?? ChromaKeySnapshot(settings: ALVRClientApp.gStore.settings), format)
         }
-        if HDRProbe.enabled {
-            HDRProbe.shared.sample(pixelBuffer: pixelBuffer, colour: colour)
+        if golden == nil {
+            if HDRProbe.enabled {
+                HDRProbe.shared.sample(pixelBuffer: pixelBuffer, colour: colour)
+            }
+            EyeDecodeWindows.shared.tap(pixelBuffer: pixelBuffer, colour: colour, timestampNs: queuedFrame.timestamp)
         }
-        EyeDecodeWindows.shared.tap(pixelBuffer: pixelBuffer, colour: colour, timestampNs: queuedFrame.timestamp)
         
         // Snoop for pixel formats
         /*for idx in 620..<0xFFFF {

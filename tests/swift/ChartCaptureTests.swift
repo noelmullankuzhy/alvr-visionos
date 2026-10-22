@@ -292,6 +292,25 @@ private func testGeometryWithoutHighlight() {
     expectEqual(framed.count - plain.count, frame + statusDiff, "no yellow frame, custom status")
 }
 
+// Golden frame source (W35b): the same chartcap line and chart_capture record, with the source and the set appended.
+private func testGoldenSource() {
+    let line = Diag.line(topic: "chartcap", tMs: 5, fields: ChartCapture.goldenFields(eye: .right, requested: 1.0, actual: 1.0, confirmed: true,
+                                                                                     foveation: true, dir: "golden-s-x-rq1.00", slice: 1,
+                                                                                     physical: [2432, 2368], screen: [6261, 5023],
+                                                                                     expectedScreen: [6261, 5023], settle: "rate_map", set: "s"))
+    let chart = Diag.line(topic: "chartcap", tMs: 5, fields: ChartCapture.fields(eye: .right, requested: 1.0, actual: 1.0, confirmed: true,
+                                                                                foveation: true, dir: "golden-s-x-rq1.00", slice: 1,
+                                                                                physical: [2432, 2368], screen: [6261, 5023],
+                                                                                expectedScreen: [6261, 5023], settle: "rate_map"))
+    expectEqual(line, chart + " source=golden set=s", "golden chartcap = chart line + source, set")
+    let base = ChartCapture.metadata(views: [view(.left, map: nil)], requested: 0.5, actual: 0.5, confirmed: true, foveation: true, frames: 31)
+    let golden = ChartCapture.goldenMetadata(base, set: "s")
+    expect(JSONSerialization.isValidJSONObject(golden), "serialisable")
+    expectEqual(Set(golden.keys), Set(base.keys).union(["source", "set"]), "chart keys plus source, set")
+    expect(golden["source"] as? String == "golden" && golden["set"] as? String == "s", "source and set")
+    expectEqual((golden["views"] as? [[String: Any]])?.first?["patches"].map { ($0 as! [[String: Any]]).count }, 24, "patches kept")
+}
+
 @main enum ChartCaptureTests {
     static func main() {
         testSetting()
@@ -302,6 +321,7 @@ private func testGeometryWithoutHighlight() {
         testRateMapSettle()
         testReadbackSlot()
         testGeometryWithoutHighlight()
+        testGoldenSource()
         finishTests("ChartCapture")
     }
 }

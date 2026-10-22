@@ -460,6 +460,19 @@ struct Entry: View {
                                 .onChange(of: gStore.settings.cropMarginDeg) { saveAction() }
                             Text("Next stream: each eye reports the Boundary dots lens outline's bounding box (reference + lens offset) widened by the margin, not the whole frustum; the rest of the view is black. Set the server's foveation center shift to the DIAG fov_sent axis_center_shift.")
                                 .font(.system(size: 10))
+                            Picker(selection: $gStore.settings.goldenFrameSet) {
+                                ForEach(GoldenFrameSetting.choices() + (GoldenFrameSetting.choices().contains(gStore.settings.goldenFrameSet) ? [] : [gStore.settings.goldenFrameSet]), id: \.self) {
+                                    Text($0).tag($0)
+                                }
+                            } label: {
+                                Text("Golden frame")
+                                Text("Charts off: shows the set's server frame pair from Documents/diag/golden (docs/lumen/golden-frame.md) in place of the stream, world-locked. Pinch right/left: next/previous control (lock, quality, overlays, capture, exit); hold right: apply; hold left: back (or d-pad, A, B).")
+                                    .font(.system(size: 10))
+                            }
+                            .pickerStyle(.menu)
+                            .onChange(of: gStore.settings.goldenFrameSet) {
+                                saveAction()
+                            }
                         }
 
                         Button {

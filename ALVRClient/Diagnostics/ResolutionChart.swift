@@ -366,6 +366,21 @@ enum ChartCapture {
                 "expected_screen": size(expectedScreen), "settle": settle, "patches": GratingChart.patches.count]
     }
 
+    // Golden frame source (W35b): the chart line and record with the source and the set appended.
+    static func goldenFields(eye: CornerEye, requested: Float, actual: Float?, confirmed: Bool, foveation: Bool, dir: String, slice: Int,
+                             physical: [Int], screen: [Int]? = nil, expectedScreen: [Int]? = nil, settle: String = "none",
+                             set: String) -> KeyValuePairs<String, Any> {
+        func size(_ s: [Int]?) -> String { s.map { $0.map(String.init).joined(separator: "x") } ?? "none" }
+        return ["eye": eye.rawValue, "rq": quality(actual), "rq_set": quality(requested), "confirmed": confirmed ? "yes" : "no",
+                "fov": foveation ? "on" : "off", "dir": dir, "slice": slice, "screen": size(screen), "physical": size(physical),
+                "expected_screen": size(expectedScreen), "settle": settle, "patches": GratingChart.patches.count,
+                "source": "golden", "set": set]
+    }
+
+    static func goldenMetadata(_ chart: [String: Any], set: String) -> [String: Any] {
+        chart.merging(["source": "golden", "set": set]) { _, new in new }
+    }
+
     static func directoryName(stamp: String, quality: Float, foveation: Bool) -> String {
         String(format: "chart-%@-rq%.2f-fov%@", stamp, quality, foveation ? "on" : "off")
     }

@@ -17,7 +17,7 @@ SECTIONS = (
     'M5 drawable / rasterization maps and render-quality sweep',
     'M6 cadence', 'M9 thermal / memory / GPU', 'M2 EDR ramp / thresholds',
     'M3 PQ player', 'M7 decode', 'M8 network', 'Corner chart',
-    'Eye badges and Diag file health', 'Boundary dots', 'Resolution measurement',
+    'Eye badges and Diag file health', 'Boundary dots', 'Resolution measurement', 'Golden frame',
 )
 RRM_DEGREES = ('-40', '-30', '-20', '-10', '-5', '0', '5', '10', '20', '30', '40')
 TOKEN = re.compile(r'([A-Za-z0-9_.]+)=("(?:[^"\\\x00-\x1f]|\\["\\nrt])*"|[^\s"=]+)(?=\s|$)')
@@ -1156,40 +1156,47 @@ def chart_capture_patches(directory):
     """Per captured patch: bars counted in the physical texture and classified (count_bars, classify_bars)."""
     rows = []
     for folder, data in chart_captures(directory):
-        chart = data['chart_capture']
-        images = {}
-        for view in chart.get('views', []):
-            png = next((s.get('png') for s in data.get('slices', []) if s.get('texture_index') == view.get('texture_index')
-                        and s.get('slice') == view.get('slice')), None)
-            if png is None:
+        rows += capture_patch_rows(folder, data)
+    return rows
+
+
+def capture_patch_rows(folder, data):
+    """One capture's patches (chart_capture_patches)."""
+    rows = []
+    chart = data['chart_capture']
+    images = {}
+    for view in chart.get('views', []):
+        png = next((s.get('png') for s in data.get('slices', []) if s.get('texture_index') == view.get('texture_index')
+                    and s.get('slice') == view.get('slice')), None)
+        if png is None:
+            continue
+        if png not in images:
+            try:
+                images[png] = read_capture_png(folder / png)
+            except (OSError, ValueError, struct.error, zlib.error):
+                images[png] = None
+        if images[png] is None:
+            continue
+        width, height, pixels = images[png]
+        for patch in view.get('patches', []):
+            cpd = number(patch.get('cpd'))
+            rect = patch.get('physical_rect')
+            if cpd is None or not isinstance(rect, list) or len(rect) != 4:
                 continue
-            if png not in images:
-                try:
-                    images[png] = read_capture_png(folder / png)
-                except (OSError, ValueError, struct.error, zlib.error):
-                    images[png] = None
-            if images[png] is None:
-                continue
-            width, height, pixels = images[png]
-            for patch in view.get('patches', []):
-                cpd = number(patch.get('cpd'))
-                rect = patch.get('physical_rect')
-                if cpd is None or not isinstance(rect, list) or len(rect) != 4:
-                    continue
-                profile = patch_profile(width, height, pixels, rect, patch.get('orientation'))
-                result = count_bars(profile, len(profile) / (CHART_PATCH_DEG * cpd))
-                expected = expected_bars(cpd)
-                logical = number(patch.get('nyquist_logical_cpd'))
-                rows.append(dict(eye=view.get('eye'), rq=chart.get('rq'), rq_set=chart.get('rq_set'), fov=chart.get('fov'),
-                                 pos=patch.get('position'),
-                                 above_nyquist='unknown' if logical is None else 'yes' if cpd > logical * 1.001 else 'no',
-                                 orient=patch.get('orientation'), cpd=int(cpd), expected=expected, count=result['count'],
-                                 bar_spread_px=result['bar_spread_px'], gap_spread_px=result['gap_spread_px'],
-                                 period_px='{:.2f}'.format(len(profile) / (CHART_PATCH_DEG * cpd)),
-                                 **{'class': classify_bars(result, expected)},
-                                 nyquist_logical_cpd=logical,
-                                 nyquist_physical_capture_cpd=number(patch.get('nyquist_physical_cpd')),
-                                 dir=folder.name, t_ms=number(data.get('t_ms'))))
+            profile = patch_profile(width, height, pixels, rect, patch.get('orientation'))
+            result = count_bars(profile, len(profile) / (CHART_PATCH_DEG * cpd))
+            expected = expected_bars(cpd)
+            logical = number(patch.get('nyquist_logical_cpd'))
+            rows.append(dict(eye=view.get('eye'), rq=chart.get('rq'), rq_set=chart.get('rq_set'), fov=chart.get('fov'),
+                             pos=patch.get('position'),
+                             above_nyquist='unknown' if logical is None else 'yes' if cpd > logical * 1.001 else 'no',
+                             orient=patch.get('orientation'), cpd=int(cpd), expected=expected, count=result['count'],
+                             bar_spread_px=result['bar_spread_px'], gap_spread_px=result['gap_spread_px'],
+                             period_px='{:.2f}'.format(len(profile) / (CHART_PATCH_DEG * cpd)),
+                             **{'class': classify_bars(result, expected)},
+                             nyquist_logical_cpd=logical,
+                             nyquist_physical_capture_cpd=number(patch.get('nyquist_physical_cpd')),
+                             dir=folder.name, t_ms=number(data.get('t_ms'))))
     return rows
 
 
@@ -1279,6 +1286,51 @@ def resolution_report(records, directory=None):
     lines += table(patches, ('eye', 'rq', 'fov', 'pos', 'orient', 'cpd', 'expected', 'count', 'bar_spread_px', 'gap_spread_px',
                              'period_px', 'class', 'above_nyquist', 'nyquist_physical_capture_cpd', 'dir')) + ['']
     lines += measurements(selected, ('phase', 's', 'fix', 'eye', 'rq', 'fov', 'cpd', 'orient', 'seen')) + ['']
+    return lines
+
+
+def golden_rows(directory):
+    """Per golden capture (capture.json golden_set, W35b), eye, position and orientation: golden-frame.py measure's
+    finest correct cpd (it and every coarser patch correct; no Nyquist exclusion) and the settings in force."""
+    rows = []
+    for folder, data in chart_captures(directory):
+        golden = data.get('golden')
+        if not data.get('golden_set') or not isinstance(golden, dict):
+            continue
+        groups = {}
+        for p in capture_patch_rows(folder, data):
+            groups.setdefault((p['eye'], p['rq'], p['rq_set'], p['fov'], p['pos'], p['orient']), []).append(p)
+        for (eye, rq, rq_set, fov, pos, orient), items in groups.items():
+            items = sorted(items, key=lambda p: p['cpd'])
+            finest = None
+            for p in items:
+                if p['class'] != 'correct':
+                    break
+                finest = p['cpd']
+            size = golden.get('eye_px')
+            density = number(golden.get('density_px_per_deg'))
+            locked = golden.get('world_locked')
+            rows.append(dict(set=data['golden_set'], eye=eye, rq=rq, rq_set=rq_set, fov=fov, pos=pos, orient=orient,
+                             finest_correct_cpd=finest, classes=','.join('{}:{}'.format(p['cpd'], p['class']) for p in items),
+                             world_locked=None if locked is None else str(locked).lower(), overlays=golden.get('overlays'),
+                             eye_px='x'.join(map(str, size)) if isinstance(size, list) else None,
+                             density=fmt(density) if density is not None else None, dir=folder.name))
+    return sorted(rows, key=lambda r: tuple(str(r[k]) for k in ('dir', 'eye', 'pos', 'orient')))
+
+
+def golden_report(records, directory=None):
+    selected = [r for r in records if r['topic'] == 'golden']
+    lines = section(SECTIONS[13], selected)
+    lines += ['Golden frame captures (a golden-frame.py server pair shown in place of the stream and read back per '
+              'render quality as W33 Auto capture; tools/golden/golden-frame.py measure runs on the same directory). '
+              'finest_correct_cpd: finest cpd with it and every coarser patch correct, as measure. world_locked / '
+              'overlays: the settings in force (the capture runs head-locked with overlays off); density: the set\'s '
+              'golden px/deg; eye_px: the coded eye.', '']
+    lines += table(golden_rows(directory) if directory is not None else [],
+                   ('set', 'eye', 'rq', 'rq_set', 'fov', 'pos', 'orient', 'finest_correct_cpd', 'classes', 'world_locked',
+                    'overlays', 'eye_px', 'density', 'dir')) + ['']
+    lines += ['Golden frame lines (show, setting, settled, hide, error):', '']
+    lines += measurements(selected, ('step', 'set', 'key', 'value', 'why')) + ['']
     return lines
 
 
@@ -1412,8 +1464,9 @@ def generate(directory, sender_path=None):
     lines += measurements(selected, ('eye', 'pos_deg', 'ring_pct', 'r', 'shape', 'superellipse_n', 'area_frac')) + ['']
     lines += dots_report(records)
     lines += resolution_report(records, directory)
+    lines += golden_report(records, directory)
     selected = topics('eye_badge', 'diag')
-    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session', 'dots_outline', 'rrm', 'grating', 'chartcap'}
+    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session', 'dots_outline', 'rrm', 'grating', 'chartcap', 'golden'}
     unknown = [r for r in records if r['topic'] not in known]
     lines += section(SECTIONS[10], selected + unknown, malformed + bad_sender + errors)
     lines += ['malformed lines skipped={}; malformed sender lines skipped={}; input file errors={}'.format(len(malformed), len(bad_sender), len(errors)), '',
