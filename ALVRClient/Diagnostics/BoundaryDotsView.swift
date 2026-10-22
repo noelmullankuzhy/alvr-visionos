@@ -18,7 +18,7 @@ private final class BoundaryDotsScene {
     private let outlineEntity = ModelEntity()
     private let insetEntity = ModelEntity()
     private let limitsEntity = ModelEntity()
-    private var outlineShown: (eye: BoundaryDotsEye, inset: Double, frustum: BoundaryDotsFrustum)?
+    private var outlineShown: (eye: BoundaryDotsEye, shape: BoundaryDotsOutlineShape, value: Double, frustum: BoundaryDotsFrustum)?
     private var dotStates = BoundaryDotsDotStates()
     private var statusShown: String?
     private var eyeEntities: [BoundaryDotsEye: ModelEntity] = [:]
@@ -62,7 +62,8 @@ private final class BoundaryDotsScene {
         root.addChild(statusEntity)
         for entity in [insetEntity, limitsEntity] { root.addChild(entity) }
 
-        // A quick right pinch on the centre cross deselects the cursor (the left drag then sizes the outline).
+        // A quick right pinch on the centre cross deselects the cursor (the left drag then sizes the outline);
+        // with no cursor it toggles the outline style (lens <-> rect).
         let centre = Entity()
         centre.name = "centre"
         centre.position = [0, 0, -10]
@@ -190,11 +191,11 @@ private final class BoundaryDotsScene {
             // Without a cursor the left drag is the outline slider; a started slide or cursor drag keeps its meaning.
             if slider.active || (!drag.active && session.cursor == nil) {
                 switch slider.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
-                                     headRotation: rotation, inset: session.inset,
-                                     enabled: session.cursor == nil && session.eye != .both) {
-                case .move(let inset)?, .release(_, let inset)?:
+                                     headRotation: rotation, inset: session.sliderValue,
+                                     enabled: session.cursor == nil && session.eye != .both, range: session.sliderRange) {
+                case .move(let value)?, .release(_, let value)?:
                     // A slider step changes only the outline and its labels: no dot materials.
-                    session.inset = inset
+                    session.sliderValue = value
                     refreshOutline()
                     refreshStatus()
                 case nil:
@@ -229,7 +230,7 @@ private final class BoundaryDotsScene {
             }
         } else if let name = pinch.target {
             if name == "leave" { return true }
-            if name == "centre" { _ = session.deselect() }
+            if name == "centre", !session.deselect(), session.eye != .both { session.toggleShape() }
             if name.hasPrefix("eye_"), let eye = BoundaryDotsEye(rawValue: String(name.dropFirst(4))) {
                 session.eye = eye
             } else if name.hasPrefix("dot_"), let index = Int(name.dropFirst(4)),
@@ -258,7 +259,8 @@ private final class BoundaryDotsScene {
 
     /// Rebuilds the status text mesh only when its text changes.
     private func refreshStatus() {
-        var text = "\(session.eye.rawValue)  select a ray" + (session.eye == .both ? "" : "  |  left drag: outline")
+        var text = "\(session.eye.rawValue)  select a ray"
+            + (session.eye == .both ? "" : "  |  left drag: \(session.shape.rawValue) outline, pinch cross: style")
         if let dot = session.cursor {
             text = String(format: "%@  ray %g  ecc %g  |  left drag: cursor, pinch cross for outline",
                           session.eye.rawValue, dot.rayDeg, dot.eccDeg)
@@ -271,23 +273,27 @@ private final class BoundaryDotsScene {
                                           materials: [UnlitMaterial(color: UIColor(white: 0.3, alpha: 1))])
     }
 
-    /// The inset outline of the selected eye, its inset and four side limits under the centre cross.
-    /// Both has no monocular frustum: the outline and its labels are hidden.
+    /// The selected eye's outline (lens: measured field + offset; rect: frustum - inset), its value
+    /// and four side limits under the centre cross. Both is not monocular: outline and labels are hidden.
     private func refreshOutline() {
-        guard let (frustum, _) = BoundaryDotsTangents.frustum(session.eye),
-              let limits = frustum.limits(eye: session.eye, insetDeg: session.inset) else {
+        let eye = session.eye, shape = session.shape, value = session.sliderValue
+        guard let (frustum, _) = BoundaryDotsTangents.frustum(eye),
+              let limits = shape == .lens ? BoundaryDotsLensReference.limits(eye, offsetDeg: value)
+                                          : frustum.limits(eye: eye, insetDeg: value),
+              let outline = shape == .lens ? BoundaryDotsLensReference.outline(eye, offsetDeg: value)
+                                           : frustum.outline(insetDeg: value) else {
             outlineShown = nil
             for entity in [outlineEntity, insetEntity, limitsEntity] { entity.isEnabled = false }
             return
         }
         for entity in [outlineEntity, insetEntity, limitsEntity] { entity.isEnabled = true }
-        if let shown = outlineShown, shown.eye == session.eye, shown.inset == session.inset, shown.frustum == frustum { return }
-        outlineShown = (session.eye, session.inset, frustum)
-        if let mesh = outlineMesh(frustum.outline(insetDeg: session.inset)) {
+        if let shown = outlineShown, shown.eye == eye, shown.shape == shape, shown.value == value, shown.frustum == frustum { return }
+        outlineShown = (eye, shape, value, frustum)
+        if let mesh = outlineMesh(outline) {
             outlineEntity.model = ModelComponent(mesh: mesh, materials: [bright])
         }
-        setCentredText(insetEntity, String(format: "inset %.1f deg  area %.0f%%", session.inset,
-                                           100 * frustum.areaFraction(insetDeg: session.inset)), y: -0.12)
+        let label = shape == .lens ? String(format: "lens offset %+.1f deg", value) : String(format: "rect inset %.1f deg", value)
+        setCentredText(insetEntity, String(format: "%@  area %.0f%%", label, 100 * frustum.areaFraction(of: outline)), y: -0.12)
         setCentredText(limitsEntity, String(format: "nasal %.1f  temporal %.1f  up %.1f  down %.1f",
                                             limits.nasal, limits.temporal, limits.up, limits.down), y: -0.2)
     }

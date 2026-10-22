@@ -46,11 +46,31 @@ struct BoundaryDotsSession {
     var cursor: BoundaryDot? { cursors[eye] }
     private(set) var marks: [BoundaryDotsEye: Set<BoundaryDot>] = [:]
     private var insets: [BoundaryDotsEye: Double] = [:]
+    private var offsets: [BoundaryDotsEye: Double] = [:]
+    /// Outline style for every eye; a quick right pinch on the centre cross (no cursor) toggles it.
+    var shape = BoundaryDotsOutlineShape.lens
 
     /// Outline inset of the selected eye; set values snap to 0.5 deg within 0...30, non-finite ones are ignored.
     var inset: Double {
         get { insets[eye] ?? BoundaryDotsOutline.defaultInsetDeg }
         set { if newValue.isFinite { insets[eye] = BoundaryDotsOutline.clampInset(newValue) } }
+    }
+
+    /// Lens outline offset of the selected eye (positive = outward); snaps to 0.5 deg within -10...+20.
+    var offset: Double {
+        get { offsets[eye] ?? 0 }
+        set { if newValue.isFinite { offsets[eye] = BoundaryDotsOutline.clampOffset(newValue) } }
+    }
+
+    /// The value the left-hand slider drives: the offset (lens) or the inset (rect).
+    var sliderValue: Double {
+        get { shape == .lens ? offset : inset }
+        set { if shape == .lens { offset = newValue } else { inset = newValue } }
+    }
+    var sliderRange: ClosedRange<Double> { shape == .lens ? BoundaryDotsOutline.offsetRange : BoundaryDotsOutline.insetRange }
+
+    mutating func toggleShape() {
+        shape = shape == .lens ? .rect : .lens
     }
 
     /// Clears the selected eye's cursor so the left drag moves the outline again.
@@ -112,12 +132,25 @@ struct BoundaryDotsSession {
     }
 
     /// The `dots_outline` line for the selected eye; nil for Both (the outline is monocular).
+    /// Lens lines carry the drawn per-ray eccentricities (reference + offset) on the 24 measured rays.
     func outlineFields(frustum: BoundaryDotsFrustum, source: String) -> KeyValuePairs<String, Any>? {
-        guard let limits = frustum.limits(eye: eye, insetDeg: inset) else { return nil }
-        let tangents = String(format: "%.4f,%.4f,%.4f,%.4f", locale: Locale(identifier: "en_US_POSIX"),
-                              frustum.left, frustum.right, frustum.bottom, frustum.top)
-        return ["eye": eye.rawValue, "inset_deg": inset, "nasal_deg": limits.nasal, "temporal_deg": limits.temporal,
-                "up_deg": limits.up, "down_deg": limits.down, "tangent_source": source, "tangents": tangents]
+        let posix = Locale(identifier: "en_US_POSIX")
+        let tangents = String(format: "%.4f,%.4f,%.4f,%.4f", locale: posix, frustum.left, frustum.right, frustum.bottom, frustum.top)
+        if shape == .rect {
+            guard let limits = frustum.limits(eye: eye, insetDeg: inset) else { return nil }
+            return ["eye": eye.rawValue, "shape": shape.rawValue, "inset_deg": inset, "nasal_deg": limits.nasal,
+                    "temporal_deg": limits.temporal, "up_deg": limits.up, "down_deg": limits.down,
+                    "tangent_source": source, "tangents": tangents]
+        }
+        guard let limits = BoundaryDotsLensReference.limits(eye, offsetDeg: offset) else { return nil }
+        let rays = stride(from: 0.0, to: 360, by: 15).compactMap { ray -> String? in
+            BoundaryDotsLensReference.eccDeg(eye, rayDeg: ray).map {
+                String(format: "%g:%g", locale: posix, ray, max(0, $0 + offset))
+            }
+        }.joined(separator: ",")
+        return ["eye": eye.rawValue, "shape": shape.rawValue, "offset_deg": offset, "nasal_deg": limits.nasal,
+                "temporal_deg": limits.temporal, "up_deg": limits.up, "down_deg": limits.down,
+                "tangent_source": source, "tangents": tangents, "reference": BoundaryDotsLensReference.tag, "rays": rays]
     }
 }
 
@@ -159,9 +192,14 @@ struct BoundaryDotsFrustum: Equatable {
         return rays.map { BoundaryDot(rayDeg: $0, eccDeg: max(0, edgeEccDeg(rayDeg: $0) - insetDeg)) }
     }
 
-    /// Outline polygon area in tangent space over the frustum area.
+    /// Inset outline polygon area in tangent space over the frustum area.
     func areaFraction(insetDeg: Double) -> Double {
-        let points = outline(insetDeg: insetDeg).map { dot -> SIMD2<Double> in
+        areaFraction(of: outline(insetDeg: insetDeg))
+    }
+
+    /// Any closed outline's polygon area in tangent space over the frustum area.
+    func areaFraction(of outline: [BoundaryDot]) -> Double {
+        let points = outline.map { dot -> SIMD2<Double> in
             let r = tan(dot.eccDeg * .pi / 180), ray = dot.rayDeg * .pi / 180
             return [r * cos(ray), r * sin(ray)]
         }
@@ -184,13 +222,85 @@ struct BoundaryDotsLimits: Equatable {
     let nasal, temporal, up, down: Double
 }
 
+enum BoundaryDotsOutlineShape: String {
+    /// The measured seal-on visible field moved radially by an offset (default style).
+    case lens
+    /// The rendered frustum rectangle moved inwards by an inset (the rendered edge reference).
+    case rect
+}
+
 enum BoundaryDotsOutline {
     static let defaultInsetDeg = 15.0
     static let maxInsetDeg = 30.0
+    static let insetRange = 0.0...maxInsetDeg
+    static let offsetRange = -10.0...20.0
     static let lineWidthDeg = 0.3
 
-    static func clampInset(_ deg: Double) -> Double {
-        min(maxInsetDeg, max(0, (deg * 2).rounded() / 2))
+    static func clamp(_ deg: Double, to range: ClosedRange<Double>) -> Double {
+        min(range.upperBound, max(range.lowerBound, (deg * 2).rounded() / 2))
+    }
+
+    static func clampInset(_ deg: Double) -> Double { clamp(deg, to: insetRange) }
+    static func clampOffset(_ deg: Double) -> Double { clamp(deg, to: offsetRange) }
+}
+
+/// Reference visible field per eye for the lens outline: per-ray boundary eccentricities
+/// (deg from the head axis, rays CCW from right). Replace `left` (and set `right`) from a
+/// later Boundary dots measurement; rays left out are interpolated.
+enum BoundaryDotsLensReference {
+    static let tag = "device-20261021"
+    static let date = "2026-10-21"
+    static let source = "Management/goals/rdr2-vr/evidence/device-20261021/diag-20261021T152509Z.log, seal on: "
+        + "dots_summary eye=L (11 rays), the 13 other rays from dots_summary eye=Both"
+    // The summaries apply clears: Both 240 is 30 (its later 32.5 mark was cleared), not the last confirm.
+    static let left: [Double: Double] = [
+        0: 37.5, 15: 35, 30: 35, 45: 35, 60: 30, 75: 30, 90: 30, 105: 32.5,
+        120: 32.5, 135: 35, 150: 37.5, 165: 37.5, 180: 40, 195: 42.5, 210: 40, 225: 40,
+        240: 30, 255: 32.5, 270: 32.5, 285: 30, 300: 32.5, 315: 32.5, 330: 32.5, 345: 37.5,
+    ]
+    /// No R measurement yet: R is the mirror of L about the vertical, R(phi) = L(180 - phi).
+    static let right: [Double: Double]? = nil
+
+    /// Linear in eccentricity between the nearest measured rays on either side (circular).
+    static func interpolate(_ samples: [Double: Double], rayDeg: Double) -> Double {
+        let ray = rayDeg.truncatingRemainder(dividingBy: 360) + (rayDeg < 0 ? 360 : 0)
+        let rays = samples.keys.sorted()
+        guard let first = rays.first, let last = rays.last else { return 0 }
+        if let exact = samples[ray] { return exact }
+        let below = rays.last(where: { $0 < ray }) ?? last
+        let above = rays.first(where: { $0 > ray }) ?? first
+        let span = (above - below + 360).truncatingRemainder(dividingBy: 360)
+        guard span > 0 else { return samples[below] ?? 0 }
+        let t = (ray - below + 360).truncatingRemainder(dividingBy: 360) / span
+        return (samples[below] ?? 0) + t * ((samples[above] ?? 0) - (samples[below] ?? 0))
+    }
+
+    static func eccDeg(_ eye: BoundaryDotsEye, rayDeg: Double) -> Double? {
+        switch eye {
+        case .left: return interpolate(left, rayDeg: rayDeg)
+        case .right:
+            if let right { return interpolate(right, rayDeg: rayDeg) }
+            return interpolate(left, rayDeg: 540 - rayDeg)
+        case .both: return nil
+        }
+    }
+
+    /// Closed polygon every 5 deg (all 24 measured rays included) at reference + offset, clamped at 0.
+    static func outline(_ eye: BoundaryDotsEye, offsetDeg: Double) -> [BoundaryDot]? {
+        guard eye != .both else { return nil }
+        return stride(from: 0.0, to: 360, by: 5).map { ray in
+            BoundaryDot(rayDeg: ray, eccDeg: max(0, (eccDeg(eye, rayDeg: ray) ?? 0) + offsetDeg))
+        }
+    }
+
+    /// Side limits read from the polygon at the 0/90/180/270 rays; nasal is the right side for L, left for R.
+    static func limits(_ eye: BoundaryDotsEye, offsetDeg: Double) -> BoundaryDotsLimits? {
+        func at(_ ray: Double) -> Double { max(0, (eccDeg(eye, rayDeg: ray) ?? 0) + offsetDeg) }
+        switch eye {
+        case .left: return BoundaryDotsLimits(nasal: at(0), temporal: at(180), up: at(90), down: at(270))
+        case .right: return BoundaryDotsLimits(nasal: at(180), temporal: at(0), up: at(90), down: at(270))
+        case .both: return nil
+        }
     }
 }
 
@@ -357,9 +467,10 @@ struct BoundaryDotsDrag<ID: Hashable> {
 enum BoundaryDotsSliderMap {
     static let metresPerDeg = 0.01
 
-    static func inset(from start: Double, displacement: SIMD3<Double>) -> Double {
+    static func inset(from start: Double, displacement: SIMD3<Double>,
+                      range: ClosedRange<Double> = BoundaryDotsOutline.insetRange) -> Double {
         guard displacement.x.isFinite else { return start }
-        return BoundaryDotsOutline.clampInset(start + displacement.x / metresPerDeg)
+        return BoundaryDotsOutline.clamp(start + displacement.x / metresPerDeg, to: range)
     }
 }
 
@@ -386,7 +497,8 @@ struct BoundaryDotsSlider<ID: Hashable> {
 
     mutating func update(id: ID, hand: BoundaryDotsHand?, phase: BoundaryDotsPinchPhase,
                          position: SIMD3<Double>, headRotation: simd_quatd,
-                         inset: Double, enabled: Bool) -> BoundaryDotsSliderUpdate? {
+                         inset: Double, enabled: Bool,
+                         range: ClosedRange<Double> = BoundaryDotsOutline.insetRange) -> BoundaryDotsSliderUpdate? {
         guard var active = grab else {
             if phase == .active, hand == .left, enabled, all(position .== position) {
                 grab = Grab(id: id, origin: position, start: inset, current: inset)
@@ -406,7 +518,7 @@ struct BoundaryDotsSlider<ID: Hashable> {
             active = Grab(id: id, origin: position, start: inset, current: inset)
         } else {
             let displacement = headRotation.inverse.act(position - active.origin)
-            active.current = BoundaryDotsSliderMap.inset(from: active.start, displacement: displacement)
+            active.current = BoundaryDotsSliderMap.inset(from: active.start, displacement: displacement, range: range)
         }
         if phase == .ended {
             grab = nil

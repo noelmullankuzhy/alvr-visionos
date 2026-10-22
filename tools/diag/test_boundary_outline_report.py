@@ -97,5 +97,62 @@ DIAG dots_outline t_ms=4 eye=L inset_deg=15 tangents=0,1,1,1'''))
         self.assertNotIn('dots_outline', unknown, 'dots_outline is a known topic')
 
 
+LENS_LOG = LOG + '''DIAG dots_outline t_ms=8 eye=L shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:42.5,15:40,30:40,45:40,60:35,75:35,90:35,105:37.5,120:37.5,135:40,150:42.5,165:42.5,180:45,195:47.5,210:45,225:45,240:35,255:37.5,270:37.5,285:35,300:37.5,315:37.5,330:37.5,345:42.5
+DIAG dots_outline t_ms=9 eye=R shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:40,90:30,180:37.5,270:32.5
+DIAG dots_outline t_ms=10 eye=L shape=lens offset_deg=0.000 rays=0:nan
+DIAG dots_outline t_ms=11 eye=L shape=lens offset_deg=0.000
+'''
+
+
+class LensOutlineReportTests(unittest.TestCase):
+    records = staticmethod(BoundaryOutlineReportTests.records)
+
+    def test_lens_rays_interpolate_linearly_in_eccentricity(self):
+        rays = report.outline_rays('''0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5''')
+        self.assertEqual(len(rays), 24)
+        self.assertEqual(rays[0], 37.5)
+        self.assertAlmostEqual(report.lens_ecc(7.5, rays), 36.25)
+        self.assertAlmostEqual(report.lens_ecc(185, rays), 40 + 2.5 / 3)
+        self.assertAlmostEqual(report.lens_ecc(240, rays), 30)
+        sparse = {0: 30, 90: 40}
+        self.assertAlmostEqual(report.lens_ecc(45, sparse), 35)
+        self.assertAlmostEqual(report.lens_ecc(270, sparse), 40 - 10 * 2 / 3)
+        self.assertIsNone(report.outline_rays('0:nan'))
+        self.assertIsNone(report.outline_rays('0:30,0:31'))
+        self.assertIsNone(report.outline_rays(''))
+        # Lens L offset 0, by hand: 72 sectors of 5 deg, rho = tan(ecc) with ecc linear between the 15-deg rays,
+        # area = 1/2 * sin(5 deg) * sum(rho_i * rho_i+1) = 1.533787; frustum (1.7321+1)(1.1918+1) = 5.988217;
+        # fraction 1.533787 / 5.988217 = 0.256134 (offset +5: 2.206352 / 5.988217 = 0.368449).
+        self.assertAlmostEqual(report.lens_area_frac(rays, LEFT), 1.533787 / 5.988217, places=6)
+        plus5 = {ray: ecc + 5 for ray, ecc in rays.items()}
+        self.assertAlmostEqual(report.lens_area_frac(plus5, LEFT), 0.368449, places=6)
+
+    def test_lens_rows_limits_rays_area_and_deviation(self):
+        rows = report.dots_outlines(self.records(LENS_LOG))
+        self.assertEqual([(r['eye'], r['shape']) for r in rows],
+                         [('L', 'rect'), ('L', 'rect'), ('R', 'rect'), ('L', 'lens'), ('R', 'lens')], 'bad lens lines skipped')
+        lens = rows[3]
+        self.assertEqual(lens['offset_deg'], 5)
+        self.assertIsNone(lens['inset_deg'])
+        self.assertEqual((lens['nasal_deg'], lens['temporal_deg'], lens['up_deg'], lens['down_deg']), (42.5, 45, 35, 37.5))
+        self.assertEqual(len(lens['rays']), 24)
+        self.assertEqual(lens['rays'][195], 47.5)
+        self.assertAlmostEqual(lens['area_frac'], 0.368449, places=6)
+        deviations = {d['ray_deg']: d['deviation_deg'] for d in lens['deviations']}
+        self.assertAlmostEqual(deviations[0], 32.5 - 42.5)
+        self.assertAlmostEqual(deviations[7.5], 30 - (36.25 + 5))
+        self.assertAlmostEqual(deviations[180], 40 - 45)
+        self.assertAlmostEqual(lens['max_dev_deg'], 11.25)
+        self.assertEqual(lens['max_dev_ray'], 7.5)
+        self.assertEqual(sorted(rows[4]['rays']), [0, 90, 180, 270], 'sparse logged rays are kept as logged')
+
+    def test_report_lists_the_lens_rays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'diag-outline.log').write_text(LENS_LOG)
+            output = report.generate(directory)
+        for text in ['shape', 'offset_deg', 'lens', 'Per-ray outline', 'outline_ecc_deg', '47.5', 'diag-outline.log:8']:
+            self.assertIn(text, output)
+
+
 if __name__ == '__main__':
     unittest.main()

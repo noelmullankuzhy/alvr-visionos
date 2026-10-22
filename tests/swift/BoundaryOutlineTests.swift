@@ -206,14 +206,110 @@ enum BoundaryOutlineTests {
         expect(session.deselect(), "deselect clears the cursor")
         expectEqual(session.cursor, nil)
         session.inset = 15
+        expectEqual(session.shape, .lens, "lens is the default style")
+        session.shape = .rect
         expectEqual(Diag.line(topic: "dots_outline", tMs: 1, fields: session.outlineFields(frustum: left, source: "device_default")!),
-                    "DIAG dots_outline t_ms=1 eye=L inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000")
+                    "DIAG dots_outline t_ms=1 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000")
         session.eye = .right
         session.inset = 30
         expectEqual(Diag.line(topic: "dots_outline", tMs: 2, fields: session.outlineFields(frustum: right, source: "m5_view")!),
-                    "DIAG dots_outline t_ms=2 eye=R inset_deg=30.000 nasal_deg=15.000 temporal_deg=30.001 up_deg=15.000 down_deg=20.001 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000")
+                    "DIAG dots_outline t_ms=2 eye=R shape=rect inset_deg=30.000 nasal_deg=15.000 temporal_deg=30.001 up_deg=15.000 down_deg=20.001 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000")
         session.eye = .both
         expect(session.outlineFields(frustum: left, source: "device_default") == nil, "no outline line for Both")
+
+        // Lens style: the 21 Oct seal-on visible field (diag-20261021T152509Z.log; L rays where measured, else Both),
+        // moved radially by offset_deg (positive = outward), -10...+20, default 0, snapped 0.5.
+        let reference = BoundaryDotsLensReference.self
+        expectEqual(reference.date, "2026-10-21")
+        expect(reference.source.contains("diag-20261021T152509Z.log"), "reference names its source log")
+        expectEqual(reference.left.count, 24, "24 measured rays")
+        expectEqual(reference.left.keys.sorted(), stride(from: 0.0, to: 360, by: 15).map { $0 }, "15 deg apart")
+        let lFromL: [Double: Double] = [45: 35, 75: 30, 105: 32.5, 120: 32.5, 135: 35, 150: 37.5, 165: 37.5,
+                                        180: 40, 195: 42.5, 210: 40, 225: 40]
+        let lFromBoth: [Double: Double] = [0: 37.5, 15: 35, 30: 35, 60: 30, 90: 30, 240: 30, 255: 32.5,
+                                           270: 32.5, 285: 30, 300: 32.5, 315: 32.5, 330: 32.5, 345: 37.5]
+        expectEqual(reference.left, lFromL.merging(lFromBoth) { l, _ in l }, "L summary rays, gaps from the Both summary")
+        // Hand values from the log at the 0/90/180/270 rays (L: nasal = right = 0, temporal = 180).
+        let lens0 = reference.limits(.left, offsetDeg: 0)
+        expectEqual(lens0, BoundaryDotsLimits(nasal: 37.5, temporal: 40, up: 30, down: 32.5), "L offset 0 reads the log")
+        expectEqual(reference.limits(.right, offsetDeg: 0), lens0, "R mirrored")
+        expectEqual(reference.limits(.left, offsetDeg: 5), BoundaryDotsLimits(nasal: 42.5, temporal: 45, up: 35, down: 37.5), "L +5")
+        expectEqual(reference.limits(.right, offsetDeg: 5), BoundaryDotsLimits(nasal: 42.5, temporal: 45, up: 35, down: 37.5), "R +5")
+        expectEqual(reference.limits(.both, offsetDeg: 0), nil, "lens is monocular")
+        // R mirrors L about the vertical: R(phi) = L(180 - phi).
+        for ray in stride(from: 0.0, to: 360, by: 15) {
+            near(reference.eccDeg(.right, rayDeg: ray) ?? -1, reference.left[(540 - ray).truncatingRemainder(dividingBy: 360)]!, "R mirror ray \(ray)")
+        }
+        near(reference.eccDeg(.right, rayDeg: 0) ?? -1, 40, "R temporal (right) = L temporal")
+        near(reference.eccDeg(.right, rayDeg: 315) ?? -1, 40, "R lower right = L lower left 225")
+        // Linear interpolation in eccentricity between measured rays, circular across 0.
+        near(reference.eccDeg(.left, rayDeg: 7.5) ?? -1, 36.25, "midway 0..15: (37.5 + 35) / 2")
+        near(reference.eccDeg(.left, rayDeg: 185) ?? -1, 40 + 2.5 / 3, "a third of 180..195: 40 + 2.5/3")
+        near(reference.eccDeg(.left, rayDeg: 355) ?? -1, 37.5, "345..360 both 37.5")
+        near(reference.eccDeg(.left, rayDeg: 240) ?? -1, 30, "measured ray exact")
+        let sparse: [Double: Double] = [0: 30, 90: 40]
+        near(BoundaryDotsLensReference.interpolate(sparse, rayDeg: 45), 35, "missing rays: halfway")
+        near(BoundaryDotsLensReference.interpolate(sparse, rayDeg: 30), 30 + 10.0 / 3, "missing rays: a third")
+        near(BoundaryDotsLensReference.interpolate(sparse, rayDeg: 270), 40 - 10.0 * 2 / 3, "missing rays wrap 90 -> 360")
+        near(BoundaryDotsLensReference.interpolate([10: 33], rayDeg: 200), 33, "one ray is a circle")
+        let lensOutline = reference.outline(.left, offsetDeg: 5) ?? []
+        expectEqual(lensOutline.map(\.rayDeg), stride(from: 0.0, to: 360, by: 5).map { $0 }, "lens outline every 5 deg")
+        for dot in lensOutline {
+            near(dot.eccDeg, (reference.eccDeg(.left, rayDeg: dot.rayDeg) ?? -1) + 5, "reference + offset at \(dot.rayDeg)")
+        }
+        expect(reference.outline(.both, offsetDeg: 0) == nil, "no lens outline for Both")
+        let lensArea = left.areaFraction(of: reference.outline(.left, offsetDeg: 0) ?? [])
+        // Mean radius tan(34 deg) = 0.67: a circle is pi * 0.67^2 / 5.988 = 0.24 of the frustum.
+        expect(lensArea > 0.2 && lensArea < 0.3, "lens area fraction plausible: \(lensArea)")
+        // Lens L offset 0, by hand: 72 sectors of 5 deg, rho = tan(ecc) with ecc linear between the 15-deg rays,
+        // area = 1/2 * sin(5 deg) * sum(rho_i * rho_i+1) = 1.533787; frustum (1.7321+1)(1.1918+1) = 5.988217;
+        // fraction 1.533787 / 5.988217 = 0.256134 (offset +5: 2.206352 / 5.988217 = 0.368449).
+        near(lensArea, 1.533787 / 5.988217, "lens L offset 0 area by hand", tolerance: 1e-6)
+        near(left.areaFraction(of: reference.outline(.left, offsetDeg: 5) ?? []), 0.368449, "lens L +5 area", tolerance: 1e-6)
+        expect(left.areaFraction(of: reference.outline(.left, offsetDeg: 5) ?? []) > lensArea, "outward offset, more area")
+        near(left.areaFraction(of: left.outline(insetDeg: 15)), left.areaFraction(insetDeg: 15), "one area routine")
+        // Offset clamps and snapping.
+        for (raw, snapped) in [(-12.0, -10.0), (-10, -10), (-0.24, 0), (0.26, 0.5), (4.76, 5), (19.9, 20), (25, 20)] {
+            expectEqual(BoundaryDotsOutline.clampOffset(raw), snapped, "offset \(raw) -> \(snapped)")
+        }
+        expectEqual(BoundaryDotsOutline.offsetRange, -10...20)
+        expectEqual(BoundaryDotsOutline.insetRange, 0...30)
+        expectEqual(BoundaryDotsSliderMap.inset(from: 0, displacement: [-0.5, 0, 0], range: BoundaryDotsOutline.offsetRange), -10, "slider clamps at -10")
+        expectEqual(BoundaryDotsSliderMap.inset(from: 0, displacement: [0.5, 0, 0], range: BoundaryDotsOutline.offsetRange), 20, "slider clamps at +20")
+        expectEqual(BoundaryDotsSliderMap.inset(from: 0, displacement: [-0.0326, 0, 0], range: BoundaryDotsOutline.offsetRange), -3.5, "snap 0.5")
+        var lensSlider = BoundaryDotsSlider<Int>()
+        expectEqual(lensSlider.update(id: 1, hand: .left, phase: .active, position: origin, headRotation: level,
+                                      inset: 0, enabled: true, range: BoundaryDotsOutline.offsetRange), nil)
+        expectEqual(lensSlider.update(id: 1, hand: .left, phase: .active, position: origin + [-0.04, 0, 0], headRotation: level,
+                                      inset: 0, enabled: true, range: BoundaryDotsOutline.offsetRange), .move(-4), "negative offsets reachable")
+        expectEqual(lensSlider.update(id: 1, hand: .left, phase: .cancelled, position: origin, headRotation: level,
+                                      inset: -4, enabled: true, range: BoundaryDotsOutline.offsetRange), .move(0), "cancel restores")
+
+        // Session: per-eye offsets, the slider value follows the style, toggling keeps both values.
+        var lens = BoundaryDotsSession()
+        lens.eye = .left
+        expectEqual(lens.offset, 0, "default offset")
+        expectEqual(lens.sliderValue, 0, "lens slider drives the offset")
+        expectEqual(lens.sliderRange, BoundaryDotsOutline.offsetRange)
+        lens.sliderValue = 5.2
+        expectEqual(lens.offset, 5, "snapped")
+        lens.offset = .nan
+        expectEqual(lens.offset, 5, "non-finite ignored")
+        lens.eye = .right
+        expectEqual(lens.offset, 0, "offsets are per eye")
+        lens.eye = .left
+        lens.toggleShape()
+        expectEqual(lens.shape, .rect)
+        expectEqual(lens.sliderValue, 15, "rect slider drives the inset")
+        expectEqual(lens.sliderRange, BoundaryDotsOutline.insetRange)
+        lens.toggleShape()
+        expectEqual(lens.sliderValue, 5, "offset kept across toggles")
+        expectEqual(Diag.line(topic: "dots_outline", tMs: 3, fields: lens.outlineFields(frustum: left, source: "device_default")!),
+                    "DIAG dots_outline t_ms=3 eye=L shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:42.5,15:40,30:40,45:40,60:35,75:35,90:35,105:37.5,120:37.5,135:40,150:42.5,165:42.5,180:45,195:47.5,210:45,225:45,240:35,255:37.5,270:37.5,285:35,300:37.5,315:37.5,330:37.5,345:42.5")
+        lens.eye = .right
+        lens.offset = 5
+        expectEqual(Diag.line(topic: "dots_outline", tMs: 4, fields: lens.outlineFields(frustum: right, source: "m5_view")!),
+                    "DIAG dots_outline t_ms=4 eye=R shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:45,15:42.5,30:42.5,45:40,60:37.5,75:37.5,90:35,105:35,120:35,135:40,150:40,165:40,180:42.5,195:42.5,210:37.5,225:37.5,240:37.5,255:35,270:37.5,285:37.5,300:35,315:45,330:45,345:47.5")
 
         // Logged tangents (m5_view, drawable 0: view 0 = L, view 1 = R) replace the device defaults.
         BoundaryDotsTangents.reset()

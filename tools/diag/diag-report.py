@@ -581,9 +581,45 @@ def outline_limits(eye, inset, tangents):
     return side(nasal), side(temporal), side(top), side(bottom)
 
 
+def outline_rays(text):
+    """'0:37.5,15:35' -> {0.0: 37.5, 15.0: 35.0}; None if empty, nonfinite, out of range or repeated."""
+    rays = {}
+    for pair in (text or '').split(','):
+        parts = pair.split(':')
+        values = [number(v) for v in parts] if len(parts) == 2 else [None]
+        if any(v is None for v in values) or not 0 <= values[0] < 360 or not 0 <= values[1] < 90 or values[0] in rays:
+            return None
+        rays[values[0]] = values[1]
+    return rays or None
+
+
+def lens_ecc(ray, rays):
+    """Linear in eccentricity between the nearest logged rays on either side (circular), as the app draws."""
+    ray = ray % 360
+    if ray in rays:
+        return rays[ray]
+    keys = sorted(rays)
+    below = max([k for k in keys if k < ray], default=keys[-1])
+    above = min([k for k in keys if k > ray], default=keys[0])
+    span = (above - below) % 360
+    if span == 0:
+        return rays[below]
+    return rays[below] + ((ray - below) % 360) / span * (rays[above] - rays[below])
+
+
+def lens_area_frac(rays, tangents):
+    """Lens outline area in tangent space (rays every 5 degrees, interpolated) over the frustum area."""
+    left, right, bottom, top = tangents
+    xy = [(math.tan(math.radians(lens_ecc(r, rays))) * math.cos(math.radians(r)),
+           math.tan(math.radians(lens_ecc(r, rays))) * math.sin(math.radians(r))) for r in range(0, 360, 5)]
+    twice = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(xy, xy[1:] + xy[:1]))
+    return abs(twice) / 2 / ((left + right) * (bottom + top))
+
+
 def dots_outlines(records):
-    """One row per `dots_outline` line, with the area it implies and, when the same log has
-    confirmed dots for that eye (latest walk), the per-ray deviation dot minus outline."""
+    """One row per `dots_outline` line (shape=lens: logged rays = reference + offset; shape=rect or
+    absent: frustum minus inset), with the area it implies and, when the same log has confirmed
+    dots for that eye (latest walk), the per-ray deviation dot minus outline."""
     boundaries = {}
     for boundary in dots_boundaries(records):
         if boundary['label'] == boundary['eye']:
@@ -593,25 +629,36 @@ def dots_outlines(records):
         f = record['fields']
         if record['topic'] != 'dots_outline' or f.get('eye') not in ('L', 'R'):
             continue
-        eye, inset = f['eye'], number(f.get('inset_deg'))
-        if inset is None:
+        eye, shape = f['eye'], f.get('shape', 'rect')
+        inset, offset, rays = number(f.get('inset_deg')), number(f.get('offset_deg')), None
+        if shape == 'lens':
+            rays = outline_rays(f.get('rays'))
+            if offset is None or rays is None:
+                continue
+            inset = None
+        elif shape != 'rect' or inset is None:
             continue
         tangents = tuple(number(v) for v in f.get('tangents', '').split(','))
         note = None
         if len(tangents) != 4 or any(v is None or v <= 0 for v in tangents):
             note = 'invalid tangents: device default' if 'tangents' in f else 'tangents not logged: device default'
             tangents = OUTLINE_DEVICE_TANGENTS[eye]
+
+        def expected(ray):
+            return lens_ecc(ray, rays) if rays else outline_ecc(ray, inset, tangents)
         deviations = []
         for point in (boundaries.get(eye) or {}).get('points', []):
-            expected = outline_ecc(point['ray_deg'], inset, tangents)
             deviations.append(dict(ray_deg=point['ray_deg'], dot_ecc_deg=point['ecc_deg'],
-                                   outline_ecc_deg=expected, deviation_deg=point['ecc_deg'] - expected))
+                                   outline_ecc_deg=expected(point['ray_deg']),
+                                   deviation_deg=point['ecc_deg'] - expected(point['ray_deg'])))
         worst = max(deviations, key=lambda d: abs(d['deviation_deg'])) if deviations else None
-        rows.append(dict(eye=eye, source=record['source'], inset_deg=inset,
+        rows.append(dict(eye=eye, shape=shape, source=record['source'], inset_deg=inset, offset_deg=offset,
+                         reference=f.get('reference'), rays=rays,
                          nasal_deg=number(f.get('nasal_deg')), temporal_deg=number(f.get('temporal_deg')),
                          up_deg=number(f.get('up_deg')), down_deg=number(f.get('down_deg')),
                          tangent_source=f.get('tangent_source'), tangents=tangents, tangent_note=note,
-                         area_frac=outline_area_frac(inset, tangents), deviations=deviations,
+                         area_frac=lens_area_frac(rays, tangents) if rays else outline_area_frac(inset, tangents),
+                         deviations=deviations,
                          max_dev_deg=abs(worst['deviation_deg']) if worst else None,
                          max_dev_ray=worst['ray_deg'] if worst else None))
     return rows
@@ -619,23 +666,32 @@ def dots_outlines(records):
 
 def outline_report(records):
     lines = ['### Outline slider', '',
-             'Each `dots_outline` line is one RIGHT hold with no cursor: the rendered frustum of that eye, inset '
-             'by inset_deg along every ray. Limits are the logged frustum sides minus the inset (clamped at 0), in '
-             'degrees from the head axis. area_frac is the outline polygon area in tangent space over the frustum '
-             'area (5-degree rays plus corners, as drawn). deviation_deg is the confirmed dot eccentricity minus '
-             'the outline on that ray (positive: the dot was seen outside the outline), against the latest walk '
-             'of the same eye in these logs.', '']
+             'Each `dots_outline` line is one RIGHT hold with no cursor. shape=lens (default): the measured '
+             'seal-on visible field of that eye (reference) moved radially by offset_deg (positive outward); rays '
+             'lists the drawn eccentricity per measured ray and rays between them interpolate linearly in '
+             'eccentricity. shape=rect (or no shape, older lines): the rendered frustum inset by inset_deg along '
+             'every ray. Limits are the logged values at the 0/90/180/270 rays (rect: frustum sides minus the '
+             'inset, clamped at 0), in degrees from the head axis. area_frac is the outline polygon area in tangent '
+             'space over the frustum area (lens: 5-degree rays; rect: 5-degree rays plus corners, as drawn). '
+             'deviation_deg is the confirmed dot eccentricity minus the outline on that ray (positive: the dot was '
+             'seen outside the outline), against the latest walk of the same eye in these logs.', '']
     rows = dots_outlines(records)
     for eye in ('L', 'R'):
         mine = [r for r in rows if r['eye'] == eye]
         lines += ['Outline eye={}'.format(eye), '']
-        lines += table([dict({k: fmt(r[k]) for k in ('inset_deg', 'nasal_deg', 'temporal_deg', 'up_deg', 'down_deg',
-                                                    'area_frac', 'max_dev_deg', 'max_dev_ray')},
-                             source=r['source'], tangent_source=r['tangent_source'],
+        lines += table([dict({k: fmt(r[k]) for k in ('inset_deg', 'offset_deg', 'nasal_deg', 'temporal_deg', 'up_deg',
+                                                    'down_deg', 'area_frac', 'max_dev_deg', 'max_dev_ray')},
+                             source=r['source'], shape=r['shape'], reference=r['reference'],
+                             tangent_source=r['tangent_source'],
                              tangents=','.join('{:g}'.format(t) for t in r['tangents']) +
                              (' ({})'.format(r['tangent_note']) if r['tangent_note'] else '')) for r in mine],
-                       ('source', 'inset_deg', 'nasal_deg', 'temporal_deg', 'up_deg', 'down_deg', 'area_frac',
-                        'max_dev_deg', 'max_dev_ray', 'tangent_source', 'tangents')) + ['']
+                       ('source', 'shape', 'inset_deg', 'offset_deg', 'nasal_deg', 'temporal_deg', 'up_deg', 'down_deg',
+                        'area_frac', 'max_dev_deg', 'max_dev_ray', 'reference', 'tangent_source', 'tangents')) + ['']
+        lens = [r for r in mine if r['rays']]
+        if lens:
+            lines += ['Per-ray outline, latest lens line ({}; reference + offset):'.format(cell(lens[-1]['source'])), '']
+            lines += table([dict(ray_deg=fmt(ray), outline_ecc_deg=fmt(ecc)) for ray, ecc in sorted(lens[-1]['rays'].items())],
+                           ('ray_deg', 'outline_ecc_deg')) + ['']
         if mine and mine[-1]['deviations']:
             lines += ['Per-ray deviation, latest outline ({}):'.format(cell(mine[-1]['source'])), '']
             lines += table([{k: fmt(v) for k, v in d.items()} for d in mine[-1]['deviations']],

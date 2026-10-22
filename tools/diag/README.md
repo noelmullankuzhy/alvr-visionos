@@ -657,22 +657,36 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    binocular observation, not two monocular measurements.
    **Outline slider (about 1 min per eye; do this first).** Select **L** or **R** and
    close the other eye. A thin (0.3°) bright green line, head-locked like the dots,
-   shows that eye's rendered frustum edge (the latest `m5_view` tangents of this app
-   session, else the device defaults L 1.7321,1,1.1918,1 / R mirrored) moved
-   **inset** degrees inwards along every ray. `inset 15.0 deg  area ..%` and the four
-   side limits (nasal/temporal/up/down, degrees from the head axis) are shown under
-   the centre cross. With no cursor selected (status ends `left drag: outline`),
-   **pinch and hold with the left hand and drag right/left**: horizontal hand travel
-   in the head frame changes the inset, **1 cm = 1°** (right = more inset, smaller
-   outline), snapped to 0.5°, 0–30°, relative to the inset at the grab. Release keeps
-   the value; a cancelled pinch restores it. Drag until the line sits just inside the
-   edge you can see all round, then **hold the right pinch >= 0.5 s** (no cursor) to
-   log it. Inset 0 is the full rendered frustum; the inset is how far inside it the
-   visible field ends (21 Oct, seal on: 12–17° per side). Each eye keeps its own
-   inset; Both shows no outline (it is monocular). When a ray cursor is selected the
-   left drag moves the cursor (step 3) instead (status ends `left drag: cursor`);
-   **quick right pinch the centre cross** to deselect it and get the slider back.
-   The dots stay as a dim 0.5° reference for per-ray checks.
+   shows one of two outline styles; a **quick right pinch on the centre cross** (no
+   cursor selected) toggles between them, and the status line names the active one.
+   - **lens** (default; for matching today's edge): the shape of that eye's measured
+     visible field, the per-ray boundary eccentricities of the 21 Oct seal-on run
+     (`evidence/device-20261021/diag-20261021T152509Z.log`: the L summary's 11 rays,
+     the other 13 from the Both summary; R is the mirror of L about the vertical until
+     an R walk exists). The data block is `BoundaryDotsLensReference` in
+     `BoundaryDots.swift` (source and date included); replace it from a later walk.
+     The slider moves the whole shape radially by **offset** degrees: outline point on
+     ray φ = reference(φ) + offset, rays between the 24 measured ones linear in
+     eccentricity; −10…+20°, default 0, positive = outward (a larger field than the
+     seal-on reference). Offset 0 reads nasal 37.5, temporal 40, up 30, down 32.5.
+   - **rect**: the rendered frustum edge (the latest `m5_view` tangents of this app
+     session, else the device defaults L 1.7321,1,1.1918,1 / R mirrored) moved
+     **inset** degrees inwards along every ray; 0–30°, default 15. Inset 0 is the
+     full rendered frustum, the rendered-edge reference.
+   `lens offset +0.0 deg  area ..%` (or `rect inset 15.0 deg  area ..%`) and the four
+   side limits (nasal/temporal/up/down, degrees from the head axis, read at the
+   0/180/90/270° rays) are shown under the centre cross. With no cursor selected
+   (status shows `left drag: lens outline` or `rect outline`), **pinch and hold with
+   the left hand and drag right/left**: horizontal hand travel in the head frame
+   changes the value, **1 cm = 1°**, right = larger number (lens: outline grows; rect:
+   inset grows, outline shrinks), snapped to 0.5°, relative to the value at the grab.
+   Release keeps the value; a cancelled pinch restores it; selecting a cursor mid-slide
+   ends the slide at its value. Drag until the line sits on the edge you can just see
+   all round, then **hold the right pinch >= 0.5 s** (no cursor) to log it. Each eye
+   keeps its own offset and inset; Both shows no outline (it is monocular). When a ray
+   cursor is selected the left drag moves the cursor (step 3) instead (status shows
+   `left drag: cursor`); quick right pinch the centre cross to deselect it and get the
+   slider back. The dots stay as a dim 0.5° reference for per-ray checks.
 3. Look at a reachable dot until the system highlights it, then quick-pinch with
    the **right hand** to select the ray and cursor dot. A **yellow 1.6° ring**
    stays on the cursor independently of gaze. Wherever you look (including empty
@@ -704,8 +718,9 @@ input during dots measurement; its state remains alive so auto-enter stays consu
 5. Pull `diag-*.log` and run `diag-report.py` below. The **Boundary dots** section
    contains per-eye boundary tables, source references, and `visible_area_frac`.
    An area requires all 24 main rays and valid tangents; no missing boundary is inferred.
-   Its **Outline slider** part has a table per eye: each logged inset, the four
-   limits, `area_frac` (outline polygon area in tangent space / frustum area) and,
+   Its **Outline slider** part has a table per eye: each logged style, offset or
+   inset, the four limits, `area_frac` (outline polygon area in tangent space /
+   frustum area), the latest lens line's per-ray eccentricities (reference + offset) and,
    when the same logs hold confirmed dots for that eye, `max_dev_deg` plus a per-ray
    table of dot eccentricity minus outline (positive: seen outside the outline).
 
@@ -758,13 +773,18 @@ DIAG dots t_ms=102 eye=L action=confirm ray_deg=45.000 ecc_deg=60.000 yaw_deg=50
 DIAG dots_summary t_ms=103 eye=L points=2 rays=0:30,90:32.5
 DIAG dots_summary t_ms=103 eye=R points=0 rays=none
 DIAG dots_summary t_ms=103 eye=Both points=0 rays=none
-DIAG dots_outline t_ms=104 eye=L inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000
+DIAG dots_outline t_ms=104 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5
+DIAG dots_outline t_ms=105 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000
 ```
 
-`dots_outline` (right hold, no cursor, L or R): limits are the frustum side minus
-the inset, clamped at 0; `tangent_source` is `m5_view` or `device_default`;
-`tangents` (left,right,bottom,top) is the frustum the outline was drawn from.
-Outline code: `BoundaryDotsFrustum`, `BoundaryDotsSlider` in `BoundaryDots.swift`,
+`dots_outline` (right hold, no cursor, L or R): `shape=lens` lines carry
+`offset_deg`, the `reference` tag and `rays` (the drawn eccentricity on each measured
+ray, reference + offset); their limits are read from that polygon at 0/90/180/270°.
+`shape=rect` lines carry `inset_deg`; their limits are the frustum side minus the
+inset, clamped at 0. Lines without `shape` (before the lens style) are rect.
+`tangent_source` is `m5_view` or `device_default`; `tangents` (left,right,bottom,top)
+is the frustum used for the rect outline and for `area_frac`.
+Outline code: `BoundaryDotsLensReference`, `BoundaryDotsFrustum`, `BoundaryDotsSlider` in `BoundaryDots.swift`,
 tested by `tests/swift/BoundaryOutlineTests.swift` and
 `tools/diag/test_boundary_outline_report.py`.
 
