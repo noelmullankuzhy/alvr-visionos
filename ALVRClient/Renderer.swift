@@ -976,7 +976,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 // The frame quad is drawn on the sent tangents (uniforms.tangents) under the device projection.
                 let debugEyes = DebugEyeTangents.current
                 let cropInset = CropFov.inset
-                let cropMargin = CropFov.effectiveMargin(setting: settings.cropMarginDeg)
+                let cropMargin = CropFov.margin
                 // The logical grid (rate map screen size, else the view's viewport) over the device frustum: px per tangent unit.
                 // The connect-time recommendation uses the last measured grid (reference device's until then); recommended= in
                 // fov_sent shows what was sent, render_1to1= what the frame sent now needs.

@@ -86,13 +86,13 @@ struct Entry: View {
         }
     }
 
-    // 0 = automatic.
+    // 0 = automatic unless `zeroIsAutomatic` is false.
     @ViewBuilder
-    private func flagStepper(_ title: String, _ unit: String, _ note: String, key: String, _ value: Binding<Double>, in range: ClosedRange<Double>, step: Double) -> some View {
+    private func flagStepper(_ title: String, _ unit: String, _ note: String, key: String, _ value: Binding<Double>, in range: ClosedRange<Double>, step: Double, zeroIsAutomatic: Bool = true) -> some View {
         let overridden = LaunchFlags.isOverridden(key)
         let shown = LaunchFlags.double(key, setting: value.wrappedValue)
         Stepper(value: Binding(get: { shown }, set: { value.wrappedValue = $0 }), in: range, step: step) {
-            Text("\(title): \(shown == 0 ? "automatic" : String(format: "%g", shown) + unit)")
+            Text("\(title): \(shown == 0 && zeroIsAutomatic ? "automatic" : String(format: "%g", shown) + unit)")
             Text(overridden ? "Set by launch argument." : note)
                 .font(.system(size: 10))
         }
@@ -493,7 +493,7 @@ struct Entry: View {
                                     value: $gStore.settings.cropMarginDeg, in: 0...10, step: 0.5)
                                 .onChange(of: gStore.settings.cropMarginDeg) { saveAction() }
                             flagStepper("Crop inset", " deg", "Model lens inset the crop starts from (the Boundary dots lens slider overrides it in-session). Applies at the next connect.",
-                                        key: "ALVRCropInsetDeg", $gStore.settings.cropInsetDeg, in: 0...20, step: 0.5)
+                                        key: "ALVRCropInsetDeg", $gStore.settings.cropInsetDeg, in: CropFov.insetRange, step: 0.5, zeroIsAutomatic: false)
                             Text("On by default. Next stream: each eye reports the Boundary dots model lens's inset rectangle (device frustum minus the lens inset, default 15 deg) widened by the margin, not the whole frustum; the rest of the view is black. Does nothing with the RealityKit renderer. Also asks the server for the 1:1 render size at connect (server video resolution Scale 1.0 to honour it). Set the server's foveation center shift to the DIAG fov_sent axis_center_shift.")
                                 .font(.system(size: 10))
                             Picker(selection: $gStore.settings.goldenFrameSet) {

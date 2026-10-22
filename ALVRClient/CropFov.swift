@@ -117,7 +117,7 @@ enum CropFov {
     /// Model lens inset last set on the Boundary dots lens slider in this app session, one value for both eyes; nil until then.
     private static let lock = NSLock()
     private static var stored: Double?
-    /// The inset at launch (`applyLaunch`, at connect): the argument or the setting, 15 until then. `inset` without a slider value.
+    /// The inset at launch (`applyLaunch`, each stream): the argument or the setting, 15 until then. `inset` without a slider value.
     private static var launch = BoundaryDotsOutline.defaultInsetDeg
 
     static var inset: Double {
@@ -126,10 +126,24 @@ enum CropFov {
         return stored ?? launch
     }
 
-    static func applyLaunch(setting: Double, arguments: [String: Any] = LaunchFlags.currentArguments) {
-        let value = effectiveInset(setting: setting, arguments: arguments)
+    /// The margin for the current stream (`applyLaunch`), read per frame without touching the launch arguments.
+    private static var launchMargin = defaultMarginDeg
+
+    static var margin: Double {
         lock.lock()
-        launch = value
+        defer { lock.unlock() }
+        return launchMargin
+    }
+
+    /// Resolve the launch/setting inset and margin once per stream (init, every connect and reconnect); a slider value
+    /// (`recordInset`) still wins for the inset.
+    static func applyLaunch(insetSetting: Double, marginSetting: Double = defaultMarginDeg,
+                            arguments: [String: Any] = LaunchFlags.currentArguments) {
+        let inset = effectiveInset(setting: insetSetting, arguments: arguments)
+        let margin = effectiveMargin(setting: marginSetting, arguments: arguments)
+        lock.lock()
+        launch = inset
+        launchMargin = margin
         lock.unlock()
     }
 
