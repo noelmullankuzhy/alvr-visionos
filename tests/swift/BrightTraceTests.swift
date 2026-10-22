@@ -195,6 +195,28 @@ private func testOutputRows() {
     expect(close(lumaRGBA[0], 0.0722, 1e-6), "rgba8Unorm: byte 2 is blue, used as is")
 }
 
+private func testEyeTargets() {
+    // Layered: one texture, a slice per eye, one rate map with a layer per eye.
+    let layered = BrightTrace.targets(views: [(texture: 0, slice: 0), (texture: 0, slice: 1)], rateMaps: 1)
+    expectEqual(layered, [BrightTraceTarget(eye: "L", texture: 0, slice: 0, rateMap: 0, layer: 0),
+                          BrightTraceTarget(eye: "R", texture: 0, slice: 1, rateMap: 0, layer: 1)], "layered: both eyes in texture 0")
+    // Dedicated: a texture and a rate map per eye; the right eye is read from texture 1.
+    let dedicated = BrightTrace.targets(views: [(texture: 0, slice: 0), (texture: 1, slice: 0)], rateMaps: 2)
+    expectEqual(dedicated, [BrightTraceTarget(eye: "L", texture: 0, slice: 0, rateMap: 0, layer: 0),
+                            BrightTraceTarget(eye: "R", texture: 1, slice: 0, rateMap: 1, layer: 0)], "dedicated: right eye in texture 1")
+    // Shared: both viewports in one slice, one rate map layer per view.
+    let shared = BrightTrace.targets(views: [(texture: 0, slice: 0), (texture: 0, slice: 0)], rateMaps: 1)
+    expectEqual(shared.map(\.eye), ["L", "R"], "shared: eye identity from the view order")
+    expectEqual(shared.map(\.layer), [0, 1], "shared: layer per view")
+    let unmapped = BrightTrace.targets(views: [(texture: 0, slice: 0), (texture: 1, slice: 0)], rateMaps: 0)
+    expect(unmapped.allSatisfy { $0.rateMap == nil }, "no rate maps: screen = physical")
+    expectEqual(BrightTrace.targets(views: [(texture: 0, slice: 0)], rateMaps: 1).map(\.eye), ["L"], "mono: left only")
+    // Records carry the eye names; a missing readback keeps the eye with null samples.
+    var r = record(1, ts: 1)
+    r.eyes.append(BrightTraceEye(eye: "R", input: nil, output: nil))
+    expectEqual(r.eyes.map(\.eye), ["L", "R"], "eye identity on the record")
+}
+
 @main
 enum BrightTraceTests {
     static func main() {
@@ -206,6 +228,7 @@ enum BrightTraceTests {
         testSummary()
         testRecordEncoding()
         testOutputRows()
+        testEyeTargets()
         finishTests("BrightTrace")
     }
 }

@@ -100,9 +100,28 @@ enum BrightTrace {
         v.map { String(format: "%.4g", $0) } ?? "na"
     }
 
+    // The eye of each drawable view (view order: left, right) and where it is read back: its colour texture and slice,
+    // and the rate map and layer mapping its screen coordinates. Layered: one texture, a slice and rate map layer per eye.
+    // Dedicated: a texture and a rate map per eye. Shared: one slice, a rate map layer per view.
+    static func targets(views: [(texture: Int, slice: Int)], rateMaps: Int) -> [BrightTraceTarget] {
+        views.enumerated().map { i, v in
+            let layer = views.prefix(i).filter { $0.texture == v.texture }.count
+            return BrightTraceTarget(eye: i < 2 ? ["L", "R"][i] : "\(i)", texture: v.texture, slice: v.slice,
+                                     rateMap: rateMaps == 0 ? nil : min(v.texture, rateMaps - 1), layer: layer)
+        }
+    }
+
     // Recorded fields that make up the colour state (generation) and the CVPixelBuffer attachments.
     static let colourKeys: Set = ["path", "pipeline", "binding", "hdr_pq", "headroom", "transfer", "matrix", "range", "encoding_gamma", "gamut_hash"]
     static let attachmentKeys: Set = ["cv_fourcc", "cv_transfer", "cv_matrix", "cv_primaries", "cv_mastering", "cv_cll"]
+}
+
+struct BrightTraceTarget: Equatable {
+    let eye: String
+    let texture: Int
+    let slice: Int
+    let rateMap: Int?
+    let layer: Int
 }
 
 struct BrightTraceEye {

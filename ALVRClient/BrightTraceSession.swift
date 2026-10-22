@@ -17,9 +17,11 @@
 import Foundation
 import CoreVideo
 import Metal
+import CompositorServices
 
 final class BrightTraceSession {
-    typealias View = (slice: Int, viewport: MTLViewport)
+    // One eye's colour texture, slice, viewport and the rate map (and layer) mapping it (BrightTrace.targets).
+    typealias View = (eye: String, texture: MTLTexture, slice: Int, viewport: MTLViewport, rateMap: MTLRasterizationRateMap?, layer: Int)
 
     private static let lock = NSLock()
     private static var on = LaunchFlags.bool(BrightTrace.defaultsKey, setting: ALVRClientApp.gStore.settings.brightnessTrace)
@@ -45,13 +47,13 @@ final class BrightTraceSession {
     private var lastInput: (timestampNs: UInt64, eyes: [[Double]?])?
 
     // Render thread, after the video pass into `texture`.
-    func frame(commandBuffer: MTLCommandBuffer, texture: MTLTexture, views: [View], rateMap: MTLRasterizationRateMap?, queuedFrame: QueuedFrame,
+    func frame(commandBuffer: MTLCommandBuffer, views: [View], queuedFrame: QueuedFrame,
                colour: StreamColourState, secret: Bool, realityKit: Bool, asyncDecode: Bool, renderStartS: Double, presentS: Double,
                layerFormat: MTLPixelFormat?, overlayAlpha: Float) {
         seq += 1
-        // Scalars and the decoded buffer only: the drawable texture is not retained past this frame.
+        // Scalars and the decoded buffer only: the drawable textures are not retained past this frame.
         let id = seq, tMs = Int(Date().timeIntervalSince1970 * 1000), pixelBuffer = queuedFrame.imageBuffer, ts = queuedFrame.timestamp
-        let drawableFormat = texture.pixelFormat
+        let drawableFormat = views.first?.texture.pixelFormat ?? .invalid, eyes = views.map(\.eye)
         queue.async { [self] in
             var fields = Self.fields(colour: colour, secret: secret, realityKit: realityKit, asyncDecode: asyncDecode)
             fields["drawable_format"] = DiagFrameCapture.formatName(drawableFormat)
@@ -63,70 +65,76 @@ final class BrightTraceSession {
             pending[id] = BrightTraceRecord(seq: id, tMs: tMs, renderStartS: renderStartS, presentS: presentS, timestampNs: ts,
                                             fields: fields, overlayAlpha: Double(overlayAlpha), eyes: [])
         }
-        let readback = encodeReadback(commandBuffer: commandBuffer, texture: texture, views: views, rateMap: rateMap)
+        let readback = encodeReadback(commandBuffer: commandBuffer, views: views)
         commandBuffer.addCompletedHandler { [self] done in
             let ok = done.status == .completed
             queue.async { [self] in
                 defer { if let buffer = readback?.buffer { poolLock.lock(); pool.append(buffer); poolLock.unlock() } }
-                let outputs = views.indices.map { i -> [Double]? in
-                    guard ok, let readback, let format = readback.format else { return nil }
+                let outputs = eyes.indices.map { i -> [Double]? in
+                    guard ok, let readback, let format = readback.formats[i] else { return nil }
                     return readback.rows[i].luma(readback.buffer.contents().advanced(by: readback.offsets[i]), rowBytes: readback.rowBytes[i], format: format)
                 }
-                finish(id, outputs: outputs)
+                finish(id, eyes: eyes, outputs: outputs)
             }
         }
     }
 
-    private struct Readback { let buffer: MTLBuffer; let rows: [BrightTraceRows]; let offsets: [Int]; let rowBytes: [Int]; let format: BrightTraceRows.Format? }
+    // Per view: a nil format when its texture format or slice cannot be read.
+    private struct Readback { let buffer: MTLBuffer; let rows: [BrightTraceRows]; let offsets: [Int]; let rowBytes: [Int]; let formats: [BrightTraceRows.Format?] }
 
-    private func encodeReadback(commandBuffer: MTLCommandBuffer, texture: MTLTexture, views: [View], rateMap: MTLRasterizationRateMap?) -> Readback? {
-        let format: BrightTraceRows.Format
+    private static func format(_ texture: MTLTexture, slice: Int) -> BrightTraceRows.Format? {
+        guard slice < (texture.textureType == .type2DArray ? texture.arrayLength : 1) else { return nil }
         switch texture.pixelFormat {
-        case .rgba16Float: format = .half
-        case .rgba8Unorm: format = .rgba8
-        case .bgra8Unorm: format = .bgra8
-        case .rgba8Unorm_srgb: format = .rgba8srgb
-        case .bgra8Unorm_srgb: format = .bgra8srgb
+        case .rgba16Float: return .half
+        case .rgba8Unorm: return .rgba8
+        case .bgra8Unorm: return .bgra8
+        case .rgba8Unorm_srgb: return .rgba8srgb
+        case .bgra8Unorm_srgb: return .bgra8srgb
         default: return nil
         }
-        let bpp = format == .half ? 8 : 4
-        let slices = texture.textureType == .type2DArray ? texture.arrayLength : 1
+    }
+
+    private func encodeReadback(commandBuffer: MTLCommandBuffer, views: [View]) -> Readback? {
+        let formats = views.map { Self.format($0.texture, slice: $0.slice) }
+        guard let device = views.first?.texture.device, formats.contains(where: { $0 != nil }) else { return nil }
         let rows = views.map { v in
             BrightTraceRows(x: v.viewport.originX, y: v.viewport.originY, width: v.viewport.width, height: v.viewport.height,
-                            textureWidth: texture.width, textureHeight: texture.height) { x, y in
-                guard let rateMap else { return (x, y) }
-                let p = rateMap.physicalCoordinates(screenCoordinates: MTLCoordinate2D(x: Float(x), y: Float(y)), layer: v.slice)
+                            textureWidth: v.texture.width, textureHeight: v.texture.height) { x, y in
+                guard let rateMap = v.rateMap else { return (x, y) }
+                let layer = min(v.layer, rateMap.layerCount - 1)
+                let p = rateMap.physicalCoordinates(screenCoordinates: MTLCoordinate2D(x: Float(x), y: Float(y)), layer: layer)
                 return (Double(p.x), Double(p.y))
             }
         }
-        let rowBytes = rows.map { ($0.span * bpp + 255) & ~255 }
+        let rowBytes = rows.indices.map { (rows[$0].span * (formats[$0] == .half ? 8 : 4) + 255) & ~255 }
         let offsets = rows.indices.map { i in rows.indices.prefix(i).reduce(0) { $0 + rowBytes[$1] * rows[$1].rows.count } }
         let length = rows.indices.reduce(0) { $0 + rowBytes[$1] * rows[$1].rows.count }
         poolLock.lock()
         var buffer = pool.firstIndex { $0.length >= length }.map { pool.remove(at: $0) }
-        if buffer == nil, buffersMade < Self.maxBuffers { buffersMade += 1; buffer = texture.device.makeBuffer(length: length, options: .storageModeShared) }
+        if buffer == nil, buffersMade < Self.maxBuffers { buffersMade += 1; buffer = device.makeBuffer(length: length, options: .storageModeShared) }
         poolLock.unlock()
         guard let buffer else { return nil }
         guard let blit = commandBuffer.makeBlitCommandEncoder() else { poolLock.lock(); pool.append(buffer); poolLock.unlock(); return nil }
         blit.label = "Brightness trace readback"
-        for (i, view) in views.enumerated() where view.slice < slices {
+        for (i, view) in views.enumerated() where formats[i] != nil {
             for (r, y) in rows[i].rows.enumerated() {
-                blit.copy(from: texture, sourceSlice: view.slice, sourceLevel: 0, sourceOrigin: MTLOrigin(x: rows[i].xMin, y: y, z: 0),
+                blit.copy(from: view.texture, sourceSlice: view.slice, sourceLevel: 0, sourceOrigin: MTLOrigin(x: rows[i].xMin, y: y, z: 0),
                           sourceSize: MTLSize(width: rows[i].span, height: 1, depth: 1), to: buffer,
                           destinationOffset: offsets[i] + r * rowBytes[i], destinationBytesPerRow: rowBytes[i], destinationBytesPerImage: rowBytes[i])
             }
         }
         blit.endEncoding()
-        return Readback(buffer: buffer, rows: rows, offsets: offsets, rowBytes: rowBytes, format: views.allSatisfy { $0.slice < slices } ? format : nil)
+        return Readback(buffer: buffer, rows: rows, offsets: offsets, rowBytes: rowBytes, formats: formats)
     }
 
     // Trace queue.
-    private func finish(_ id: Int, outputs: [[Double]?]) {
+    // Inputs are indexed by eye (left and right halves of the plane), outputs by view.
+    private func finish(_ id: Int, eyes: [String], outputs: [[Double]?]) {
         guard var record = pending.removeValue(forKey: id) else { return }
         let inputs = pendingInput.removeValue(forKey: id) ?? []
-        let names = outputs.count == 1 ? ["L"] : ["L", "R"]
-        record.eyes = outputs.enumerated().map { i, out in
-            BrightTraceEye(eye: i < names.count ? names[i] : "\(i)", input: inputs.indices.contains(i) ? inputs[i] : nil, output: out)
+        record.eyes = zip(eyes, outputs).map { eye, out in
+            let i = ["L", "R"].firstIndex(of: eye) ?? -1
+            return BrightTraceEye(eye: eye, input: inputs.indices.contains(i) ? inputs[i] : nil, output: out)
         }
         state.annotate(&record)
         summary.add(record)
@@ -197,14 +205,29 @@ final class BrightTraceSession {
 }
 
 extension Renderer {
-    // Both render paths, right after the video pass into `texture` (Metal: first drawable only). Caller checks
-    // BrightTraceSession.enabled.
-    func brightTrace(commandBuffer: MTLCommandBuffer, texture: MTLTexture, views: [BrightTraceSession.View], rateMap: MTLRasterizationRateMap?,
-                     queuedFrame: QueuedFrame, renderStartS: Double, presentS: Double) {
+    // Both render paths, right after the video pass (Metal: first drawable only). Caller checks BrightTraceSession.enabled.
+    // views: every eye, each from its own mapped texture and slice (layered, dedicated or shared layout).
+    func brightTrace(commandBuffer: MTLCommandBuffer, views: [BrightTraceSession.View], queuedFrame: QueuedFrame, renderStartS: Double, presentS: Double) {
         guard let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit, displayHeadroom: displayHeadroom) else { return }
-        BrightTraceSession.shared.frame(commandBuffer: commandBuffer, texture: texture, views: views, rateMap: rateMap, queuedFrame: queuedFrame, colour: colour,
+        BrightTraceSession.shared.frame(commandBuffer: commandBuffer, views: views, queuedFrame: queuedFrame, colour: colour,
                                         secret: VideoHandler.usesSecretPipeline(colour, format: CVPixelBufferGetPixelFormatType(queuedFrame.imageBuffer)),
                                         realityKit: isRealityKit, asyncDecode: EventHandler.shared.asyncDecode != nil, renderStartS: renderStartS,
                                         presentS: presentS, layerFormat: layerRenderer?.configuration.colorFormat, overlayAlpha: fadeInOverlayAlpha)
+    }
+
+    // Metal path: the drawable's views mapped to their colour textures, slices and rate maps.
+    static func brightTraceViews(_ drawable: LayerRenderer.Drawable) -> [BrightTraceSession.View] {
+        let maps = drawable.rasterizationRateMaps, textures = drawable.colorTextures
+        let targets = BrightTrace.targets(views: drawable.views.map { ($0.textureMap.textureIndex, $0.textureMap.sliceIndex) }, rateMaps: maps.count)
+        return zip(targets, drawable.views).compactMap { t, v in
+            guard t.texture < textures.count else { return nil }
+            return (t.eye, textures[t.texture], t.slice, v.textureMap.viewport, t.rateMap.map { maps[$0] }, t.layer)
+        }
+    }
+
+    // RealityKit path: one texture, a slice and rate map layer per eye.
+    static func brightTraceViews(texture: MTLTexture, viewports: [MTLViewport], rateMap: MTLRasterizationRateMap?) -> [BrightTraceSession.View] {
+        let targets = BrightTrace.targets(views: viewports.indices.map { (0, $0) }, rateMaps: rateMap == nil ? 0 : 1)
+        return zip(targets, viewports).map { t, v in (t.eye, texture, t.slice, v, rateMap, t.layer) }
     }
 }
