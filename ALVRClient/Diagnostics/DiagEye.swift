@@ -5,7 +5,7 @@ import simd
 // UserDefaults is read only when the shared flag is first accessed.
 final class EyeBadgeFlag {
     static let defaultsKey = "ALVREyeBadges"
-    static let shared = EyeBadgeFlag(defaultsValue: UserDefaults.standard.object(forKey: defaultsKey) as? Bool)
+    // `shared` (launch argument over the settings control) is declared in Entry/EntryControls.swift, the app target only.
     private let lock = NSLock()
     private var cachedEnabled: Bool
 

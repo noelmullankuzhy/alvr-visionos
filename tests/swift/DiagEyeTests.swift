@@ -75,9 +75,9 @@ import simd
                "main renderer gates creation and encoding on live flag")
         expect(!renderer.contains("self.diagEye = layerRenderer != nil && Diag.isOn"), "Diagnostics does not create badges")
         let entry = try String(contentsOfFile: "ALVRClient/Entry/Entry.swift", encoding: .utf8)
-        expect(entry.contains("@AppStorage(EyeBadgeFlag.defaultsKey)"), "UI persists eye badge setting")
+        expect(entry.contains("$gStore.settings.eyeBadges"), "UI persists eye badge setting")
         expect(entry.contains("Eye badges (L/R)"), "explicit Advanced Settings label")
-        expect(entry.contains("EyeBadgeFlag.shared.update(defaultsValue: eyeBadgesEnabled)"), "UI updates live cache")
+        expect(entry.contains("EyeBadgeFlag.shared.update(defaultsValue: LaunchFlags.bool(EyeBadgeFlag.defaultsKey, setting: gStore.settings.eyeBadges))"), "UI updates live cache")
         let ramp = try String(contentsOfFile: "ALVRClient/Diagnostics/EDRRenderer.swift", encoding: .utf8)
         expect(ramp.contains("badge?.encode"), "EDR uses same badge")
         expect(ramp.contains("DiagEye.shouldDraw(badgesEnabled: EyeBadgeFlag.shared.enabled, isRealityKit: false)"),

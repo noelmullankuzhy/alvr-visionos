@@ -139,7 +139,7 @@ class EventHandler: ObservableObject {
     var av1InstantiatedForReal = false
     var frameQueueLock = NSObject()
     // -ALVRAsyncDecode YES: pipelined hardware decode, at most DecodeInFlight.limit frames in flight; nil decodes synchronously.
-    let asyncDecode: DecodeGate? = UserDefaults.standard.bool(forKey: DecodeInFlight.asyncDefaultsKey) ? DecodeGate() : nil
+    let asyncDecode: DecodeGate? = LaunchFlags.bool(DecodeInFlight.asyncDefaultsKey, setting: ALVRClientApp.gStore.settings.asyncDecode) ? DecodeGate() : nil
 
     var frameQueue = [QueuedFrame]()
     var frameQueueLastTimestamp: UInt64 = 0
@@ -1027,7 +1027,7 @@ class EventHandler: ObservableObject {
                 // setting, reference white and SDR output policy, the server's encoding gamma and the foveation. Decode and
                 // render threads read only these; a setting changed mid-stream applies to the next stream.
                 let foveation = Settings.getAlvrSettings().map { FFR.calculateFoveationVars(alvrEvent: started, foveationSettings: $0.video.foveated_encoding) }
-                let whiteOverride = UserDefaults.standard.double(forKey: HDRPipeline.referenceWhiteDefaultsKey)
+                let whiteOverride = LaunchFlags.double(HDRPipeline.referenceWhiteDefaultsKey, setting: ALVRClientApp.gStore.settings.hdrReferenceWhiteNits)
                 let serverWhite = Settings.getAlvrSettings()?.video.encoder_config?.hdr?.reference_white_nits
                 let (referenceWhite, whiteSource) = HDRPipeline.resolveReferenceWhite(defaultsValue: whiteOverride, serverValue: serverWhite)
                 let videoStream = EventHandler.videoStreams.streamStarted(

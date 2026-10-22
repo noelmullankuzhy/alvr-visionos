@@ -155,7 +155,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     var roundTripRenderTime: Double = 0.0
     var lastRoundTripRenderTimestamp: Double = 0.0
     // Opt-in deadline-budgeted frame selection (UserDefaults ALVRDeadlineSelect); off keeps the 5 ms poll.
-    let deadlineSelect = UserDefaults.standard.bool(forKey: FramePacing.defaultsKey)
+    let deadlineSelect = LaunchFlags.bool(FramePacing.defaultsKey, setting: ALVRClientApp.gStore.settings.deadlineSelect)
     let gpuTimes = GpuTimeEstimator()
     var lastVideoPipelineRequestTime: Double = 0.0
     var loggedPQBindFailures = Set<OSType>()
@@ -205,7 +205,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     private let displayHeadroomSource: String
 
     init(_ layerRenderer: LayerRenderer?, offlineDiagnostics: Bool = false, displayFullImmersion: Bool = false) {
-        let headroomOverride = UserDefaults.standard.double(forKey: HDRPipeline.headroomDefaultsKey)
+        let headroomOverride = LaunchFlags.double(HDRPipeline.headroomDefaultsKey, setting: ALVRClientApp.gStore.settings.hdrHeadroom)
         self.displayFullImmersion = layerRenderer != nil && displayFullImmersion
         self.displayHeadroom = HDRPipeline.headroom(defaultsValue: headroomOverride, fullImmersion: layerRenderer != nil && displayFullImmersion)
         self.displayHeadroomSource = headroomOverride >= 1 ? "override" : "measured"

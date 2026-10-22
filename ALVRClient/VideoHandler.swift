@@ -176,7 +176,7 @@ struct VideoHandler {
             print("VTDecompressionSessionCreate err?! \(err)")
             return (nil, nil)
         }
-        let realTime = UserDefaults.standard.bool(forKey: DecodeInFlight.realTimeDefaultsKey)
+        let realTime = LaunchFlags.bool(DecodeInFlight.realTimeDefaultsKey, setting: ALVRClientApp.gStore.settings.decodeRealTime)
         if realTime, let decompressionSession {
             let status = VTSessionSetProperty(decompressionSession, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
             print("Decoder RealTime=true status \(status)")
@@ -892,7 +892,7 @@ struct VideoHandler {
             output: output)
     }
     // Drawable primaries policy for SDR, read once per launch: extended linear sRGB unless ALVRDisplayP3Output is set.
-    static let colourOutput = ColourOutput(displayP3Default: UserDefaults.standard.bool(forKey: ColourOutput.displayP3DefaultsKey))
+    static let colourOutput = ColourOutput(displayP3Default: LaunchFlags.bool(ColourOutput.displayP3DefaultsKey, setting: ALVRClientApp.gStore.settings.displayP3Output))
 
     // Colour state of the frame's own stream: its format description, its decoded buffer's actual pixel format (the
     // decoder may ignore the explicit 10-bit request) and the stream context captured at STREAMING_STARTED (decision
