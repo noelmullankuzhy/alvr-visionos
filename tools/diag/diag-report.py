@@ -3,11 +3,14 @@
 import argparse
 from collections import defaultdict
 import html
+import importlib.util
 import json
 import math
 from pathlib import Path
 import re
+import struct
 import sys
+import zlib
 
 SECTIONS = (
     'Device / OS / build and session timeline', 'M1 formats / API and codec audit',
@@ -736,8 +739,191 @@ def grating_above_nyquist(records):
     return rows
 
 
-def resolution_report(records):
-    selected = [r for r in records if r['topic'] in ('rrm', 'grating')]
+CHART_PATCH_DEG = 1.5
+BAR_MIN_CONTRAST = 32     # 8-bit levels: a flatter patch has no bars
+BAR_HYSTERESIS = 0.15     # of the patch's contrast, either side of the local mean
+BAR_GREY = (64, 192)      # a sample strictly inside is grey (bars merged), not a bar or a gap
+BAR_MISSING_GREY = 0.25   # fraction of grey samples above which a low count is missing, not aliased
+
+
+def expected_bars(cpd, size_deg=CHART_PATCH_DEG):
+    """One white bar per cycle, the last one clipped: ceil(1.5 * cpd), as GratingChart.bars draws."""
+    return int(math.ceil(size_deg * cpd - 1e-9))
+
+
+def count_bars(profile, period_px):
+    """Bars in a 1-D luminance profile (0-255) across a patch: a run above the local mean (moving mean over two
+    expected periods, clipped at the ends) by BAR_HYSTERESIS of the contrast starts a bar; one as far below ends it.
+    Widths are run lengths in px; spreads (max - min) leave out runs touching either end (clipped by the patch)."""
+    n = len(profile)
+    result = dict(count=0, bar_widths=[], gap_widths=[], bar_spread_px=None, gap_spread_px=None,
+                  contrast=(max(profile) - min(profile)) if profile else 0,
+                  grey_fraction=sum(BAR_GREY[0] < v < BAR_GREY[1] for v in profile) / n if n else 0)
+    if n < 2 or result['contrast'] < BAR_MIN_CONTRAST:
+        return result
+    half = max(1, int(round(period_px)))
+    prefix = [0]
+    for v in profile:
+        prefix.append(prefix[-1] + v)
+    band = BAR_HYSTERESIS * result['contrast']
+    runs, high, start = [], None, 0
+    for i, v in enumerate(profile):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        mean = (prefix[hi] - prefix[lo]) / (hi - lo)
+        if high is None:
+            high = v > mean
+        elif not high and v > mean + band or high and v < mean - band:
+            runs.append((high, start, i))
+            high, start = not high, i
+    runs.append((high, start, n))
+    bars = [(b - a, a == 0 or b == n) for h, a, b in runs if h]
+    gaps = [(b - a, a == 0 or b == n) for h, a, b in runs if not h]
+    result['count'] = len(bars)
+    result['bar_widths'] = [w for w, _ in bars]
+    result['gap_widths'] = [w for w, _ in gaps]
+    for name, items in (('bar_spread_px', bars), ('gap_spread_px', gaps)):
+        inner = [w for w, edge in items if not edge] or [w for w, _ in items]
+        result[name] = max(inner) - min(inner) if inner else None
+    return result
+
+
+def classify_bars(result, expected):
+    """correct: count as drawn, widths within one pixel (rasterisation quantises edges to whole px); uneven: count
+    right, widths spread more; missing: count low where the bars merged to grey (or the patch is flat); aliased:
+    any other wrong count (full-contrast beats)."""
+    if result['count'] == expected:
+        spreads = [s for s in (result['bar_spread_px'], result['gap_spread_px']) if s is not None]
+        return 'correct' if all(s <= 1 for s in spreads) else 'uneven'
+    if result['contrast'] < BAR_MIN_CONTRAST or result['count'] < expected and result['grey_fraction'] > BAR_MISSING_GREY:
+        return 'missing'
+    return 'aliased'
+
+
+def patch_profile(width, height, pixels, rect, orientation):
+    """Mean RGB across the centre band (middle half) of the physical rect, along the axis that crosses the bars
+    (V: x, H: y). rect is [x0, y0, x1, y1] in physical px; pixel i is inside when its centre is."""
+    x0, y0, x1, y1 = [int(math.floor(v + 0.5)) for v in rect]
+    x0, x1 = max(0, x0), min(width, x1)
+    y0, y1 = max(0, y0), min(height, y1)
+    if x1 <= x0 or y1 <= y0:
+        return []
+
+    def level(x, y):
+        i = (y * width + x) * 4
+        return (pixels[i] + pixels[i + 1] + pixels[i + 2]) / 3
+    if orientation == 'V':
+        quarter = (y1 - y0) // 4
+        rows = range(y0 + quarter, max(y1 - quarter, y0 + quarter + 1))
+        return [sum(level(x, y) for y in rows) / len(rows) for x in range(x0, x1)]
+    quarter = (x1 - x0) // 4
+    cols = range(x0 + quarter, max(x1 - quarter, x0 + quarter + 1))
+    return [sum(level(x, y) for x in cols) / len(cols) for y in range(y0, y1)]
+
+
+def read_capture_png(path):
+    spec = importlib.util.spec_from_file_location('verify_capture', Path(__file__).with_name('verify-capture.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.read_png(path)
+
+
+def chart_captures(directory):
+    """capture.json files with a chart_capture key under the pulled directory (captures/ or diag/captures/)."""
+    found = []
+    for path in sorted(Path(directory).rglob('capture.json')):
+        try:
+            data = json.loads(path.read_text(encoding='utf-8'), parse_constant=reject_json_constant)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get('chart_capture'), dict):
+            found.append((path.parent, data))
+    return found
+
+
+def chart_capture_patches(directory):
+    """Per captured patch: bars counted in the physical texture and classified (count_bars, classify_bars)."""
+    rows = []
+    for folder, data in chart_captures(directory):
+        chart = data['chart_capture']
+        images = {}
+        for view in chart.get('views', []):
+            png = next((s.get('png') for s in data.get('slices', []) if s.get('texture_index') == view.get('texture_index')
+                        and s.get('slice') == view.get('slice')), None)
+            if png is None:
+                continue
+            if png not in images:
+                try:
+                    images[png] = read_capture_png(folder / png)
+                except (OSError, ValueError, struct.error, zlib.error):
+                    images[png] = None
+            if images[png] is None:
+                continue
+            width, height, pixels = images[png]
+            for patch in view.get('patches', []):
+                cpd = number(patch.get('cpd'))
+                rect = patch.get('physical_rect')
+                if cpd is None or not isinstance(rect, list) or len(rect) != 4:
+                    continue
+                profile = patch_profile(width, height, pixels, rect, patch.get('orientation'))
+                result = count_bars(profile, len(profile) / (CHART_PATCH_DEG * cpd))
+                expected = expected_bars(cpd)
+                logical = number(patch.get('nyquist_logical_cpd'))
+                rows.append(dict(eye=view.get('eye'), rq=chart.get('rq'), rq_set=chart.get('rq_set'), fov=chart.get('fov'),
+                                 pos=patch.get('position'),
+                                 above_nyquist='unknown' if logical is None else 'yes' if cpd > logical * 1.001 else 'no',
+                                 orient=patch.get('orientation'), cpd=int(cpd), expected=expected, count=result['count'],
+                                 bar_spread_px=result['bar_spread_px'], gap_spread_px=result['gap_spread_px'],
+                                 period_px='{:.2f}'.format(len(profile) / (CHART_PATCH_DEG * cpd)),
+                                 **{'class': classify_bars(result, expected)},
+                                 nyquist_logical_cpd=logical,
+                                 nyquist_physical_capture_cpd=number(patch.get('nyquist_physical_cpd')),
+                                 dir=folder.name, t_ms=number(data.get('t_ms'))))
+    return rows
+
+
+def chart_capture_summary(patches, records):
+    """Per capture, eye, position and orientation: the finest correct and finest count-correct cpd, both Nyquists
+    and the grid verdict (grating_limit on the finest count-correct level). Patches above their logical Nyquist
+    (above_nyquist=yes, 0.1 % slack as grating_rows) are listed apart and never count as finest. A patch counting right
+    above either physical Nyquist (its own capture value, or the rrm value of the set) is suspect: the grid cannot carry
+    it, so the count is a coincidence or the rect is wrong; listed in suspect_cpd and never the finest."""
+    groups = {}
+    for p in patches:
+        groups.setdefault((p['dir'], p['eye'], p['rq'], p['rq_set'], p['fov'], p['pos'], p['orient']), []).append(p)
+    rows = []
+    for (folder, eye, rq, rq_set, fov, pos, orient), items in groups.items():
+        logical = [p['nyquist_logical_cpd'] for p in items if p['nyquist_logical_cpd'] is not None]
+        captured = [p['nyquist_physical_capture_cpd'] for p in items if p['nyquist_physical_capture_cpd'] is not None]
+        line = next((r for r in records if r['topic'] == 'chartcap' and r['fields'].get('dir') == folder
+                     and r['fields'].get('eye') == eye), None)
+        physical = grating_physical_nyquist(records, line['source'], eye, rq, fov, pos, orient, line['t_ms']) if line else None
+
+        def above_physical(p):
+            return any(n is not None and p['cpd'] > n * 1.001 for n in (p['nyquist_physical_capture_cpd'], physical))
+        suspect = [p for p in items if p['above_nyquist'] != 'yes' and p['count'] == p['expected'] and above_physical(p)]
+        within = [p for p in items if p['above_nyquist'] != 'yes' and p not in suspect]
+        correct = [p['cpd'] for p in within if p['class'] == 'correct']
+        counted = [p['cpd'] for p in within if p['count'] == p['expected']]
+        reference = physical if physical is not None else (min(captured) if captured else None)
+        limit = grating_limit(max(counted) if counted else None, reference)
+        rows.append(dict(eye=eye, rq=rq, rq_set=rq_set, fov=fov, pos=pos, orient=orient,
+                         above_nyquist_cpd=','.join(str(p['cpd']) for p in sorted(items, key=lambda p: p['cpd'])
+                                                    if p['above_nyquist'] == 'yes') or None,
+                         finest_correct_cpd=max(correct) if correct else None,
+                         finest_count_correct_cpd=max(counted) if counted else None,
+                         nyquist_logical_cpd='{:.2f}'.format(min(logical)) if logical else None,
+                         nyquist_physical_cpd='{:.2f}'.format(physical) if physical is not None else None,
+                         nyquist_physical_capture_cpd='{:.2f}'.format(min(captured)) if captured else None,
+                         grid_verdict={'render-grid limited': 'carries to grid Nyquist',
+                                       'lens/eye limited': 'below grid Nyquist'}.get(limit, limit),
+                         suspect_cpd=','.join(str(c) for c in sorted(p['cpd'] for p in suspect)) or None,
+                         classes=','.join('{}:{}'.format(p['cpd'], p['class']) for p in sorted(items, key=lambda p: p['cpd'])),
+                         dir=folder))
+    return sorted(rows, key=lambda r: tuple(str(r[k]) for k in ('eye', 'rq', 'rq_set', 'fov', 'pos', 'orient', 'dir')))
+
+
+def resolution_report(records, directory=None):
+    selected = [r for r in records if r['topic'] in ('rrm', 'grating', 'chartcap')]
     lines = section(SECTIONS[12], selected)
     lines += ['Rendered density: physical px per degree from the rasterization rate map (finite difference of '
               'physicalCoordinates(screenCoordinates:layer:) times logical px/deg, which grows as sec² off axis), '
@@ -760,6 +946,26 @@ def resolution_report(records):
     lines += ['Above the logical Nyquist (aliased on the render grid; not counted as seen):', '']
     lines += table(grating_above_nyquist(records), ('eye', 'rq', 'fov', 'pos', 'orient', 'cpd', 'seen',
                                                     'nyquist_logical_cpd', 'run', 'source')) + ['']
+    patches = chart_capture_patches(directory) if directory is not None else []
+    lines += ['Auto capture (chart read back from each eye\'s physical texture; bars counted per patch across the centre '
+              'band of its physical rect). finest_correct_cpd: count as drawn and widths within 1 px; '
+              'finest_count_correct_cpd: count as drawn. nyquist_physical_cpd: nearest rrm sample (as above); '
+              'nyquist_physical_capture_cpd: the capture\'s own rate map at each patch, lowest in the set (temporal20 '
+              'patches sit 16-26° out on a steep falloff, so this is the outermost patch, not the 20° rrm value). '
+              'suspect_cpd: counted right above either physical Nyquist (its own capture value or the rrm value): '
+              'listed, never the finest. grid_verdict: '
+              'carries to grid Nyquist = finest count-correct within one level of the physical Nyquist; below grid '
+              'Nyquist = it fails earlier; undetermined = no Nyquist or nothing counted. rq_set: the quality requested '
+              '(rq=unavailable without read-back). Patches above their logical Nyquist (above_nyquist_cpd) are '
+              'counted and listed but never the finest.', '']
+    lines += table(chart_capture_summary(patches, records),
+                   ('eye', 'rq', 'rq_set', 'fov', 'pos', 'orient', 'finest_correct_cpd', 'finest_count_correct_cpd',
+                    'nyquist_logical_cpd', 'nyquist_physical_cpd', 'nyquist_physical_capture_cpd', 'grid_verdict',
+                    'suspect_cpd', 'above_nyquist_cpd', 'classes', 'dir')) + ['']
+    lines += ['Auto capture patches (correct / uneven: count right, widths within 1 px or not; missing: count low, bars '
+              'merged to grey or flat; aliased: count wrong at full contrast):', '']
+    lines += table(patches, ('eye', 'rq', 'fov', 'pos', 'orient', 'cpd', 'expected', 'count', 'bar_spread_px', 'gap_spread_px',
+                             'period_px', 'class', 'above_nyquist', 'nyquist_physical_capture_cpd', 'dir')) + ['']
     lines += measurements(selected, ('phase', 's', 'fix', 'eye', 'rq', 'fov', 'cpd', 'orient', 'seen')) + ['']
     return lines
 
@@ -893,9 +1099,9 @@ def generate(directory, sender_path=None):
     lines += table(corner_rows(records), ('eye', 'pos_deg', 'ring_pct', 'radius', 'shape', 'superellipse_n', 'area_frac', 'kind', 'sides', 'cuts', 'visible_area_frac', 'mark_source', 'summary_source')) + ['']
     lines += measurements(selected, ('eye', 'pos_deg', 'ring_pct', 'r', 'shape', 'superellipse_n', 'area_frac')) + ['']
     lines += dots_report(records)
-    lines += resolution_report(records)
+    lines += resolution_report(records, directory)
     selected = topics('eye_badge', 'diag')
-    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session', 'rrm', 'grating'}
+    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session', 'rrm', 'grating', 'chartcap'}
     unknown = [r for r in records if r['topic'] not in known]
     lines += section(SECTIONS[10], selected + unknown, malformed + bad_sender + errors)
     lines += ['malformed lines skipped={}; malformed sender lines skipped={}; input file errors={}'.format(len(malformed), len(bad_sender), len(errors)), '',

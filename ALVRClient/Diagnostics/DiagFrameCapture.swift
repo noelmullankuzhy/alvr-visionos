@@ -278,7 +278,7 @@ enum DiagStreamStages {
 import CompositorServices
 
 final class DiagFrameCaptureSession {
-    private let gate = DiagCaptureGate(requests: DiagCaptureRequests.shared)
+    private let gate = DiagCaptureGate(requests: DiagCaptureRequests.shared, slot: DiagReadbackSlot.shared)
     private var lastWait: String?   // render thread only: log each wait reason once, not per frame
     // Request-file poll: a utility timer, never the render thread. The session exists only with diagnostics on.
     private let requestFile: DiagCaptureRequestFile

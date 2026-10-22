@@ -439,12 +439,12 @@ struct Entry: View {
                                 saveAction()
                             }
                             Picker(selection: $gStore.settings.resolutionChart) {
-                                ForEach(CornerChartMode.allCases, id: \.rawValue) {
-                                    Text($0.rawValue).tag($0.rawValue)
+                                ForEach(ResolutionChartSetting.choices, id: \.self) {
+                                    Text($0).tag($0)
                                 }
                             } label: {
                                 Text("Resolution chart")
-                                Text("With no stream, corner chart off: 20 s fixation dot (rate-map log), then grating patches 8-20 cycles/deg at 0.5/0.75/1.0 render quality. Pinch right/left: next/previous; hold right: seen; hold left: not seen (or d-pad, A, B).")
+                                Text("With no stream, corner chart off: 20 s fixation dot (rate-map log), then grating patches 8-20 cycles/deg at 0.5/0.75/1.0 render quality. Pinch right/left: next/previous; hold right: seen; hold left: not seen (or d-pad, A, B). Auto capture: no input; captures each quality to Documents/diag/captures (about 2 min, done at donE).")
                                     .font(.system(size: 10))
                             }
                             .pickerStyle(.menu)

@@ -458,6 +458,21 @@ final class DiagCaptureRequests {
         return filePending
     }
 
+    // Would take() hand out a request on this frame? Consumes nothing; keeps the same first-frame stamps as take(), so the
+    // start timer and after_ms count from the first frame either one sees.
+    func due(nowMs: Int, idle: Bool, streamFrame: Bool = false) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard count < 24 else { return false }
+        guard idle else {
+            guard streamFrame else { return false }
+            if firstStreamMs == nil { firstStreamMs = nowMs }
+            return filePending || afterMs.map { !afterTaken && nowMs - firstStreamMs! >= $0 } ?? false
+        }
+        firstStreamMs = nil; afterTaken = false
+        if firstIdleMs == nil { firstIdleMs = nowMs }
+        return !marks.isEmpty || !timerTaken && nowMs - firstIdleMs! >= 3000
+    }
+
     func take(nowMs: Int, idle: Bool, streamFrame: Bool = false) -> Request? {
         lock.lock(); defer { lock.unlock() }
         guard count < 24 else { return nil }
@@ -502,21 +517,56 @@ final class DiagCaptureGate {
     let requests: DiagCaptureRequests
     private let lock = NSLock()
     private var busy = false
-    init(requests: DiagCaptureRequests) { self.requests = requests }
+    // With a slot: wait (requests stay pending) while another readback holds it; hold it from a request to finished().
+    private let slot: DiagReadbackSlot?
+    init(requests: DiagCaptureRequests, slot: DiagReadbackSlot? = nil) { self.requests = requests; self.slot = slot }
 
     func next(nowMs: Int, idle: Bool, streamFrame: Bool) -> Outcome {
         lock.lock(); defer { lock.unlock() }
         if busy { return .busy(pendingStreaming: requests.streamingPending) }
+        // A request first, then the slot: with nothing due, another readback in flight is not a wait.
+        if let slot {
+            guard requests.due(nowMs: nowMs, idle: idle, streamFrame: streamFrame) else { return nothingTaken(idle: idle, streamFrame: streamFrame) }
+            guard slot.acquire(Self.slotName) else { return .waiting("readback_in_flight") }
+        }
         if let request = requests.take(nowMs: nowMs, idle: idle, streamFrame: streamFrame) {
             busy = true
             return .request(request)
         }
-        if !idle && !streamFrame && requests.streamingPending { return .waiting("no_stream_frame") }
-        return .none
+        slot?.release(Self.slotName)
+        return nothingTaken(idle: idle, streamFrame: streamFrame)
+    }
+
+    private func nothingTaken(idle: Bool, streamFrame: Bool) -> Outcome {
+        !idle && !streamFrame && requests.streamingPending ? .waiting("no_stream_frame") : .none
     }
 
     func finished() {
-        lock.lock(); busy = false; lock.unlock()
+        lock.lock(); busy = false; slot?.release(Self.slotName); lock.unlock()
+    }
+
+    static let slotName = "frame_capture"
+}
+
+// One full drawable readback in flight per process (the frame-capture session and the resolution chart's auto capture
+// each read back whole drawables, up to ~500 MB with foveation off): held from submit until the write finishes.
+final class DiagReadbackSlot {
+    static let shared = DiagReadbackSlot()
+    private let lock = NSLock()
+    private var owner: String?
+
+    var holder: String? { lock.lock(); defer { lock.unlock() }; return owner }
+
+    func acquire(_ who: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard owner == nil else { return false }
+        owner = who
+        return true
+    }
+
+    // Only the holder releases.
+    func release(_ who: String) {
+        lock.lock(); if owner == who { owner = nil }; lock.unlock()
     }
 }
 

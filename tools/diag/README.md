@@ -879,6 +879,114 @@ look at it. Both eyes labels a binocular judgment. Starting a stream replaces th
 chart; leaving mid-walk does not restore the quality of that (discarded) layer.
 Do not run the render quality sweep at the same time (both set the quality).
 
+### Auto capture (no judgement)
+
+What the renderer actually draws, counted from the pixels; the manual walk above
+stays for the lens/eye check.
+
+1. **Diagnostics** on, **Corner chart** Off, **Resolution chart** = **Auto capture**
+   (Render quality sweep off, streamer disconnected). **Enter diagnostics**, keep
+   the headset on (or still) for about 2 minutes: the 20 s dot sweep, then for render
+   quality 0.5, 0.75 and 1.0 the chart is drawn in both eyes with no frame, the
+   status showing the quality. Per quality the client waits for the rate map to
+   settle: the map's screen size within 1 % of the expected size for that quality
+   (clamped to the layer's maximum) for 30 consecutive frames (`settle=rate_map`).
+   The expected size scales the map's screen size at the entry quality by
+   (0.5 + 0.5 q) / (0.5 + 0.5 q_entry), fitted on the 22 Oct device run (1.0
+   6261x5023, 0.75 5479x4395, 0.5 4696x3767). The quality read-back is not used when
+   there is a map: it echoes the setter at once while visionOS animates the map over
+   many frames (22 Oct: the 0.5 capture was taken at 5321x4269, 34 px/deg, mid
+   animation). With no map at entry the read-back confirms, as before
+   (`settle=render_quality`). Then it reads back every colour texture of that drawable
+   after the chart pass (the physical texture as rendered through the rate map, PNG
+   per slice) into `Documents/diag/captures/chart-<UTC>-rq<q>-fov<on|off>/`, waits for
+   the write and steps on. Not settled after 600 frames: captured anyway,
+   `confirmed=no settle=timeout`. At the end the previous quality is restored and the
+   status reads `donE`. Leave the space.
+2. Foveation off: the layer's foveation is fixed when the space is configured, so
+   the client cannot drop it mid-run (`fov_off=unavailable`). For the off pass set
+   **Resolution chart foveation** off and enter again; that run logs `fov=off` and
+   its captures are named `fovoff`.
+3. Pull (`pull-diag.sh`, which copies `captures/`) and run `diag-report.py` on the
+   pulled directory; it finds every `capture.json` with `chart_capture` below it.
+
+```
+DIAG chartcap step=start fov=on|off fov_off=unavailable|this_pass why=.. restore=<rq> reference_screen=WxH|none
+DIAG chartcap step=quality rq_set=0.500 rq=<read back> expected_screen=WxH|none
+DIAG chartcap eye=L|R rq=<read back>|unavailable rq_set confirmed=yes|no fov=on|off dir=chart-.. slice
+              screen=WxH physical=WxH expected_screen=WxH|none settle=rate_map|render_quality|timeout patches=24
+DIAG chartcap step=done captures=3 failed=0 fov fov_off restore=<rq>
+DIAG chartcap error=capture_failed dir=..   (with DIAG capture error=..)
+DIAG chartcap error=encoder_nil rq_set=..   (no render encoder that frame)
+```
+
+A failed capture (no encoder, failed write) counts in `failed=` and the walk moves
+on, so it always reaches `done` and restores the entry quality. One full drawable
+readback is in flight per process: while a **Capture diagnostic frames** capture
+is being written the chart capture retries on the next frame, and a frame-capture
+request waits (`capture_trigger step=waiting why=readback_in_flight`, kept pending)
+while a chart capture is being written. The gate checks for a due request before it
+takes the slot, so a chart write with no request logs no waiting line. The slot
+covers the whole frame capture, sharpness-chain stages included (one submit).
+
+`capture.json` is the frame-capture format (`slices`: eye, view, slice, png, width,
+height, pixel format, `rate_map` tables) plus `trigger.reason=chartcap` and
+`chart_capture`: `mode=auto`, `rq` (read back), `rq_set`, `rq_confirmed`, `fov`,
+`settle_frames`, `settle`, `expected_screen`, `patch_deg`, and `views[]` with `eye, view, slice, texture_index,
+tangents [l,r,b,t], viewport [x,y,w,h], screen [w,h], physical [w,h], mapped` and
+`patches[]`: `position, cpd, orientation, temporal_deg, up_deg, expected_bars,
+logical_rect, physical_rect` (`[x0,y0,x1,y1]`, px, origin top left, y down: the
+patch's quad corners mapped through `physicalCoordinates(screenCoordinates:layer:)`
+of that frame's map), `nyquist_logical_cpd` and `nyquist_physical_cpd` (logical ×
+the map's rate across the bars at the patch centre). It sits next to the frame
+capture's own keys (`debug_eye_tangents`, `stages`, `resample_chain`); a chart capture
+has no stages.
+
+Counting (pure Python, `count_bars` / `classify_bars`): the profile is the mean RGB
+across the middle half of the physical rect, along the axis that crosses the bars
+(V: x, H: y), one sample per physical pixel whose centre is inside the rect. A bar
+starts where the level rises above the local mean (moving mean over two expected
+periods) by 15 % of the patch's contrast and ends where it falls as far below it.
+Expected count: ceil(1.5 × cpd), as drawn (12, 15, 18, 21, 26, 30).
+- `correct`: count as drawn, bar and gap widths within 1 px of each other
+  (rasterisation quantises edges to whole pixels; runs touching the rect edge are
+  left out of the spread).
+- `uneven`: count as drawn, widths spread more than 1 px.
+- `missing`: count low where the bars merged to grey (over 25 % of samples between
+  64 and 192), or the patch is flat (contrast under 32 levels; e.g. exactly one
+  pixel per cycle: every pixel centre at the same phase).
+- `aliased`: any other wrong count (full-contrast beats).
+
+The counter assumes: white bars on black, sRGB 8-bit PNGs as written by
+`DiagFrameCapture`, axis-aligned bars (the Fick tilt across a 20° temporal patch is
+under half a pixel), no MSAA resolve or display blur (it reads the render target,
+not the panel or the lens), and that the rate map is separable so the mapped
+corners bound the rect. Decoding is the stdlib PNG reader in `verify-capture.py`
+(no numpy/PIL); a 2432x2368 slice takes seconds, a 6261x5023 foveation-off slice
+tens of seconds.
+
+The report adds two tables to Resolution measurement: per capture, eye, quality,
+foveation, position and orientation the finest `correct` and finest count-correct
+cpd, `nyquist_logical_cpd`, `nyquist_physical_cpd` (nearest `rrm` sample of the same
+eye, rq and fov, found through the `DIAG chartcap` line with that `dir`, as for the
+manual walk), `nyquist_physical_capture_cpd` (the capture's own map, lowest patch
+in the set), `grid_verdict` (`carries to grid Nyquist`: finest count-correct within
+one level of the physical Nyquist; `below grid Nyquist`: fails earlier;
+`undetermined`) and `suspect_cpd`, with each level's class; then every patch with
+expected / counted bars, spreads, class and its own capture Nyquist.
+
+`suspect`: a patch counting right above either physical Nyquist (its own capture
+value or the rrm value of the set) cannot be carried by the grid, so the count is a
+coincidence or the rect is wrong; it is listed and never the finest. Off-axis
+Nyquist (22 Oct): the temporal20 patches are not all at 20°; each cpd sits at its own
+temporal angle (8 at 20°, 10 at 22°, 12 at 18°, 14 at 24°, 17 at 16°, 20 at 26°) on
+the steep foveation falloff, so each has its own physical Nyquist (V at rq 1.0: 17.1,
+12.1, 19.1, 10.5, 18.7, 9.1). The capture column shows the lowest (the 26° patch), the
+rrm column the 20° line value, hence 9.1 vs 17.1. The corner mapping is right: the
+map is separable, the rect width over the logical width agrees with the centre rate
+within the falloff across 1.5°, and the period in physical px (14 at 24°: 1.4 px;
+17 at 16°: 2.2 px) explains `14:aliased, 17:correct`.
+
 ## Repeatable diagnostic report (D8)
 
 ```sh
