@@ -1,17 +1,24 @@
 {
- "about": "Boundary dots projection overlay: one input set, one expected set, checked by tests/swift/ProjectionOverlayTests.swift (ProjectionOverlay.swift) and tools/diag/test_boundary_outline_report.py (diag-report.py) so the Swift and Python formulas agree (tan to 0.001, px/deg to 0.1). Tangents are m5_view left,right,bottom,top; foveation is cx,cy,rx,ry,shx,shy (points-chart-avp.tsv); expected boxes are tan left,right,up,down, positive away from the eye axis. Swift draws lens outlines from its compiled reference + offset_deg; Python from the logged rays.",
+ "about": "Boundary dots projection overlay: one input set, one expected set, checked by tests/swift/ProjectionOverlayTests.swift (ProjectionOverlay.swift) and tools/diag/test_boundary_outline_report.py (diag-report.py) so the Swift and Python formulas agree (tan to 0.001, px/deg to 0.1). Tangents are m5_view left,right,bottom,top; foveation is cx,cy,rx,ry,shx,shy (points-chart-avp.tsv); expected boxes are tan left,right,up,down, positive away from the eye axis. shape measured (W34): Swift draws the outline from its compiled reference + offset_deg, Python from the logged rays. shape lens: the model lens (BoundaryDotsLensModel, lens_model.py), whose bbox is its inset rectangle (inset_deg).",
  "cases": [
   {
-   "name": "L lens offset 0, a100-axis-C",
-   "eye": "L", "tangents": [1.7321, 1.0, 1.1918, 1.0], "shape": "lens", "offset_deg": 0,
+   "name": "L lens inset 15, a100-axis-C",
+   "eye": "L", "tangents": [1.7321, 1.0, 1.1918, 1.0], "shape": "lens", "inset_deg": 15,
+   "foveation": [0.5, 0.45, 3, 3, 0.536, -0.159], "render_px": [4176, 3333],
+   "expect": {"bbox_tan": [1.0000, 0.5774, 0.5774, 0.7002], "fov_rect_tan": [0.6820, 0.6840, 0.4910, 0.4934],
+              "pxdeg_frustum": 26.54, "pxdeg_bbox": 45.53}
+  },
+  {
+   "name": "L measured offset 0, a100-axis-C",
+   "eye": "L", "tangents": [1.7321, 1.0, 1.1918, 1.0], "shape": "measured", "offset_deg": 0,
    "rays": "0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5",
    "foveation": [0.5, 0.45, 3, 3, 0.536, -0.159], "render_px": [4176, 3333],
    "expect": {"bbox_tan": [0.8851, 0.7673, 0.6154, 0.6371], "fov_rect_tan": [0.6820, 0.6840, 0.4910, 0.4934],
               "pxdeg_frustum": 26.54, "pxdeg_bbox": 44.11}
   },
   {
-   "name": "R lens offset +5, a100-axis-C",
-   "eye": "R", "tangents": [1.0, 1.7321, 1.1918, 1.0], "shape": "lens", "offset_deg": 5,
+   "name": "R measured offset +5, a100-axis-C",
+   "eye": "R", "tangents": [1.0, 1.7321, 1.1918, 1.0], "shape": "measured", "offset_deg": 5,
    "rays": "0:45,15:42.5,30:42.5,45:40,60:37.5,75:37.5,90:35,105:35,120:35,135:40,150:40,165:40,180:42.5,195:42.5,210:37.5,225:37.5,240:37.5,255:35,270:37.5,285:37.5,300:35,315:45,330:45,345:47.5",
    "foveation": [0.5, 0.45, 3, 3, 0.536, -0.159], "render_px": [4176, 3333],
    "expect": {"bbox_tan": [0.9163, 1.0541, 0.7412, 0.7673], "fov_rect_tan": [0.6840, 0.6820, 0.4910, 0.4934],

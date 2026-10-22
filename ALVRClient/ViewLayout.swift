@@ -42,7 +42,7 @@ enum ViewLayout {
     }
 
     // DIAG fov_sent fields for one eye's Fov as sent to the server: degrees, ALVR signs; where the tangents came from
-    // (frustum, crop or debug; CropFov.choose), the crop margin and lens offset, and the center_shift that puts the
+    // (frustum, crop or debug; CropFov.choose), the crop margin and model lens inset (offset_deg), and the center_shift that puts the
     // foveation band on the eye axis of the sent frame next to the session's (docs/lumen/crop-fov.md).
     static func fovSentFields(eye: String, left: Float, right: Float, up: Float, down: Float, source: String = "frustum",
                               marginDeg: Double? = nil, offsetDeg: Double? = nil, axisCenterShift: SIMD2<Double>? = nil,

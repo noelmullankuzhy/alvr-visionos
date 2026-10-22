@@ -47,7 +47,8 @@ struct BoundaryDotsSession {
     private(set) var marks: [BoundaryDotsEye: Set<BoundaryDot>] = [:]
     private var insets: [BoundaryDotsEye: Double] = [:]
     private var offsets: [BoundaryDotsEye: Double] = [:]
-    /// Outline style for every eye; a quick right pinch on the centre cross (no cursor) toggles it.
+    private var lensInsets: [BoundaryDotsEye: Double] = [:]
+    /// Outline style for every eye; a quick right pinch on the centre cross (no cursor) cycles it.
     var shape = BoundaryDotsOutlineShape.lens
 
     /// Outline inset of the selected eye; set values snap to 0.5 deg within 0...30, non-finite ones are ignored.
@@ -56,23 +57,46 @@ struct BoundaryDotsSession {
         set { if newValue.isFinite { insets[eye] = BoundaryDotsOutline.clampInset(newValue) } }
     }
 
-    /// Lens outline offset of the selected eye (positive = outward); snaps to 0.5 deg within -10...+20.
+    /// Model lens inset of the selected eye (style lens); snaps to 0.5 deg within 0...30, default 15.
+    var lensInset: Double {
+        get { lensInsets[eye] ?? BoundaryDotsOutline.defaultInsetDeg }
+        set { if newValue.isFinite { lensInsets[eye] = BoundaryDotsOutline.clampInset(newValue) } }
+    }
+
+    /// Measured outline offset of the selected eye (positive = outward); snaps to 0.5 deg within -10...+20.
     var offset: Double {
         get { offsets[eye] ?? 0 }
         set { if newValue.isFinite { offsets[eye] = BoundaryDotsOutline.clampOffset(newValue) } }
     }
 
-    /// The value the left-hand slider drives: the offset (lens) or the inset (rect).
+    /// The value the left-hand slider drives: the model inset (lens), the inset (rect) or the offset (measured).
     var sliderValue: Double {
-        get { shape == .lens ? offset : inset }
-        set { if shape == .lens { offset = newValue } else { inset = newValue } }
+        get {
+            switch shape {
+            case .lens: return lensInset
+            case .rect: return inset
+            case .measured: return offset
+            }
+        }
+        set {
+            switch shape {
+            case .lens: lensInset = newValue
+            case .rect: inset = newValue
+            case .measured: offset = newValue
+            }
+        }
     }
-    var sliderRange: ClosedRange<Double> { shape == .lens ? BoundaryDotsOutline.offsetRange : BoundaryDotsOutline.insetRange }
-    /// Hand right moves the outline outward in both styles: the offset up (lens), the inset down (rect).
-    var sliderSign: Double { shape == .lens ? 1 : -1 }
+    var sliderRange: ClosedRange<Double> { shape == .measured ? BoundaryDotsOutline.offsetRange : BoundaryDotsOutline.insetRange }
+    /// Hand right moves the outline outward in every style: the inset down (lens, rect), the offset up (measured).
+    var sliderSign: Double { shape == .measured ? 1 : -1 }
 
-    mutating func toggleShape() {
-        shape = shape == .lens ? .rect : .lens
+    /// lens -> rect -> measured -> lens.
+    mutating func cycleShape() {
+        switch shape {
+        case .lens: shape = .rect
+        case .rect: shape = .measured
+        case .measured: shape = .lens
+        }
     }
 
     /// Points row for the foveation rect and px/deg readout while no stream is up; a pinch on the fov button cycles it.
@@ -87,17 +111,36 @@ struct BoundaryDotsSession {
         foveationPoint = rows[(index + 1) % rows.count].name
     }
 
-    /// One eye's drawn outline at its own slider value (lens: reference + offset; rect: frustum - inset); nil for Both.
+    /// One eye's drawn outline at its own slider value (lens: the model in the inset rectangle; rect: frustum - inset;
+    /// measured: reference + offset); nil for Both.
     func outline(_ eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum) -> [BoundaryDot]? {
         guard eye != .both else { return nil }
-        return shape == .lens ? BoundaryDotsLensReference.outline(eye, offsetDeg: offsets[eye] ?? 0)
-                              : frustum.outline(insetDeg: insets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
+        switch shape {
+        case .lens: return BoundaryDotsLensModel.outline(eye, frustum: frustum, insetDeg: lensInsets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
+        case .rect: return frustum.outline(insetDeg: insets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
+        case .measured: return BoundaryDotsLensReference.outline(eye, offsetDeg: offsets[eye] ?? 0)
+        }
     }
 
-    /// One eye's projection readout; `stream` nil uses the selected points row.
+    /// The model lens's inset rectangle for one eye (style lens), at that eye's model inset.
+    func lensRect(_ eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum) -> BoundaryDotsLensRect? {
+        BoundaryDotsLensModel.insetRect(eye, frustum: frustum, insetDeg: lensInsets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
+    }
+
+    /// One eye's side limits in the current style (lens: the inset rectangle's).
+    func limits(_ eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum) -> BoundaryDotsLimits? {
+        switch shape {
+        case .lens: return lensRect(eye, frustum: frustum)?.limits
+        case .rect: return frustum.limits(eye: eye, insetDeg: insets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
+        case .measured: return BoundaryDotsLensReference.limits(eye, offsetDeg: offsets[eye] ?? 0)
+        }
+    }
+
+    /// One eye's projection readout; `stream` nil uses the selected points row. The lens's bbox is its inset rectangle.
     func projection(_ eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum, stream: ProjectionStream? = nil) -> ProjectionReadout? {
-        outline(eye, frustum: frustum).flatMap {
-            ProjectionReadout(eye: eye, frustum: frustum, outline: $0, stream: stream ?? .points(foveationRow))
+        let bbox = shape == .lens ? lensRect(eye, frustum: frustum)?.box(eye) : nil
+        return outline(eye, frustum: frustum).flatMap {
+            ProjectionReadout(eye: eye, frustum: frustum, outline: $0, stream: stream ?? .points(foveationRow), bbox: bbox)
         }
     }
 
@@ -160,12 +203,21 @@ struct BoundaryDotsSession {
     }
 
     /// The `dots_outline` line for the selected eye; nil for Both (the outline is monocular).
-    /// Lens lines carry the drawn per-ray eccentricities (reference + offset) on the 24 measured rays. Both styles
-    /// end with the projection readout (bbox, foveation rect, px/deg) for `stream` (nil: the selected points row).
+    /// Lens lines carry the model inset and tag (sides are the inset rectangle's); measured lines carry the drawn
+    /// per-ray eccentricities (reference + offset) on the 24 measured rays. Every style ends with the projection
+    /// readout (bbox, foveation rect, px/deg) for `stream` (nil: the selected points row).
     func outlineFields(frustum: BoundaryDotsFrustum, source: String, stream: ProjectionStream? = nil) -> KeyValuePairs<String, Any>? {
         let posix = Locale(identifier: "en_US_POSIX")
         let tangents = String(format: "%.4f,%.4f,%.4f,%.4f", locale: posix, frustum.left, frustum.right, frustum.bottom, frustum.top)
         guard let p = projection(eye, frustum: frustum, stream: stream) else { return nil }
+        if shape == .lens {
+            guard let limits = limits(eye, frustum: frustum) else { return nil }
+            return ["eye": eye.rawValue, "shape": shape.rawValue, "inset_deg": lensInset, "nasal_deg": limits.nasal,
+                    "temporal_deg": limits.temporal, "up_deg": limits.up, "down_deg": limits.down,
+                    "tangent_source": source, "tangents": tangents, "model": BoundaryDotsLensModel.tag,
+                    "bbox_deg": p.bboxDeg, "bbox_tan": p.bboxTan, "fov_source": p.stream.source, "fov_live": p.fovLive,
+                    "foveation": p.foveation, "fov_rect_deg": p.fovRectDeg, "render_px": p.renderPx, "pxdeg_frustum": p.pxdegFrustum, "pxdeg_bbox": p.pxdegBbox]
+        }
         if shape == .rect {
             guard let limits = frustum.limits(eye: eye, insetDeg: inset) else { return nil }
             return ["eye": eye.rawValue, "shape": shape.rawValue, "inset_deg": inset, "nasal_deg": limits.nasal,
@@ -257,10 +309,12 @@ struct BoundaryDotsLimits: Equatable {
 }
 
 enum BoundaryDotsOutlineShape: String {
-    /// The measured seal-on visible field moved radially by an offset (default style).
+    /// The model lens (BoundaryDotsLensModel) in the frustum rectangle moved inwards by an inset (default style).
     case lens
     /// The rendered frustum rectangle moved inwards by an inset (the rendered edge reference).
     case rect
+    /// The measured seal-on visible field (W34) moved radially by an offset.
+    case measured
 }
 
 enum BoundaryDotsOutline {
@@ -278,7 +332,7 @@ enum BoundaryDotsOutline {
     static func clampOffset(_ deg: Double) -> Double { clamp(deg, to: offsetRange) }
 }
 
-/// Reference visible field per eye for the lens outline: per-ray boundary eccentricities
+/// Reference visible field per eye for the measured outline: per-ray boundary eccentricities
 /// (deg from the head axis, rays CCW from right). Replace `left` (and set `right`) from a
 /// later Boundary dots measurement; rays left out are interpolated.
 enum BoundaryDotsLensReference {

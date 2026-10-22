@@ -33,7 +33,8 @@ private final class BoundaryDotsScene {
     private let statusEntity = ModelEntity()
     private let insetEntity = ModelEntity()
     private let limitsEntity = ModelEntity()
-    /// Per eye: frustum rectangle, lens/rect outline, its bbox, foveation rect, axis circle, three readout lines.
+    /// Per eye: up to six layers (ProjectionOverlay.layers: frustum rectangle, outline, the lens's inset rectangle and
+    /// axes or the dashed bbox, foveation rect, axis circle) and three readout lines.
     private var layers: [BoundaryDotsEye: [ModelEntity]] = [:]
     private var readoutEntities: [BoundaryDotsEye: [ModelEntity]] = [:]
     private var crossEntities: [ModelEntity] = []
@@ -79,7 +80,7 @@ private final class BoundaryDotsScene {
         installCursor()
         root.addChild(cursorEntity)
         for eye in [BoundaryDotsEye.left, .right] {
-            layers[eye] = (0..<5).map { _ in ModelEntity() }
+            layers[eye] = (0..<6).map { _ in ModelEntity() }
             readoutEntities[eye] = (0..<3).map { _ in ModelEntity() }
             for entity in layers[eye]! + readoutEntities[eye]! { root.addChild(entity) }
         }
@@ -233,8 +234,8 @@ private final class BoundaryDotsScene {
                 case .move(let value)?, .release(_, let value)?:
                     // A slider step changes only the outline and its labels: no dot materials.
                     session.sliderValue = value
-                    // The lens offset is what "Crop FOV to outline" crops to on the next stream.
-                    if session.shape == .lens { CropFov.recordOffset(session.eye, deg: session.offset) }
+                    // The model lens inset is what "Crop FOV to outline" crops to on the next stream.
+                    if session.shape == .lens { CropFov.recordInset(session.eye, deg: session.lensInset) }
                     refreshOutline()
                     refreshStatus()
                 case nil:
@@ -270,7 +271,7 @@ private final class BoundaryDotsScene {
             }
         } else if let name = pinch.target {
             if name == "leave" { return true }
-            if name == "centre", !session.deselect(), session.eye != .both { session.toggleShape() }
+            if name == "centre", !session.deselect(), session.eye != .both { session.cycleShape() }
             if name == "fov_row" {
                 session.nextFoveationPoint()
                 logOutline()
@@ -339,7 +340,8 @@ private final class BoundaryDotsScene {
     }
 
     /// The projection overlay of the selected eye, or of both in Both, in that eye's hue: the frustum rectangle
-    /// (live tangents), the lens/rect outline at the eye's own slider value, its bbox (thinner), the foveation rect
+    /// (live tangents), the lens/rect/measured outline at the eye's own slider value, the lens's inset rectangle and
+    /// axes or the outline's bbox (thinner, dashed), the foveation rect
     /// (white) and the 0.5 deg axis circle, with three readout lines per eye. A single eye also shows the outline
     /// value and four side limits under the centre cross. Rebuilt only when an input changes.
     private func refreshOutline() {
@@ -372,16 +374,22 @@ private final class BoundaryDotsScene {
             let hue = hueMaterial(drawn.eye), width = ProjectionOverlay.width
             // L in front of R by 1 cm so coincident edges (top and bottom) do not z-fight; both in front of the dots.
             let radius: Float = drawn.eye == .left ? 9.9 : 9.89
-            // Closed ribbons, except the bbox: open dashes, thinner, so it reads apart from the frustum rectangle.
+            // Closed ribbons, except the bbox (open dashes, thinner, so it reads apart from the frustum rectangle) and
+            // the lens axes (open strips). The lens draws its inset rectangle solid instead of the dashed bbox.
             let dash = ProjectionOverlay.bboxDash
-            let bboxDashes = ProjectionOverlay.dashes(readout.bbox.path(step: 0.05), dash: dash.dash, gap: dash.gap).map(directions)
-            let ribbons: [([[SIMD3<Double>]], Bool, Double, UnlitMaterial, Float)] = [
-                ([boxDirections(readout.frustum)], true, width.frustum, hue, 0),
-                ([drawn.outline.map(\.direction)], true, width.lens, hue, 0.02),
-                (bboxDashes, false, width.bbox, hue, 0.04),
-                ([readout.fovRect.map(boxDirections) ?? []], true, width.foveation, white, 0.06),
-                ([ProjectionOverlay.axisCircle.map(\.direction)], true, width.circle, hue, 0.08),
-            ]
+            let ribbons = ProjectionOverlay.layers(session.shape).map { kind -> ([[SIMD3<Double>]], Bool, Double, UnlitMaterial, Float) in
+                switch kind {
+                case .frustum: return ([boxDirections(readout.frustum)], true, width.frustum, hue, 0)
+                case .outline: return ([drawn.outline.map(\.direction)], true, width.lens, hue, 0.02)
+                case .rect: return ([boxDirections(readout.bbox)], true, width.rect, hue, 0.04)
+                case .axes: return (ProjectionOverlay.axes(readout.bbox, step: 0.05).map(directions), false, width.axes, hue, 0.05)
+                case .bbox: return (ProjectionOverlay.dashes(readout.bbox.path(step: 0.05), dash: dash.dash, gap: dash.gap).map(directions),
+                                    false, width.bbox, hue, 0.04)
+                case .foveation: return ([readout.fovRect.map(boxDirections) ?? []], true, width.foveation, white, 0.06)
+                case .circle: return ([ProjectionOverlay.axisCircle.map(\.direction)], true, width.circle, hue, 0.08)
+                }
+            }
+            for entity in layer.dropFirst(ribbons.count) { entity.model = nil }
             for (entity, ribbon) in zip(layer, ribbons) {
                 entity.model = ribbonMesh(ribbon.0, closed: ribbon.1, widthDeg: ribbon.2, radius: radius - ribbon.4).map {
                     ModelComponent(mesh: $0, materials: [ribbon.3])
@@ -392,14 +400,17 @@ private final class BoundaryDotsScene {
             }
         }
         let value = session.sliderValue
-        guard let drawn = shown.eyes.first, eye != .both,
-              let limits = session.shape == .lens ? BoundaryDotsLensReference.limits(eye, offsetDeg: value)
-                                                  : drawn.frustum.limits(eye: eye, insetDeg: value) else {
+        guard let drawn = shown.eyes.first, eye != .both, let limits = session.limits(eye, frustum: drawn.frustum) else {
             for entity in [insetEntity, limitsEntity] { entity.isEnabled = false }
             return
         }
         for entity in [insetEntity, limitsEntity] { entity.isEnabled = true }
-        let label = session.shape == .lens ? String(format: "lens offset %+.1f deg", value) : String(format: "rect inset %.1f deg", value)
+        let label: String
+        switch session.shape {
+        case .lens: label = String(format: "lens inset %.1f deg", value)
+        case .rect: label = String(format: "rect inset %.1f deg", value)
+        case .measured: label = String(format: "measured offset %+.1f deg", value)
+        }
         setCentredText(insetEntity, String(format: "%@  area %.0f%%", label, 100 * drawn.frustum.areaFraction(of: drawn.outline)), y: -0.12,
                        material: hueMaterial(eye))
         setCentredText(limitsEntity, String(format: "nasal %.1f  temporal %.1f  up %.1f  down %.1f",

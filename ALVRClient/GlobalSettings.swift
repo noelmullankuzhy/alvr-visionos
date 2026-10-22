@@ -45,7 +45,7 @@ struct GlobalSettings: Codable {
     // no stream; read at renderer start / layer configuration.
     var resolutionChart: String = CornerChartMode.off.rawValue
     var resolutionFoveation: Bool = true
-    // Crop FOV to outline (CropFov.swift, docs/lumen/crop-fov.md): report the lens outline's bbox + margin as each eye's
+    // Crop FOV to outline (CropFov.swift, docs/lumen/crop-fov.md): report the model lens's inset rectangle + margin as each eye's
     // FOV instead of the device frustum; read when the view config is sent (stream start).
     var cropFovToOutline: Bool = false
     var cropMarginDeg: Double = CropFov.defaultMarginDeg
