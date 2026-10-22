@@ -272,7 +272,9 @@ class EventHandler: ObservableObject {
         framesSinceLastIDR = 0
         framesSinceLastDecode = 0
         lastIpd = -1
+        objc_sync_enter(frameQueueLock)
         lastQueuedFrame = nil
+        objc_sync_exit(frameQueueLock)
         withStreamBootstrap { $0.streamStopped() }
         objc_sync_enter(viewParamsLock)
         poseKeepalive.reset()
@@ -296,7 +298,9 @@ class EventHandler: ObservableObject {
         framesSinceLastDecode = 0
         lastRequestedTimestamp = 0
         lastSubmittedTimestamp = 0
+        objc_sync_enter(frameQueueLock)
         lastQueuedFrame = nil
+        objc_sync_exit(frameQueueLock)
         withStreamBootstrap { $0.reentered() }
     }
 

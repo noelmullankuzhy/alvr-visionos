@@ -19,6 +19,13 @@ enum FramePacing {
     // Reserved between the end of the wait and the GPU p95 for encoding and commit on the CPU.
     static let marginNs: UInt64 = 1_000_000
 
+    // Legacy loop: re-present the last frame (visionOS skipped it) while the queue is nearly empty.
+    // A nil lastTimestamp (stream stopped and cleared it) never retries.
+    static func shouldRetry(lastTimestamp: UInt64?, lastSubmitted: UInt64, queueCount: Int) -> Bool {
+        guard let lastTimestamp = lastTimestamp else { return false }
+        return lastTimestamp != lastSubmitted && queueCount < 2
+    }
+
     // a - b without wrapping, saturated to Int64.
     static func signedDifferenceNs(_ a: UInt64, _ b: UInt64) -> Int64 {
         if a >= b {

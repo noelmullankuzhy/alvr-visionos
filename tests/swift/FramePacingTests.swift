@@ -81,6 +81,13 @@ private func testChoose() {
     expectEqual(FramePacing.choose(queue: [], targetNs: 50, lastTimestamp: nil, lastSubmitted: true, canWait: false), C.none, "nothing at all")
 }
 
+private func testShouldRetry() {
+    expectEqual(FramePacing.shouldRetry(lastTimestamp: nil, lastSubmitted: 0, queueCount: 0), false, "nil last frame (stream stopped) never retries")
+    expectEqual(FramePacing.shouldRetry(lastTimestamp: 5, lastSubmitted: 4, queueCount: 1), true, "unsubmitted last frame, queue nearly empty")
+    expectEqual(FramePacing.shouldRetry(lastTimestamp: 5, lastSubmitted: 5, queueCount: 0), false, "last frame already submitted")
+    expectEqual(FramePacing.shouldRetry(lastTimestamp: 5, lastSubmitted: 4, queueCount: 2), false, "queue has filled")
+}
+
 private func testGpuTimeEstimator() {
     let gpu = GpuTimeEstimator(capacity: 20)
     expectEqual(gpu.p95Ns(), nil, "no samples")
@@ -102,6 +109,7 @@ enum FramePacingTests {
         testWaitDeadline()
         testNewestIndex()
         testChoose()
+        testShouldRetry()
         testGpuTimeEstimator()
         finishTests("FramePacingTests")
     }
