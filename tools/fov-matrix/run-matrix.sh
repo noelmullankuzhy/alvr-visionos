@@ -9,6 +9,14 @@
 # Options: --build ID (ALVR build dir, default 1ce896631ea1; must be known to alvr-run2.py), --bundle-id ID,
 #   --sim UDID, --stop-on-error, --overlay (force overlay in rdr2 mode), --stream-timeout S, --capture-timeout S,
 #   --probe-seconds S, --settle S, --game-profile FILE.
+# Dead-server guard (per point): before SteamVR launches, `pc-session.py safemode-clear` clears SteamVR's safe-mode block of
+#   the ALVR driver (backup first, refuses while SteamVR runs); after launch the dashboard API (127.0.0.1:8082 on the PC) is
+#   polled <= 20 s and vrserver.txt is checked, so a dead server fails the point at once ("driver blocked by safe mode" /
+#   "dashboard API not listening", also on a manual-IP "Unable to connect") instead of waiting --stream-timeout.
+# stop_all order (why: a taskkilled vrserver makes SteamVR record a safe-mode event that blocks the ALVR driver on every
+#   later launch): 1. app terminate, hold finish; 2. graceful SteamVR quit (ALVR dashboard "ShutdownSteamvr" request + closing
+#   the vrmonitor window, pc-steamvr-stop.ps1), waits <= 10 s; 3. only what is left is killed (also by that script, then
+#   harness alvr-run2.py stop for its helper processes).
 # Env overrides: HARNESS PCPS HOLD_DIR OVERLAY PYTHON WIN FOV_OVERLAY_MODE_ARG (see README.md).
 set -u
 
@@ -26,6 +34,11 @@ BID=${BID:-}
 PROFILE=${PROFILE:-$HOLD_DIR/local/profiles/noquad-profile.json}
 PCW=${PCW:-/mnt/c/Users/noelm/claude-tmp/fov-matrix}   # override only in the stub test
 TUNNEL_PORT=18082
+API_WAIT=20    # s the dashboard API (127.0.0.1:8082 on the PC) gets to answer after SteamVR launched
+STOP_WAIT=10   # s SteamVR gets to quit gracefully before the leftovers are killed
+# Paths for pc-session.py safemode-clear / driver-check on the PC; empty = its defaults (set only in the stub test, no spaces)
+VRS_ARG=${VRSETTINGS:+--file $VRSETTINGS}
+VRLOG_ARG=${VRSERVER_LOG:+--file $VRSERVER_LOG}
 
 POINTS=; MODE=; OUT=; DRY=0; RESTORE_ONLY=0; STOP_ON_ERROR=0; FORCE_OVERLAY=0
 STREAM_TIMEOUT=150; CAPTURE_TIMEOUT=45; PROBE_SECONDS=30; SETTLE=
@@ -48,7 +61,7 @@ while [ $# -gt 0 ]; do
     --probe-seconds) PROBE_SECONDS=${2:?}; shift 2 ;;
     --settle) SETTLE=${2:?}; shift 2 ;;
     --game-profile) PROFILE=${2:?}; shift 2 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,/^set -u/p' "$0" | sed '$d'; exit 0 ;;
     *) die "unknown option $1" ;;
   esac
 done
@@ -147,7 +160,13 @@ overlay() {  # overlay MODE OUTBASE args... ; JSON must exist afterwards
   return 0
 }
 
-stop_all() {  # terminate our app, finish the hold, stop SteamVR/ALVR (as the e4 harness did)
+pcps_sub() {  # pcps_sub SRC.ps1 SECONDS LOG : run a PC PowerShell script (its __SECONDS__ filled in) through pcps.sh
+  s=$OUT/$(basename "$1")
+  sed "s/__SECONDS__/$2/g" "$HERE/$1" > "$s"
+  xo "$3" sh "$PCPS" "$s"
+}
+
+stop_all() {  # terminate our app, finish the hold, stop SteamVR/ALVR (graceful first, as the header explains)
   xo /dev/null xcrun simctl terminate "$SIM" "$BID"
   if [ -n "$HOLD_REPORT" ]; then
     if [ "$DRY" = 1 ]; then plan "+ sh $HOLD_DIR/scripts/hdr-game-run.sh finish --report <report from start.json>"; else
@@ -156,7 +175,9 @@ stop_all() {  # terminate our app, finish the hold, stop SteamVR/ALVR (as the e4
     fi
     HOLD_REPORT=
   fi
-  if [ "$DRY" = 1 ]; then plan "+ $PYTHON $HARNESS/alvr-run2.py stop > $OUT/stop.log 2>&1"; else
+  # Graceful first (ALVR dashboard shutdown request + closing the vrmonitor window), wait up to STOP_WAIT s, kill only what is left.
+  pcps_sub pc-steamvr-stop.ps1 "$STOP_WAIT" "$OUT/steamvr-stop.log" || log "note: graceful SteamVR stop failed, see $OUT/steamvr-stop.log"
+  if [ "$DRY" = 1 ]; then plan "+ $PYTHON $HARNESS/alvr-run2.py stop > $OUT/stop.log 2>&1   # kills only what the graceful stop left"; else
     $PYTHON "$HARNESS/alvr-run2.py" stop > "$OUT/stop.log" 2>&1 || log "note: alvr-run2 stop rc!=0 (normal when nothing was started), see $OUT/stop.log"
   fi
 }
@@ -226,10 +247,27 @@ run_point() {
     fail_hard "pc flag: failed: $(tail -1 "$PD/pc-flag.log")"; return 1
   fi
 
-  # 3. ALVR dashboard (starts SteamVR), manual client IP
+  # 2b. clear SteamVR's safe-mode block of the ALVR driver (a stopped run leaves it set; every later launch would skip the driver)
+  PC_SETS= pc_action "$PD" safemode safemode-clear $VRS_ARG
+  if [ "$DRY" != 1 ]; then
+    grep -q '^{"cleared"' "$PD/pc-safemode.log" || { fail_hard "safemode-clear: $(tail -1 "$PD/pc-safemode.log")"; return 1; }
+    log "[$NAME] safemode-clear: $(grep '^{"cleared"' "$PD/pc-safemode.log" | head -1)"
+  fi
+
+  # 3. ALVR dashboard (starts SteamVR), then fail fast on a dead server, manual client IP
   xo "$PD/dash.log" $PYTHON "$HARNESS/alvr-run2.py" dashboard "$BUILD" || { fail_hard "dashboard: alvr-run2 dashboard failed: $(tail -2 "$PD/dash.log" | tr '\n' ' ')"; return 1; }
-  [ "$DRY" = 1 ] || sleep 12
+  pcps_sub pc-dashboard-wait.ps1 "$API_WAIT" "$PD/api-wait.log"   # polls 127.0.0.1:8082 on the PC, <= API_WAIT s
+  PC_SETS= pc_action "$PD" driver driver-check $VRLOG_ARG
+  if [ "$DRY" != 1 ]; then
+    if grep -q '"not_loaded": true' "$PD/pc-driver.log"; then
+      fail_hard "driver blocked by safe mode: vrserver.txt says 'Not loading driver alvr_server' (SteamVR launched without the ALVR driver; see $PD/pc-driver.log)"; return 1
+    fi
+    grep -q '^api ok' "$PD/api-wait.log" 2>/dev/null || { fail_hard "dashboard API not listening: 127.0.0.1:8082 on the PC did not answer in ${API_WAIT}s ($(tail -1 "$PD/api-wait.log" 2>/dev/null))"; return 1; }
+  fi
   xo "$PD/manualip.log" sh "$PCPS" "$HARNESS/pc-alvr-manualip.ps1"
+  if [ "$DRY" != 1 ] && grep -q 'Unable to connect' "$PD/manualip.log"; then
+    fail_hard "dashboard API not listening: manual-IP step: $(grep 'Unable to connect' "$PD/manualip.log" | head -1)"; return 1
+  fi
 
   # 4. client settings + launch
   if [ "$DRY" = 1 ]; then

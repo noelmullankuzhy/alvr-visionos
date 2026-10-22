@@ -62,7 +62,22 @@ with open(sys.argv[3], 'w') as f:
         f.write(json.dumps({'event_type': {'id': 'GraphStatistics', 'data': {'encoder_s': e, 'bitrate_bps': 5e8, 'client_fps': 90.0}}}) + '\n')
 EOF
 : > "$T/harness/pc-alvr-manualip.ps1"
-echo : > "$T/pcps.sh"
+cat > "$T/pcps.sh" <<'PCPS'
+case $1 in
+  *pc-dashboard-wait.ps1) if [ -n "${FAKE_API_DEAD:-}" ]; then echo 'api none after 20s'; else echo 'api ok after 1s'; fi ;;
+  *pc-alvr-manualip.ps1) [ -n "${FAKE_MANUALIP_ERR:-}" ] && echo 'ERR Unable to connect to the remote server' ;;
+  *pc-steamvr-stop.ps1) echo 'steamvr: graceful stop in 2s'; cp "$1" "$FAKE_PC/steamvr-stop.seen" ;;
+esac
+exit 0
+PCPS
+cat > "$T/bin/tasklist.exe" <<'TL'
+#!/bin/sh
+echo 'Image Name  PID'
+[ -n "${FAKE_VR_RUNNING:-}" ] && echo 'vrserver.exe 4 Console'
+exit 0
+TL
+printf '{\n   "driver_alvr_server" : {\n      "blocked_by_safe_mode" : true\n   }\n}\n' > "$T/vrsettings.orig"
+cp "$T/vrsettings.orig" "$T/vrsettings"
 cat > "$T/overlay.py" <<'EOF'
 import json, os, sys
 a = sys.argv[1:]
@@ -94,7 +109,7 @@ printf 'p1\t1.0\t1.0\t0.5,0.45,3,3,0,0\t500\t90\nbad\t0.7\t1.0\toff\t500\t90\tvi
 
 run() {  # run TSV OUTDIR [extra args]
   tsv=$1; od=$2; shift 2
-  PATH="$T/bin:$PATH" PCW="$T/pc/fov-matrix" FAKE_PC="$T/pc" FAKE_DATA="$T/data" HARNESS="$T/harness" PCPS="$T/pcps.sh" OVERLAY="$T/overlay.py" OVL_LOG="$T/overlay.args" \
+  PATH="$T/bin:$PATH" PCW="$T/pc/fov-matrix" FAKE_PC="$T/pc" FAKE_DATA="$T/data" HARNESS="$T/harness" PCPS="$T/pcps.sh" VRSETTINGS="$T/vrsettings" VRSERVER_LOG="$T/vrserver.txt" OVERLAY="$T/overlay.py" OVL_LOG="$T/overlay.args" \
     ${EXEC:-} sh "$HERE/run-matrix.sh" --points "$tsv" --mode chart --out "$od" --build b1 --bundle-id x.y --capture-timeout 20 \
     --stream-timeout 20 --probe-seconds 1 --settle 1 "$@"
 }
@@ -109,6 +124,29 @@ t "grep -q '89.5	500.0	9.00' $T/o1.out" "fps / bitrate / encode ms from the logs
 t "cmp -s $SESSION $T/session.orig" "session restored byte for byte"
 t "[ -f $T/o1/p1/overlay/render-L.json ] && [ -f $T/o1/p1/overlay/encoded-L.json ] && [ -f $T/o1/p1/overlay/drawable.json ]" "drawable + render + encoded overlays ran"
 t "grep -q 'restored and verified' $T/o1/run.log" "restore verified in the log"
+t "grep -q 'safemode-clear: {\"cleared\": true' $T/o1/run.log" "p1: the safe-mode block was cleared and the JSON logged"
+t "grep -q 'blocked_by_safe_mode\" : false' $T/vrsettings && ! grep -q true $T/vrsettings" "vrsettings flag flipped to false"
+t "[ \$(ls $T/pc/vr-gaming/steamvr-backups | wc -l) = 1 ] && cmp -s $T/vrsettings.orig $T/pc/vr-gaming/steamvr-backups/vrsettings.*" "one timestamped backup of the blocked file (p2 found nothing to clear)"
+t "grep -q '\"cleared\": false' $T/o1/p2/pc-safemode.log" "p2: nothing left to clear, no second backup"
+t "[ -s $T/pc/steamvr-stop.seen ] && ! grep -q __SECONDS__ $T/pc/steamvr-stop.seen && grep -q 'Left).Count -gt 0' $T/pc/steamvr-stop.seen" "graceful stop script (seconds filled in) runs through pcps"
+
+echo "== dead server fails the point at once"
+for c in 'FAKE_API_DEAD=1:dashboard API not listening' 'FAKE_MANUALIP_ERR=1:dashboard API not listening: manual-IP' 'BLOCKLOG=1:driver blocked by safe mode'; do
+  v=${c%%:*}; m=${c#*:}; od=$T/odead-${v%%=*}
+  rm -f "$T/vrserver.txt"; [ "${v%%=*}" = BLOCKLOG ] && echo 'Not loading driver alvr_server because it was blocked by a previous safe mode event' > "$T/vrserver.txt"
+  ( export "$v"; run "$T/ok.tsv" "$od" --stream-timeout 600 > "$od.out" 2> "$od.err" ); rc=$?
+  t "[ $rc = 1 ] && grep -q '^p1	ERROR' $od.out" "${v%%=*}: point is an ERROR row (rc=$rc)"
+  t "grep -q '$m' $od/p1/ERROR" "${v%%=*}: ERROR says '$m'"
+  t "! grep -q 'no decoded frames' $od/p1/ERROR && [ ! -e $od/p1/console.log ]" "${v%%=*}: failed before the client launched (no stream wait)"
+  t "cmp -s $SESSION $T/session.orig" "${v%%=*}: session restored"
+done
+rm -f "$T/vrserver.txt"
+
+echo "== safemode-clear refused while SteamVR runs"
+cp "$T/vrsettings.orig" "$T/vrsettings"
+( export FAKE_VR_RUNNING=1; run "$T/ok.tsv" "$T/odead-run" > "$T/odead-run.out" 2> "$T/odead-run.err" ); rc=$?
+t "grep -q 'safemode-clear: .*refused while SteamVR runs' $T/odead-run/p1/ERROR" "point fails with the refusal"
+t "cmp -s $T/vrsettings $T/vrsettings.orig" "blocked file left untouched"
 # W14: the server dump's meta.json carries the tangents the server really rendered (already s x view): render/encoded overlays
 # take them with --meta and must not scale again; the drawable overlay keeps --fov-scale.
 for m in render encoded; do
