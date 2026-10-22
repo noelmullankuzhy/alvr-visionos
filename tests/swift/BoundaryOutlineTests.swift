@@ -483,7 +483,7 @@ enum BoundaryOutlineTests {
         expect(lensArea15 < (rectL.aT + rectL.aN) * (rectL.bU + rectL.bD) / (2.7321 * 2.1918), "lens inside its rectangle: \(lensArea15)")
         expect((model.areaFraction(.left, frustum: left, insetDeg: 20) ?? 1) < lensArea15, "more inset, less area")
 
-        // Session: style lens by default, its slider sets the model inset (0...30, default 15, 0.5 steps, per eye).
+        // Session: style lens by default, its slider sets the model inset (0...30, default 15, 0.5 steps, one value for both eyes).
         var modelSession = BoundaryDotsSession()
         modelSession.eye = .left
         expectEqual(modelSession.shape, .lens, "lens is the default style")
@@ -497,7 +497,7 @@ enum BoundaryOutlineTests {
         modelSession.lensInset = 42
         expectEqual(modelSession.lensInset, 30, "clamped at 30")
         modelSession.eye = .right
-        expectEqual(modelSession.lensInset, 15, "per eye")
+        expectEqual(modelSession.lensInset, 30, "one model inset for both eyes")
         expectEqual(modelSession.inset, 15, "rect inset separate")
         modelSession.eye = .left
         modelSession.lensInset = 15

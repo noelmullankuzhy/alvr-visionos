@@ -47,6 +47,8 @@ enum CropFovTests {
         near4(CropFov.tangents(eye: .left, device: deviceL, insetDeg: 15, marginDeg: -3), rectL, "negative margin = 0")
         near4(CropFov.tangents(eye: .left, device: deviceL, insetDeg: 15, marginDeg: .nan), rectL, "nan margin = 0")
         expectEqual(CropFov.defaultMarginDeg, 2.0, "default margin")
+        // The setting's default (GlobalSettings.cropFovToOutline): on, so the lens style streams cropped unless turned off.
+        expectEqual(CropFov.defaultEnabled, true, "crop defaults on")
 
         // Centre shift: the band [c0(1 + s), 1 - c0(1 - s)], c0 = (1 - c)/2, has its centre at 0.5 + s c0
         // (Shaders.metal:152-157); eye UV x runs from the temporal edge (R mirrored, Shaders.metal:136-140), y from the
@@ -76,29 +78,55 @@ enum CropFovTests {
 
         // Which tangents are sent: debug launch tangents first, then the crop, then the device frustum.
         let debug = [simd_float4(1, 1, 1, 1), simd_float4(2, 2, 2, 2)]
-        let off = CropFov.choose(device: [deviceL, deviceR], debug: nil, crop: false, insets: [15, 15], marginDeg: 2)
+        let off = CropFov.choose(device: [deviceL, deviceR], debug: nil, crop: false, insetDeg: 15, marginDeg: 2)
         expectEqual(off.source, "frustum", "off: frustum")
         expectEqual(off.tangents, [deviceL, deviceR], "off: device tangents")
-        let on = CropFov.choose(device: [deviceL, deviceR], debug: nil, crop: true, insets: [15, 15], marginDeg: 2)
+        let on = CropFov.choose(device: [deviceL, deviceR], debug: nil, crop: true, insetDeg: 15, marginDeg: 2)
         expectEqual(on.source, "crop", "on: crop")
         near4(on.tangents[0], [1.072395, 0.624869, 0.753584, 0.624869], "on: L crop", tolerance: 1e-5)
         near4(on.tangents[1], [0.624869, 1.072395, 0.753584, 0.624869], "on: R crop", tolerance: 1e-5)
-        let perEye = CropFov.choose(device: [deviceL, deviceR], debug: nil, crop: true, insets: [10, 15], marginDeg: 2)
-        near4(perEye.tangents[0], [1.279974, 0.753554, 0.900439, 0.753554], "per-eye inset: L 10", tolerance: 1e-5)
-        near4(perEye.tangents[1], [0.624869, 1.072395, 0.753584, 0.624869], "per-eye inset: R 15", tolerance: 1e-5)
-        let dbg = CropFov.choose(device: [deviceL, deviceR], debug: debug, crop: true, insets: [15, 15], marginDeg: 2)
+        let tenInset = CropFov.choose(device: [deviceL, deviceR], debug: nil, crop: true, insetDeg: 10, marginDeg: 2)
+        near4(tenInset.tangents[0], [1.279974, 0.753554, 0.900439, 0.753554], "shared inset 10: L", tolerance: 1e-5)
+        near4(tenInset.tangents[1], [0.753554, 1.279974, 0.900439, 0.753554], "shared inset 10: R mirrors L", tolerance: 1e-5)
+        let dbg = CropFov.choose(device: [deviceL, deviceR], debug: debug, crop: true, insetDeg: 15, marginDeg: 2)
         expectEqual(dbg.source, "debug", "debug wins")
         expectEqual(dbg.tangents, debug, "debug tangents")
 
-        // Model insets recorded from the Boundary dots lens slider (per eye, default 15; Both is ignored).
-        CropFov.resetInsets()
-        expectEqual(CropFov.insets, [15, 15], "default insets")
-        CropFov.recordInset(.left, deg: 13.5)
-        CropFov.recordInset(.both, deg: 9)
-        expectEqual(CropFov.insets, [13.5, 15], "L inset recorded, Both ignored")
-        CropFov.recordInset(.right, deg: .nan)
-        expectEqual(CropFov.insets, [13.5, 15], "non-finite inset ignored")
-        CropFov.resetInsets()
+        // One model inset for both eyes, recorded from the Boundary dots lens slider (default 15; non-finite ignored).
+        CropFov.resetInset()
+        expectEqual(CropFov.inset, 15, "default inset")
+        CropFov.recordInset(13.5)
+        expectEqual(CropFov.inset, 13.5, "inset recorded")
+        CropFov.recordInset(.nan)
+        expectEqual(CropFov.inset, 13.5, "non-finite inset ignored")
+        CropFov.resetInset()
+
+        // The slider on either eye sets the one inset: both eyes' rectangles and both eyes' sent tangents change.
+        var slider = BoundaryDotsSession()
+        let frustumL = BoundaryDotsFrustum(left: 1.7321, right: 1.0, bottom: 1.1918, top: 1.0)
+        let frustumR = BoundaryDotsFrustum(left: 1.0, right: 1.7321, bottom: 1.1918, top: 1.0)
+        slider.eye = .left
+        let rectL15 = slider.lensRect(.left, frustum: frustumL), rectR15 = slider.lensRect(.right, frustum: frustumR)
+        slider.sliderValue = 10
+        CropFov.recordInset(slider.lensInset)
+        expect(slider.lensRect(.left, frustum: frustumL) != rectL15, "L rectangle changes with the L slider")
+        expect(slider.lensRect(.right, frustum: frustumR) != rectR15, "R rectangle changes with the L slider")
+        expectEqual(slider.lensRect(.right, frustum: frustumR), BoundaryDotsLensModel.insetRect(.right, frustum: frustumR, insetDeg: 10), "R rectangle at inset 10")
+        let viaSlider = CropFov.choose(device: [deviceL, deviceR], debug: nil, crop: true, insetDeg: CropFov.inset, marginDeg: 2)
+        near4(viaSlider.tangents[0], [1.279974, 0.753554, 0.900439, 0.753554], "L sent tangents follow the L slider", tolerance: 1e-5)
+        near4(viaSlider.tangents[1], [0.753554, 1.279974, 0.900439, 0.753554], "R sent tangents follow the L slider", tolerance: 1e-5)
+        CropFov.resetInset()
+
+        // Every sent tangent is >= 0 and every edge angle < 89 deg: a device side past 89 deg, or a margin that would
+        // push one there, is held at tan 89; a negative device side is 0.
+        let tan89 = Float(tand(89))
+        near4(CropFov.tangents(eye: .left, device: simd_float4(100, 100, 100, 100), insetDeg: 0, marginDeg: 2),
+              [Double(tan89), Double(tan89), Double(tan89), Double(tan89)], "edge angle < 89 deg", tolerance: 1e-3)
+        near4(CropFov.tangents(eye: .left, device: simd_float4(100, 100, 100, 100), insetDeg: 15, marginDeg: 60),
+              [Double(tan89), Double(tan89), Double(tan89), Double(tan89)], "margin cannot pass 89 deg", tolerance: 1e-3)
+        let negative = CropFov.tangents(eye: .left, device: simd_float4(-0.5, 1.0, 1.0, -0.2), insetDeg: 15, marginDeg: 2)
+        expect(negative != nil && negative!.x >= 0 && negative!.w >= 0, "sent tangents are >= 0")
+        expect(negative!.x == 0 && negative!.w == 0, "a negative device side is sent as 0")
 
         // Display: Renderer.swift:708 puts the sent tangents in Uniforms.tangents, packed from the sent Fov by
         // ViewLayout.uniformTangents (left, right, up, down |tan|; Extensions/RealityKit.swift), and the video vertex

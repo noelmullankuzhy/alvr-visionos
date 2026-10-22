@@ -156,7 +156,7 @@ class EyeTangentsTest(unittest.TestCase):
         pts = fm.parse_points(text.splitlines())
         names = ['a%s-%s' % (s, v) for s in ('100', '085', '070') for v in ('asrun', 'centred', 'wider')]
         rec = ['a100-axis-C', 'a100-axis-A', 'a100-wider-A']          # the doc's three recommended settings
-        self.assertEqual([p['name'] for p in pts], names + rec + ['a100-crop-C', 'a100-crop-A'])
+        self.assertEqual([p['name'] for p in pts], names + rec + ['a100-crop-C', 'a100-crop-A', 'a100-crop-T'])
         for p in pts[:len(names)]:
             scale, variant = p['name'][1:].split('-')
             self.assertEqual(p['fov_scale'], int(scale) / 100)
@@ -345,6 +345,53 @@ class CropTest(unittest.TestCase):
         text = AS.points(p)
         self.assertIn('# a100-crop-C: predicted centre 42.2 px/deg (frustum 26.5 at the same render, x1.61 h / x1.59 v)', text)
         self.assertIn('# a100-crop-A: predicted centre 36.9 px/deg (frustum 23.2 at the same render, x1.61 h / x1.59 v)', text)
+
+
+class CropBandTest(unittest.TestCase):
+    """`a100-crop-T`: the crop-C frame (inset 15 + 2 deg, render 4176x3334) with the full-detail band flush with the nasal
+    edge and reaching 30 deg temporal, 25 deg up, 30 deg down (avp-field.json crop.band_T)."""
+    def test_band_by_hand(self):
+        t = lambda d: math.tan(math.radians(d))
+        p = AS.load()
+        self.assertEqual(p['crop']['band_T'], {'temporal_deg': 30, 'up_deg': 25, 'down_deg': 30})
+        # L frame |tan| temporal 1.0724, nasal 0.6249, up 0.6249, down 0.7536; x spans tan30 + 0.6249, y tan25 + tan30
+        cx = (t(30) + 0.6249) / (1.0724 + 0.6249)
+        cy = (t(25) + t(30)) / (0.6249 + 0.7536)
+        self.assertAlmostEqual(cx, 0.7083, places=4)
+        self.assertAlmostEqual(cy, 0.7571, places=4)
+        # band centre fraction across the frame, from the temporal edge / from the top; s = (f - 0.5) / ((1 - c) / 2)
+        fx = ((1.0724 - t(30)) / 1.6973 + 1) / 2
+        fy = ((0.6249 - t(25)) / 1.3785 + (0.6249 + t(30)) / 1.3785) / 2
+        sx, sy = (fx - 0.5) / ((1 - cx) / 2), (fy - 0.5) / ((1 - cy) / 2)
+        self.assertAlmostEqual(sx, 1.0, places=2)           # flush with the nasal edge
+        self.assertAlmostEqual(sy, -0.053, places=3)
+        fv = AS.band_fv(AS.crop_eyes(p), p['crop']['band_T'], p['centred']['edge_ratio'])
+        self.assertAlmostEqual(fv[0], cx, places=3)
+        self.assertAlmostEqual(fv[1], cy, places=3)
+        self.assertEqual(fv[2:4], (3, 3))
+        self.assertAlmostEqual(fv[4], sx, places=2)
+        self.assertAlmostEqual(fv[5], sy, places=2)
+
+    def test_points_row(self):
+        p = AS.load()
+        pts = {q['name']: q for q in fm.parse_points(AS.points(p).splitlines())}
+        q, c = pts['a100-crop-T'], pts['a100-crop-C']
+        self.assertEqual((q['fov_scale'], q['render_scale'], q['eye_tangents'], q['bitrate_mbps'], q['fps']),
+                         (c['fov_scale'], c['render_scale'], c['eye_tangents'], c['bitrate_mbps'], c['fps']))
+        self.assertAlmostEqual(q['render_scale'], 4176 / 3648, places=4)
+        cx, cy, rx, ry, shx, shy = q['foveation']
+        self.assertEqual((rx, ry), (3.0, 3.0))
+        self.assertAlmostEqual(cx, 0.7083, places=3)
+        self.assertAlmostEqual(cy, 0.7571, places=3)
+        self.assertAlmostEqual(shx, 1.0, places=2)
+        self.assertAlmostEqual(shy, -0.053, places=3)
+        text = AS.points(p)
+        self.assertIn('# a100-crop-T: predicted centre 42.2 px/deg (frustum 26.5 at the same render, x1.61 h / x1.59 v); '
+                      'coded 3360x2816 vs budget C 2784x2240', text)
+        # the band keeps the 1:1 density on the axis: same centre px/deg as crop-C (render and frame are the same)
+        rows = AS.crop_rows(p)
+        self.assertAlmostEqual(rows['a100-crop-T']['centre'], rows['a100-crop-C']['centre'], places=2)
+        self.assertEqual(rows['a100-crop-T']['render'], rows['a100-crop-C']['render'])
 
 
 class SettingsTest(unittest.TestCase):
