@@ -60,10 +60,12 @@ private func removing(_ path: [String], from object: [String: Any]) -> [String: 
     return out
 }
 
+// $TMPDIR first: a sandboxed run may only write there, not to the per-user temporary directory. Removed at the end of the run.
+private let testRoot = (ProcessInfo.processInfo.environment["TMPDIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory)
+    .appendingPathComponent("golden-tests-\(UUID().uuidString)")
+
 private func writeSet(_ object: [String: Any], files: [String: Data] = serverBytes) -> URL {
-    // $TMPDIR first: a sandboxed run may only write there, not to the per-user temporary directory.
-    let base = ProcessInfo.processInfo.environment["TMPDIR"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory
-    let dir = base.appendingPathComponent("golden-tests-\(UUID().uuidString)/chart80")
+    let dir = testRoot.appendingPathComponent("\(UUID().uuidString)/chart80")
     try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     try! json(object).write(to: dir.appendingPathComponent("meta.json"))
     for (name, data) in files { try! data.write(to: dir.appendingPathComponent(name)) }
@@ -404,6 +406,7 @@ enum GoldenFrameTests {
         testSession()
         testQualitySettle()
         testCapture()
+        try? FileManager.default.removeItem(at: testRoot)
         finishTests("GoldenFrame")
     }
 }
