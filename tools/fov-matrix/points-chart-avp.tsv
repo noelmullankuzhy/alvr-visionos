@@ -1,0 +1,12 @@
+# name	fov_scale	render_scale	foveation(cx,cy,rx,ry,shx,shy|off)	bitrate_mbps	fps	extra session key=value (one per column)
+# Vision Pro frustum in the simulator: the client reports the recorded AVP per-eye |tan| L,R,D,U (GOAL.md:365) x fov_scale
+# (-ALVRDebugEyeTangents); foveation columns copied from points-chart-sim.tsv (its shift y -0.159 is the old device's sign).
+a100-asrun	1.0	1.0	0.5,0.45,3,3,0,0	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236
+a100-centred	1.0	1.0	0.5,0.45,3,3,0.536,-0.159	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236
+a100-wider	1.0	1.0	0.6,0.6,2.5,2.5,0.536,-0.159	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236
+a085-asrun	0.85	1.0	0.5,0.45,3,3,0,0	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236
+a085-centred	0.85	1.0	0.5,0.45,3,3,0.536,-0.159	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236
+a085-wider	0.85	1.0	0.6,0.6,2.5,2.5,0.536,-0.159	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236
+a070-asrun	0.7	1.0	0.5,0.45,3,3,0,0	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236
+a070-centred	0.7	1.0	0.5,0.45,3,3,0.536,-0.159	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236
+a070-wider	0.7	1.0	0.6,0.6,2.5,2.5,0.536,-0.159	100	90	eye_tangents=L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236

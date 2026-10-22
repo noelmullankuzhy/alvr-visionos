@@ -111,6 +111,56 @@ class FlagTest(unittest.TestCase):
                          ENC_KEYS[:2] + ['video.encoder_config.nvenc.split_encode_mode={"variant":"Disabled"}'])
 
 
+AVP_EYES = 'L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236'
+
+
+class EyeTangentsTest(unittest.TestCase):
+    """eye_tangents=L:l,r,d,u;R:l,r,d,u: the client's -ALVRDebugEyeTangents launch argument, never a session path."""
+    def test_default_is_none(self):
+        self.assertIsNone(parse('a\t1\t1\toff\t100\t90\tvideo.q=2\n')[0]['eye_tangents'])
+
+    def test_column_is_taken_out_of_the_session_sets(self):
+        p = parse('a\t0.85\t1\toff\t100\t90\teye_tangents=%s\tvideo.q=2\n' % AVP_EYES)[0]
+        self.assertEqual(p['eye_tangents'], AVP_EYES)
+        self.assertEqual(p['extra'], ['video.q=2'])
+        self.assertFalse([x for x in fm.session_sets(p) if 'eye_tangents' in x])
+
+    def test_bad_values(self):
+        for bad in ('L:1,1,1,1', 'L:1,1,1;R:1,1,1,1', 'L:1,1,1,1;R:1,0,1,1', 'L:1,1,1,1;R:1,-1,1,1', 'L:1,1,1,1;L:1,1,1,1',
+                    'L:1,1,1,1;X:1,1,1,1', 'L:1,1,1,1;R:1,x,1,1', ''):
+            with self.assertRaises(ValueError) as cm:
+                parse('a\t1\t1\toff\t100\t90\teye_tangents=%s\n' % bad)
+            self.assertIn('eye_tangents', str(cm.exception))
+
+    def test_subcommand_prints_the_value_or_nothing(self):
+        with tempfile.NamedTemporaryFile('w', suffix='.tsv', delete=False) as f:
+            f.write('a\t1\t1\toff\t100\t90\teye_tangents=%s\nb\t1\t1\toff\t100\t90\n' % AVP_EYES)
+        try:
+            import io
+            from contextlib import redirect_stdout
+            for name, want in (('a', AVP_EYES + '\n'), ('b', '\n')):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    self.assertEqual(fm.main(['fovmatrix.py', 'eye-tangents', f.name, name]), 0)
+                self.assertEqual(buf.getvalue(), want)
+        finally:
+            os.unlink(f.name)
+
+    def test_shipped_avp_points(self):
+        with open(os.path.join(HERE, 'points-chart-avp.tsv')) as f:
+            pts = fm.parse_points(f.read().splitlines())
+        with open(os.path.join(HERE, 'points-chart-sim.tsv')) as f:
+            sim = {p['name'].split('-')[1]: p for p in fm.parse_points(f.read().splitlines()) if '-' in p['name']}
+        names = ['a%s-%s' % (s, v) for s in ('100', '085', '070') for v in ('asrun', 'centred', 'wider')]
+        self.assertEqual([p['name'] for p in pts], names)
+        for p in pts:
+            scale, variant = p['name'][1:].split('-')
+            self.assertEqual(p['fov_scale'], int(scale) / 100)
+            self.assertEqual(p['eye_tangents'], AVP_EYES)
+            for k in ('render_scale', 'foveation', 'bitrate_mbps', 'fps', 'extra', 'flag'):
+                self.assertEqual(p[k], sim[variant][k], (p['name'], k))       # foveation columns copied from the sim points
+
+
 class SettingsTest(unittest.TestCase):
     def setUp(self):
         self.p = parse('a\t0.6\t1.03\t0.6,0.6,2.5,2.5,0.536,-0.159\t500\t90\tvideo.q=2\n')[0]

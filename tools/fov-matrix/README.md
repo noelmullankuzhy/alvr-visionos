@@ -84,6 +84,18 @@ disabled): `enc-base100` (flag `dump`, split ForceTwo, 100 Mbps: normal chart as
   (median achieved), `fps` (client presented fps). Holding 90 fps at 500 Mbps = `s500` with `fps` ~90, `encode_ms_p95` < 11.1,
   `encode_over_budget` ~0 and `bitrate_mbps` near 500.
 
+## Vision Pro frustum in the simulator
+
+`points-chart-avp.tsv` (`a100`/`a085`/`a070` x `asrun`/`centred`/`wider`, foveation as `points-chart-sim.tsv`, 100 Mbps)
+makes the simulator client report the recorded AVP per-eye frustum (|tan| L 1.782,1.019,1.019,1.217; R 1.032,1.820,1.033,1.236,
+L,R,D,U, GOAL.md:365) x `fov_scale` instead of its own view. Needs a client with `-ALVRDebugEyeTangents` (debug/simulator builds).
+
+- **Extra column** `eye_tangents=L:l,r,d,u;R:l,r,d,u` (not a session path): the runner appends
+  `-ALVRDebugEyeTangents "<value>"` to the `simctl launch` arguments; without the column the launch is unchanged.
+- The client records `debug_eye_tangents` (requested, reported, fov_render_scale) in capture.json; the drawable overlay
+  places the stream by the reported tangents and fails when they are not `fov_scale` x requested. The simulator view is
+  |tan| 1,1,0.5625,0.5625, so most stream edges are out of view (at 1.0 all of them: a summary note, the lines carry the check).
+
 ## Tests
 
 ```sh
