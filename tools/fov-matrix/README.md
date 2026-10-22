@@ -171,3 +171,10 @@ sh tools/fov-matrix/test-runner-stubs.sh      # runner with stub ssh/xcrun: happ
 `run-ladder.sh` runs the six-rung bitrate/preset ladder on the real headset (crop-C / crop-T at 100 / 300 / 500 Mbps, P1) with
 the device statistics pulled by devicectl: `docs/lumen/device-ladder.md`. It shares the PC exec path, session backup/restore,
 dead-server guard and graceful stop with `run-matrix.sh` through `lib-pc.sh`. Tests: `test_ladder.py`, `test-ladder-stubs.sh`.
+
+`--client-host HOST` (env `CLIENT_HOST`, required for a live run) is the headset's ALVR hostname (`<n>.client.alvr`; it changes
+when the headset's ALVR identity does, check the streamer log). After each rung's apply the runner calls `pc-session.py isolate`,
+which sets `trusted=false` on every other `client_connections` entry of the live session (entries kept; restore brings the whole
+file back), because a second trusted headset announcing over mDNS mid-run made the server try it and stall the stream. devicectl
+gets `--` before the app's `-ALVR...` arguments by default (it parsed `-ALVRAutoEnter YES` as its own `-t YES`);
+`LADDER_DEVICECTL_ARGSEP=` (empty) disables it.

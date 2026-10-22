@@ -1,6 +1,6 @@
 """Runs on the PC inside WSL (python3, stdlib): back up, edit, restore and verify the ALVR streamer session.json,
 and drive the angle-chart flag file next to it. Writes only under /mnt/c/Users/noelm/claude-tmp.
-usage: pc-session.py backup|apply SETSFILE|restore|flag off|on|dump|fetch-dump BUILD   (BUILD = 12-char commit dir)
+usage: pc-session.py backup|apply SETSFILE|isolate HOSTNAME|restore|flag off|on|dump|fetch-dump BUILD   (BUILD = 12-char commit dir)
        pc-session.py safemode-check|safemode-clear|driver-check [--file PATH] [--backup-dir DIR]   (one JSON line each)
 Every failure exits non-zero with a precise message; apply is strict (an unknown settings path aborts, nothing written)."""
 import base64
@@ -83,6 +83,27 @@ def apply(root, build, sets):
         json.dump(s, f, indent=2)
     os.replace(tmp, p['live'])
     return 'written %d sets sha=%s' % (len(sets), sha(p['live']))
+
+
+def isolate(root, build, target):
+    """On the live session (so the sets apply wrote stay): every client_connections entry except `target` gets trusted=false (entries kept, restore brings
+    the whole file back), so a second headset announcing over mDNS mid-run cannot be connected by the server."""
+    p = paths(root, build)
+    if not os.path.exists(p['orig']):
+        raise SystemExit('isolate FAILED: no backup; run backup first')
+    with open(p['live']) as f:
+        s = json.load(f)
+    conns = s.get('client_connections') or {}
+    if target not in conns:
+        raise SystemExit('isolate FAILED: target %s not in client_connections (known: %s)' % (target, ', '.join(sorted(conns)) or 'none'))
+    others = sorted(h for h in conns if h != target)
+    for h in others:
+        conns[h]['trusted'] = False
+    tmp = p['live'] + '.fovmatrix.tmp'
+    with open(tmp, 'w') as f:
+        json.dump(s, f, indent=2)
+    os.replace(tmp, p['live'])
+    return 'isolated target=%s untrusted=%s' % (target, ','.join(others))
 
 
 def restore(root, build):
@@ -228,6 +249,8 @@ def main(argv):
                 sets = [l.strip() for l in f if l.strip()]
             print('\n'.join('set ' + s for s in sets))
             print(apply(ROOT, build, sets))
+        elif action == 'isolate':
+            print(isolate(ROOT, build, argv[2]))
         elif action == 'restore':
             print(restore(ROOT, build))
         elif action == 'flag':

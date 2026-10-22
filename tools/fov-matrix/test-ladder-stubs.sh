@@ -80,7 +80,7 @@ json.dump({'session_settings': {'video': {
     'foveated_encoding': {'enabled': True, 'content': {'center_size_x': 0.4, 'center_size_y': 0.4, 'edge_ratio_x': 4.0,
                                                        'edge_ratio_y': 4.0, 'center_shift_x': 0.0, 'center_shift_y': 0.0}},
     'transcoding_view_resolution': res(), 'emulated_headset_view_resolution': res(),
-}}}, open(sys.argv[1], 'w'), indent=2)
+}}, 'client_connections': {'stub-client.alvr': {'trusted': True}, 'other.client.alvr': {'trusted': True}}}, open(sys.argv[1], 'w'), indent=2)
 # the device's telemetry: an old session and the current one (names are UTC; "current" sorts last and is far in the future)
 def stat(i, p95):
     return json.dumps({'type': 'stats', 't': float(i), 'frames_received': 90, 'frames_dropped': 0, 'presented_fps': 90.0, 'decode_ms_mean': 6.0, 'decode_ms_p95': p95})
@@ -104,7 +104,7 @@ tunnels_alive() {  # any tunnel stub pid recorded since the last reset still run
 run() {  # run OUTDIR [extra args]
   od=$1; shift
   PATH="$T/bin:$PATH" PCW="$T/pc/fov-matrix" FAKE_PC="$T/pc" FAKE_DEV="$T/dev" HARNESS="$T/harness" PCPS="$T/pcps.sh" VRSETTINGS="$T/vrsettings" VRSERVER_LOG="$T/vrserver.txt" \
-    ${EXEC:-} sh "$HERE/run-ladder.sh" --points "${TSV:-$T/two.tsv}" --out "$od" --build b1 --settle 1 --probe-seconds 5 --connect-timeout 10 --operator-after 5 "$@"
+    ${EXEC:-} sh "$HERE/run-ladder.sh" --points "${TSV:-$T/two.tsv}" --out "$od" --build b1 --settle 1 --probe-seconds 5 --connect-timeout 10 --operator-after 5 --client-host stub-client.alvr "$@"
 }
 
 echo "== happy path"
@@ -115,7 +115,8 @@ t "grep -q '^dC-p1-100	PASS	7.00	7.00	9.50' $T/o1.out" "dC row PASS with NVENC 7
 t "grep -q '^dT-p1-500	PASS' $T/o1.out" "dT row PASS"
 t "grep -q '	6.00	9.00	9.00	0	0.00	0	90.0	299.0	5	' $T/o1.out" "device columns from the newest telemetry file, last 5 windows, bitrate from the server"
 t "cmp -s $SESSION $T/session.orig" "session restored byte for byte"
-t "grep -q 'launch --device 00008112-001E456E0C21A01E --terminate-existing uk.lumenio.alvr -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal' $T/dev/launch.args" "client launched with the auto-enter arguments"
+t "grep -q 'launch --device 00008112-001E456E0C21A01E --terminate-existing uk.lumenio.alvr -- -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal' $T/dev/launch.args" "client launched with the -- separator and the auto-enter arguments"
+t "grep -q '^isolated target=stub-client.alvr untrusted=other.client.alvr' $T/o1/dC-p1-100/pc-isolate.log" "isolate ran per rung for the target client only"
 t "! grep -q DebugEyeTangents $T/dev/launch.args" "no debug tangents on the device"
 t "grep -q 'source Documents/telemetry' $T/dev/copy.args || grep -q -- '--source Documents/telemetry' $T/dev/copy.args" "telemetry directory pulled with devicectl copy from"
 t "grep -q 'domain-type appDataContainer --domain-identifier uk.lumenio.alvr' $T/dev/copy.args" "from the app data container"
@@ -139,14 +140,19 @@ echo "== devicectl launch fails: operator line, run goes on"
 ( LAUNCH_FAIL=1; export LAUNCH_FAIL; run "$T/o3" --only dC-p1-100 > "$T/o3.out" 2> "$T/o3.err" ); rc=$?
 t "[ $rc = 0 ] && grep -q 'OPERATOR: devicectl could not launch' $T/o3.err" "launch failure -> OPERATOR line, stream still measured (rc=$rc)"
 
-echo "== LADDER_DEVICECTL_ARGSEP=-- and the dry run"
+echo "== LADDER_DEVICECTL_ARGSEP (default --, empty disables) and the dry run"
 rm -f "$T/dev/launch.args"
-( LADDER_DEVICECTL_ARGSEP=--; export LADDER_DEVICECTL_ARGSEP; run "$T/o3b" --only dC-p1-100 > "$T/o3b.out" 2> "$T/o3b.err" ); rc=$?
-t "[ $rc = 0 ] && grep -q -- '--terminate-existing uk.lumenio.alvr -- -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal' $T/dev/launch.args" "ARGSEP=-- puts the separator before the app arguments (rc=$rc)"
+( LADDER_DEVICECTL_ARGSEP=; export LADDER_DEVICECTL_ARGSEP; run "$T/o3b" --only dC-p1-100 > "$T/o3b.out" 2> "$T/o3b.err" ); rc=$?
+t "[ $rc = 0 ] && grep -q -- '--terminate-existing uk.lumenio.alvr -ALVRAutoEnter YES -ALVRAutoEnterRenderer metal' $T/dev/launch.args" "explicit empty ARGSEP drops the separator (rc=$rc)"
 run "$T/o3c" --only dC-p1-100 --dry-run > "$T/o3c.out" 2>&1
-t "grep -q -- 'launch --device 00008112-001E456E0C21A01E --terminate-existing uk.lumenio.alvr -ALVRAutoEnter YES' $T/o3c.out" "default launch command has no separator, dry run prints it"
-( LADDER_DEVICECTL_ARGSEP=--; export LADDER_DEVICECTL_ARGSEP; run "$T/o3d" --only dC-p1-100 --dry-run > "$T/o3d.out" 2>&1 )
-t "grep -q -- 'uk.lumenio.alvr -- -ALVRAutoEnter YES' $T/o3d.out" "dry run prints the separator when set"
+t "grep -q -- 'launch --device 00008112-001E456E0C21A01E --terminate-existing uk.lumenio.alvr -- -ALVRAutoEnter YES' $T/o3c.out" "default dry-run launch command has the separator"
+t "grep -q 'pc-session.py isolate stub-client.alvr b1' $T/o3c.out" "dry run shows the isolate step with the client host"
+( LADDER_DEVICECTL_ARGSEP=; export LADDER_DEVICECTL_ARGSEP; run "$T/o3d" --only dC-p1-100 --dry-run > "$T/o3d.out" 2>&1 )
+t "grep -q -- 'uk.lumenio.alvr -ALVRAutoEnter YES' $T/o3d.out" "dry run prints no separator when ARGSEP is empty"
+
+echo "== --client-host is required for a live run"
+sh "$HERE/run-ladder.sh" --points "$T/two.tsv" --out "$T/o3e" > /dev/null 2> "$T/o3e.err"; rc=$?
+t "[ $rc = 2 ] && grep -q 'client-host' $T/o3e.err && [ ! -e $T/pc/fov-matrix/session.orig.json ]" "missing --client-host refused before any PC change (rc=$rc)"
 
 echo "== devicectl copy fails"
 ( COPY_FAIL=1; export COPY_FAIL; run "$T/o4" --only dC-p1-100 > "$T/o4.out" 2> "$T/o4.err" ); rc=$?

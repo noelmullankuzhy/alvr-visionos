@@ -12,12 +12,14 @@
 # Writes DIR/<rung>/{sets.txt,events.jsonl,device-stats.jsonl,telemetry/,summary.tsv,ERROR?}, DIR/summary.tsv; stdout is the
 # summary only (dry run: the command plan, also in DIR/plan.txt).
 # Pass rule (fovmatrix.py ladder_verdict): decode_ms_p95 < 11 and dropped_total < 1 % of frames received, over the probe.
-# Options: --device ID (default Vision Pro 00008112-001E456E0C21A01E), --bundle-id ID (uk.lumenio.alvr), --build ID,
+# Options: --client-host HOST (env CLIENT_HOST; the headset's ALVR hostname, required for a live run: after apply the PC session is
+#   isolated to it, every other client_connections entry untrusted), --device ID (default Vision Pro 00008112-001E456E0C21A01E), --bundle-id ID (uk.lumenio.alvr), --build ID,
 #   --settle S (20), --probe-seconds S (60), --connect-timeout S (120), --operator-after S (20), --only NAME[,NAME],
 #   --stop-on-error. A launch argument the device ignores: after --operator-after s without a client the script prints one
 #   "OPERATOR:" line asking for a manual start and keeps waiting up to --connect-timeout.
 # Env overrides: HARNESS PCPS PYTHON WIN PCW XCRUN VRSETTINGS VRSERVER_LOG (see README.md), LADDER_DEVICECTL_ARGSEP (default
-#   empty; `--` puts a separator before the client's -ALVR... arguments in the devicectl launch, if the device rejects them).
+#   `--`, a separator before the client's -ALVR... arguments in the devicectl launch, else devicectl parses them as its own options;
+#   set it empty to drop it).
 # The ssh tunnel is killed after every rung, at the client-connect timeout, and on EXIT/INT/TERM/HUP (cleanup).
 set -u
 
@@ -29,7 +31,7 @@ WIN=${WIN:-win-workstation}
 XCRUN=${XCRUN:-xcrun}
 DEVICE=${DEVICE:-00008112-001E456E0C21A01E}
 BID=${BID:-uk.lumenio.alvr}
-ARGSEP=${LADDER_DEVICECTL_ARGSEP:-}   # unquoted where used: empty vanishes, `--` becomes one word
+ARGSEP=${LADDER_DEVICECTL_ARGSEP---}   # unquoted where used: empty vanishes, `--` becomes one word (unset = `--`, set-but-empty = none)
 BUILD=${BUILD:-1ce896631ea1}
 PCW=${PCW:-/mnt/c/Users/noelm/claude-tmp/fov-matrix}   # override only in the stub test
 TOOL=run-ladder
@@ -40,6 +42,7 @@ CONNECT_SLICE=5   # s of one server-events read while waiting for the client
 VRS_ARG=${VRSETTINGS:+--file $VRSETTINGS}
 VRLOG_ARG=${VRSERVER_LOG:+--file $VRSERVER_LOG}
 
+CLIENT_HOST=${CLIENT_HOST:-}
 POINTS=; OUT=; DRY=0; RESTORE_ONLY=0; STOP_ON_ERROR=0; ONLY=
 SETTLE=20; PROBE_SECONDS=60; CONNECT_TIMEOUT=120; OPERATOR_AFTER=20
 
@@ -52,6 +55,7 @@ while [ $# -gt 0 ]; do
     --restore) RESTORE_ONLY=1; shift ;;
     --stop-on-error) STOP_ON_ERROR=1; shift ;;
     --only) ONLY=${2:?--only needs NAME[,NAME]}; shift 2 ;;
+    --client-host) CLIENT_HOST=${2:?--client-host needs a hostname}; shift 2 ;;
     --device) DEVICE=${2:?}; shift 2 ;;
     --bundle-id) BID=${2:?}; shift 2 ;;
     --build) BUILD=${2:?}; shift 2 ;;
@@ -71,6 +75,8 @@ else
   [ -n "$POINTS" ] && [ -f "$POINTS" ] || die "--points FILE required (got '$POINTS')"
   [ -n "$OUT" ] || die "--out DIR required"
   $FM check "$POINTS" >/dev/null || exit 2
+  [ -n "$CLIENT_HOST" ] || [ "$DRY" = 1 ] || die "--client-host HOST (or CLIENT_HOST) required: the headset's ALVR hostname, the only client the server may connect"
+  [ -n "$CLIENT_HOST" ] || CLIENT_HOST='<client-host>'
 fi
 mkdir -p "$OUT" || die "cannot create $OUT"
 OUT=$(CDPATH= cd -- "$OUT" && pwd)
@@ -140,6 +146,7 @@ run_rung() {
 
   # 2. PC session: the rung's sets from the backup (never from the previous rung), chart flag off
   pc_apply "$PD/sets.txt" || return 1
+  pc_isolate "$CLIENT_HOST" || return 1
   PC_SETS= pc_action "$PD" flag flag off "$BUILD"
   if [ "$DRY" != 1 ] && ! grep -q '^flag ' "$PD/pc-flag.log"; then
     fail_hard "pc flag: failed: $(tail -1 "$PD/pc-flag.log")"; return 1

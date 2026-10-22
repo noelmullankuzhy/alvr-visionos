@@ -220,6 +220,58 @@ VRSETTINGS_BLOCKED = (b'{\r\n   "driver_alvr_server" : {\r\n      "blocked_by_sa
                       b'   "driver_other" : {\r\n      "blocked_by_safe_mode" : true\r\n   },\r\n   "steamvr" : {\r\n      "x" : "\xc3\xa9"\r\n   }\r\n}\r\n')
 
 
+class IsolateTest(unittest.TestCase):
+    """isolate: only the target client stays trusted, so a second announcing headset cannot be connected mid-run."""
+    CONNS = {'target.client.alvr': {'trusted': True, 'manual_ips': ['10.0.0.9']},
+             'other-b.client.alvr': {'trusted': True}, 'other-a.client.alvr': {'trusted': False}, 'other-c.client.alvr': {'trusted': True}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root, self.build = self.tmp.name, 'abc123'
+        d = os.path.join(self.root, 'alvr-build', 'out', self.build, 'alvr_streamer_windows')
+        os.makedirs(d)
+        self.session = os.path.join(d, 'session.json')
+        with open(self.session, 'w') as f:
+            json.dump({'session_settings': SESSION['session_settings'], 'client_connections': self.CONNS}, f)
+
+    def live(self):
+        return json.loads(rd(self.session))
+
+    def test_untrusts_others_keeps_target_and_entries(self):
+        ps.backup(self.root, self.build)
+        out = ps.isolate(self.root, self.build, 'target.client.alvr')
+        self.assertEqual(out, 'isolated target=target.client.alvr untrusted=other-a.client.alvr,other-b.client.alvr,other-c.client.alvr')
+        c = self.live()['client_connections']
+        self.assertEqual(set(c), set(self.CONNS))
+        self.assertTrue(c['target.client.alvr']['trusted'])
+        self.assertEqual(c['target.client.alvr']['manual_ips'], ['10.0.0.9'])
+        self.assertTrue(all(not c[h]['trusted'] for h in c if h != 'target.client.alvr'))
+        self.assertIn('restore OK', ps.restore(self.root, self.build))
+        self.assertEqual(self.live()['client_connections'], self.CONNS)
+
+    def test_unknown_target_refused_and_nothing_written(self):
+        ps.backup(self.root, self.build)
+        before = rd(self.session)
+        with self.assertRaises(SystemExit) as e:
+            ps.isolate(self.root, self.build, 'nope.client.alvr')
+        self.assertIn('nope.client.alvr', str(e.exception))
+        self.assertEqual(rd(self.session), before)
+
+    def test_refused_without_backup(self):
+        with self.assertRaises(SystemExit) as e:
+            ps.isolate(self.root, self.build, 'target.client.alvr')
+        self.assertIn('no backup', str(e.exception))
+
+    def test_idempotent(self):
+        ps.backup(self.root, self.build)
+        ps.isolate(self.root, self.build, 'target.client.alvr')
+        first = rd(self.session)
+        out = ps.isolate(self.root, self.build, 'target.client.alvr')
+        self.assertEqual(rd(self.session), first)
+        self.assertIn('untrusted=other-a.client.alvr,other-b.client.alvr,other-c.client.alvr', out)
+
+
 class SafeModeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
