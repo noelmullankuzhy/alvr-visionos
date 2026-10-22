@@ -157,7 +157,7 @@ class LensOutlineReportTests(unittest.TestCase):
 FIXTURE = Path(__file__).with_name('fixtures') / 'projection-overlay.json'
 L_RAYS = ('0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,'
           '210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5')
-PROJECTION = ('bbox_deg=41.512,37.500,31.607,32.500 bbox_tan=0.8851,0.7673,0.6154,0.6371 fov_source=a100-axis-C '
+PROJECTION = ('bbox_deg=41.512,37.500,31.607,32.500 bbox_tan=0.8851,0.7673,0.6154,0.6371 fov_source=a100-axis-C fov_live=no '
               'foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 '
               'pxdeg_frustum=26.541 pxdeg_bbox=44.108')
 PROJECTION_LOG = '''DIAG dots_session t_ms=1 event=begin radius_m=10.000 pose=device angles=projected_tangent
@@ -215,6 +215,7 @@ class ProjectionReportTests(unittest.TestCase):
         self.assertEqual(first['bbox_deg'], (41.512, 37.5, 31.607, 32.5))
         self.assertEqual(first['fov_rect_deg'], (34.296, 34.372, 26.152, 26.263))
         self.assertEqual(first['fov_source'], 'a100-axis-C')
+        self.assertEqual(first['fov_live'], 'no')
         self.assertEqual(first['render_px'], (4176, 3333))
         self.assertEqual((first['pxdeg_frustum'], first['pxdeg_bbox']), (26.541, 44.108))
         self.assertEqual(first['projection_check'], 'ok')
@@ -231,10 +232,10 @@ class ProjectionReportTests(unittest.TestCase):
             self.assertIn(text, output)
         summary = [line for line in output.splitlines() if line.startswith('projection ')]
         self.assertEqual(summary, [
-            'projection session=diag-outline.log:1 eye=L source=diag-outline.log:2 fov_source=a100-axis-C '
+            'projection session=diag-outline.log:1 eye=L source=diag-outline.log:2 fov_source=a100-axis-C fov_live=no '
             'bbox_deg=41.512,37.5,31.607,32.5 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 '
             'pxdeg_frustum=26.541 pxdeg_bbox=44.108 gain=1.66 check=ok; eye=R no data',
-            'projection session=diag-outline.log:4 eye=L source=diag-outline.log:6 fov_source=a100-axis-C '
+            'projection session=diag-outline.log:4 eye=L source=diag-outline.log:6 fov_source=a100-axis-C fov_live=no '
             'bbox_deg=41.512,37.5,31.607,32.5 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 '
             'pxdeg_frustum=26.541 pxdeg_bbox=45 gain=1.70 check=mismatch: pxdeg_bbox; eye=R no data',
         ])

@@ -1,0 +1,13 @@
+{
+  "source": "tools/fov-matrix/points-chart-avp.tsv at develop 6aab8e6 (22 Oct 2026), fov_scale 1 rows",
+  "compiled_into": "ALVRClient/Diagnostics/ProjectionOverlay.swift ProjectionFoveation.points",
+  "columns": "foveation = cx,cy,rx,ry,shx,shy",
+  "rows": [
+    {"name": "a100-asrun", "render_scale": 1, "foveation": [0.5, 0.45, 3, 3, 0, 0]},
+    {"name": "a100-centred", "render_scale": 1, "foveation": [0.5, 0.45, 3, 3, 0.293, -0.117]},
+    {"name": "a100-wider", "render_scale": 1, "foveation": [0.563, 0.618, 2.5, 2.5, 0.335, -0.168]},
+    {"name": "a100-axis-C", "render_scale": 1.1447, "foveation": [0.5, 0.45, 3, 3, 0.536, -0.159]},
+    {"name": "a100-axis-A", "render_scale": 1, "foveation": [0.5, 0.45, 3, 3, 0.536, -0.159]},
+    {"name": "a100-wider-A", "render_scale": 0.8246, "foveation": [0.563, 0.618, 2.5, 2.5, 0.335, -0.168]}
+  ]
+}

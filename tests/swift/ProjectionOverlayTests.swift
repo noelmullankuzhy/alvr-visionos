@@ -149,15 +149,56 @@ enum ProjectionOverlayTests {
         let ring = ProjectionOverlay.axisCircle
         expect(ring.count >= 24 && ring.allSatisfy { abs($0.eccDeg - 0.5) < 1e-12 }, "axis circle 0.5 deg radius")
 
+        // The bbox is drawn dashed: short dashes of equal tangent length along the closed path, gaps between them,
+        // every point on the box, the first dash from the top-left corner.
+        let dash = ProjectionOverlay.bboxDash
+        expect(dash.dash > 0 && dash.dash <= 0.03 && dash.gap > 0 && dash.gap <= 0.03, "short dashes: \(dash)")
+        func length(_ points: [SIMD2<Double>]) -> Double { zip(points, points.dropFirst()).map { simd_distance($0, $1) }.reduce(0, +) }
+        let fine = ProjectionBox(left).path(step: 0.05)
+        let perimeter = 2 * (1.7321 + 1 + 1 + 1.1918)
+        let dashes = ProjectionOverlay.dashes(fine, dash: 0.02, gap: 0.02)
+        expectEqual(dashes.count, Int((perimeter / 0.04).rounded(.up)), "dash count")
+        expect(dashes.dropLast().allSatisfy { abs(length($0) - 0.02) < 1e-9 }, "full dashes 0.02 tan")
+        expect(dashes.last.map { length($0) <= 0.02 + 1e-9 && length($0) > 0 } ?? false, "last dash no longer than 0.02")
+        near(dashes.map(length).reduce(0, +), perimeter / 2, "dashes cover half the perimeter", tolerance: 0.02)
+        expect(dashes.allSatisfy { $0.count >= 2 }, "every dash has two ends")
+        expect(dashes.first?.first.map { simd_distance($0, SIMD2(-1.7321, 1.0)) < 1e-12 } ?? false, "first dash at the top-left corner")
+        expect(dashes.joined().allSatisfy { p in abs(p.x + 1.7321) < 1e-9 || abs(p.x - 1) < 1e-9 || abs(p.y - 1) < 1e-9 || abs(p.y + 1.1918) < 1e-9 },
+               "dashes on the box")
+        // A dash across a corner keeps the corner.
+        let corner = ProjectionOverlay.dashes([[0, 0], [1, 0], [1, 1], [0, 1]], dash: 1.5, gap: 0.5)
+        expectEqual(corner.first ?? [], [[0, 0], [1, 0], [1, 0.5]], "dash bends at the corner")
+        expectEqual(corner.count, 2, "two dashes on a perimeter of 4")
+        expectEqual(corner.last ?? [], [[1, 1], [0, 1], [0, 0.5]], "second dash from 2.0 to 3.5, on the closing edge")
+
+        // The points table matches tools/diag/fixtures/projection-points.json, which test_projection_points_table.py
+        // checks against tools/fov-matrix/points-chart-avp.tsv.
+        let pointsFixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../tools/diag/fixtures/projection-points.json").standardized
+        if let data = try? Data(contentsOf: pointsFixture),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let rows = root["rows"] as? [[String: Any]] {
+            expectEqual(rows.map { $0["name"] as? String ?? "?" }, ProjectionFoveation.points.map(\.name), "points fixture names")
+            for (row, point) in zip(rows, ProjectionFoveation.points) {
+                let v = point
+                expectEqual(row["render_scale"] as? Double, v.renderScale, "points fixture \(v.name) render_scale")
+                expectEqual(row["foveation"] as? [Double], [v.centerSize.x, v.centerSize.y, v.edgeRatio.x, v.edgeRatio.y, v.shift.x, v.shift.y],
+                            "points fixture \(v.name) foveation")
+            }
+        } else {
+            expect(false, "fixture \(pointsFixture.path) readable with rows")
+        }
+
         // Readout and log fields for one eye: L lens offset 0, the default points row, device frustum.
         let stream = ProjectionStream.points(axisC)
         expectEqual(stream.source, "a100-axis-C")
         expectEqual(stream.render, renderC)
         let readout = ProjectionReadout(eye: .left, frustum: left, outline: BoundaryDotsLensReference.outline(.left, offsetDeg: 0)!,
                                         stream: stream)!
+        expect(!stream.live, "a points row is a preset")
         expectEqual(readout.lines, [
             "L bbox L 41.5 R 37.5 U 31.6 D 32.5 deg  tan 0.885/0.767/0.615/0.637",
-            "L fov rect L 34.3 R 34.4 U 26.2 D 26.3 deg  (a100-axis-C, 4176x3333)",
+            "L fov a100-axis-C (preset, not live)  rect L 34.3 R 34.4 U 26.2 D 26.3 deg  4176x3333",
             "L px/deg axis: frustum 26.5 → bbox 44.1 (×1.66)",
         ], "readout lines")
         expectEqual(readout.bboxDeg, "41.512,37.500,31.607,32.500")
@@ -171,13 +212,19 @@ enum ProjectionOverlayTests {
         // Live stream: the session's per-eye render and raw FFR settings (aligned like FFR.swift); no foveation = "off".
         let live = ProjectionStream.live(width: 4176, height: 3333, centerSize: [0.5, 0.45], shift: [0.536, -0.159], edgeRatio: [3, 3])
         expectEqual(live.source, "live")
+        expect(live.live, "the stream's settings are live")
+        let liveReadout = ProjectionReadout(eye: .left, frustum: left, outline: BoundaryDotsLensReference.outline(.left, offsetDeg: 0)!,
+                                            stream: live)!
+        expectEqual(liveReadout.lines[1], "L fov (live)  rect L 34.3 R 34.4 U 26.2 D 26.3 deg  4176x3333")
+        expectEqual(liveReadout.fovLive, "yes")
+        expectEqual(readout.fovLive, "no")
         nearBox(ProjectionOverlay.foveationRect(eye: .left, frustum: left, foveation: live.foveation!, render: live.render),
                 [0.682047, 0.684003, 0.491013, 0.493423], "live settings give the same rect", tolerance: 2e-6)
         let off = ProjectionStream.live(width: 3648, height: 2912, centerSize: nil, shift: nil, edgeRatio: nil)
         let offReadout = ProjectionReadout(eye: .left, frustum: left, outline: BoundaryDotsLensReference.outline(.left, offsetDeg: 0)!,
                                            stream: off)!
         expectEqual(offReadout.fovRectDeg, "off")
-        expectEqual(offReadout.lines[1], "L fov rect off  (live, 3648x2912)")
+        expectEqual(offReadout.lines[1], "L fov (live)  rect off  3648x2912")
 
         // Session: the selected points row cycles; the dots_outline line carries the projection fields.
         var session = BoundaryDotsSession()
@@ -189,7 +236,7 @@ enum ProjectionOverlayTests {
         session.eye = .left
         let line = Diag.line(topic: "dots_outline", tMs: 1, fields: session.outlineFields(frustum: left, source: "device_default")!)
         expect(line.hasSuffix(" bbox_deg=41.512,37.500,31.607,32.500 bbox_tan=0.8851,0.7673,0.6154,0.6371 fov_source=a100-axis-C"
-                              + " foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=44.108"),
+                              + " fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=44.108"),
                "projection fields on dots_outline: \(line)")
         session.eye = .right
         session.offset = 5
