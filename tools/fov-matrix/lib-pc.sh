@@ -63,6 +63,14 @@ pc_apply() {  # pc_apply SETSFILE : apply the point's session sets to the PC ses
   fi
 }
 
+pc_isolate() {  # pc_isolate HOST : after apply, untrust every client but HOST in the live session (restore brings the file back)
+  [ "$DRY" = 1 ] && plan "+ pc-session.py isolate $1 $BUILD   # every other client_connections entry gets trusted=false"
+  PC_SETS= pc_action "$PD" isolate isolate "$1" "$BUILD"
+  if [ "$DRY" != 1 ] && ! grep -q '^isolated target=' "$PD/pc-isolate.log"; then
+    fail_hard "pc isolate: failed: $(tail -1 "$PD/pc-isolate.log")"; return 1
+  fi
+}
+
 # Restore the PC session from this run's backup and verify the hash. RESTORE_RC=5 when it is not restored / mismatches.
 restore_pc_session() {
   RESTORE_RC=0
