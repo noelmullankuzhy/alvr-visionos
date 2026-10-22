@@ -1,5 +1,6 @@
 // SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/CornerChart.swift ALVRClient/Diagnostics/ResolutionChart.swift ALVRClient/Diagnostics/GoldenFrame.swift ALVRClient/StreamReprojection.swift ALVRClient/ColourPipeline.swift
 import Foundation
+import CoreVideo
 import simd
 
 private func near(_ a: Double, _ b: Double, _ tol: Double = 1e-6) -> Bool { abs(a - b) <= tol }
@@ -295,6 +296,30 @@ private func testNV12() {
     expectEqual(Int(f.chroma[7]), blue.2, "blue Cr")
     expect(GoldenNV12.frame(left: left, right: GoldenNV12.Image(width: 2, height: 2, channels: 1, bytesPerRow: 2, pixels: [0, 0, 0, 0])) == nil,
            "eyes of different sizes")
+    testPixelBuffer(f)
+}
+
+// The buffer handed to the stream path: '420f' planes as packed, tagged as the live decoder output is
+// (VideoHandler.swift:383-385: primaries BT.709, transfer sRGB, matrix BT.709), so the YCbCr sampler converts it the same way.
+private func testPixelBuffer(_ f: GoldenNV12.Frame) {
+    guard let buffer = GoldenNV12.pixelBuffer(f) else { expect(false, "pixel buffer"); return }
+    expectEqual(CVPixelBufferGetPixelFormatType(buffer), kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, "420f")
+    expectEqual(CVPixelBufferGetWidth(buffer), f.width, "width")
+    expectEqual(CVPixelBufferGetHeight(buffer), f.height, "height")
+    func tag(_ key: CFString) -> String? {
+        CVBufferCopyAttachment(buffer, key, nil).flatMap { $0 as? String }
+    }
+    expectEqual(tag(kCVImageBufferYCbCrMatrixKey), kCVImageBufferYCbCrMatrix_ITU_R_709_2 as String, "matrix as live")
+    expectEqual(tag(kCVImageBufferColorPrimariesKey), kCVImageBufferColorPrimaries_ITU_R_709_2 as String, "primaries as live")
+    expectEqual(tag(kCVImageBufferTransferFunctionKey), kCVImageBufferTransferFunction_sRGB as String, "transfer as live")
+    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+    for (plane, bytes) in [f.luma, f.chroma].enumerated() {
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane), rows = CVPixelBufferGetHeightOfPlane(buffer, plane)
+        let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane)!.assumingMemoryBound(to: UInt8.self)
+        let copied = (0..<rows).flatMap { row in (0..<f.width).map { base[row * stride + $0] } }
+        expectEqual(copied, bytes, "plane \(plane) bytes")
+    }
 }
 
 private func testSession() {
