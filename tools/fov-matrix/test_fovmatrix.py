@@ -1,6 +1,7 @@
 """Tests for fovmatrix.py (settings mapping, points parsing, dump classification, stats, summary row)."""
 import importlib.util
 import json
+import math
 import os
 import tempfile
 import unittest
@@ -9,6 +10,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location('fovmatrix', os.path.join(HERE, 'fovmatrix.py'))
 fm = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fm)
+_as = importlib.util.spec_from_file_location('avp_sharpness', os.path.join(HERE, '..', 'diag', 'avp-sharpness.py'))
+AS = importlib.util.module_from_spec(_as)
+_as.loader.exec_module(AS)
 
 def wj(path, obj):
     with open(path, 'w') as f:
@@ -111,7 +115,7 @@ class FlagTest(unittest.TestCase):
                          ENC_KEYS[:2] + ['video.encoder_config.nvenc.split_encode_mode={"variant":"Disabled"}'])
 
 
-AVP_EYES = 'L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236'
+AVP_EYES = 'L:1.7321,1,1.1918,1;R:1,1.7321,1.1918,1'      # device CompositorServices |tan| L,R,D,U (avp-field.json)
 
 
 class EyeTangentsTest(unittest.TestCase):
@@ -148,17 +152,41 @@ class EyeTangentsTest(unittest.TestCase):
 
     def test_shipped_avp_points(self):
         with open(os.path.join(HERE, 'points-chart-avp.tsv')) as f:
-            pts = fm.parse_points(f.read().splitlines())
-        with open(os.path.join(HERE, 'points-chart-sim.tsv')) as f:
-            sim = {p['name'].split('-')[1]: p for p in fm.parse_points(f.read().splitlines()) if '-' in p['name']}
+            text = f.read()
+        pts = fm.parse_points(text.splitlines())
         names = ['a%s-%s' % (s, v) for s in ('100', '085', '070') for v in ('asrun', 'centred', 'wider')]
         self.assertEqual([p['name'] for p in pts], names)
         for p in pts:
             scale, variant = p['name'][1:].split('-')
             self.assertEqual(p['fov_scale'], int(scale) / 100)
             self.assertEqual(p['eye_tangents'], AVP_EYES)
-            for k in ('render_scale', 'foveation', 'bitrate_mbps', 'fps', 'extra', 'flag'):
-                self.assertEqual(p[k], sim[variant][k], (p['name'], k))       # foveation columns copied from the sim points
+            self.assertEqual((p['render_scale'], p['bitrate_mbps'], p['fps'], p['extra'], p['flag']), (1.0, 100.0, 90.0, [], 'dump'))
+        self.assertEqual(text, AS.points(AS.load()), 'regenerate: python3 tools/diag/avp-sharpness.py points > tools/fov-matrix/points-chart-avp.tsv')
+
+    def test_variants_derive_from_the_visible_field(self):
+        p = AS.load()
+        by = {(q['fov_scale'], q['name'].split('-')[1]): q['foveation'] for q in fm.parse_points(AS.points(p).splitlines())}
+        self.assertEqual(by[(1.0, 'asrun')], (0.5, 0.45, 3.0, 3.0, 0.0, 0.0))
+        # centred: band centre on the field centre (L eye x from the temporal edge, y from the top), at every fov scale
+        for s in (1.0, 0.85, 0.7):
+            cx, cy, rx, ry, shx, shy = by[(s, 'centred')]
+            fx = (s * 1.7321 + (math.tan(math.radians(31)) - math.tan(math.radians(43))) / 2) / (s * 2.7321)
+            fy = (s * 1.0 - (math.tan(math.radians(33)) - math.tan(math.radians(35))) / 2) / (s * 2.1918)
+            self.assertAlmostEqual(shx, (fx - 0.5) / ((1 - cx) / 2), places=3)
+            self.assertAlmostEqual(shy, (fy - 0.5) / ((1 - cy) / 2), places=3)
+            cx, cy = by[(s, 'wider')][:2]          # wider: the band holds the whole field
+            self.assertGreaterEqual(cx, (math.tan(math.radians(43)) + math.tan(math.radians(31))) / (s * 2.7321))
+            self.assertGreaterEqual(cy, (math.tan(math.radians(33)) + math.tan(math.radians(35))) / (s * 2.1918))
+        # a different (seal-off) field changes the variants without touching code
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
+            q = json.loads(json.dumps(p))
+            q['visible_field_deg'].update(nasal=40, temporal=55, up=40, down=45)
+            json.dump(q, f)
+        try:
+            self.assertNotEqual(AS.derive(AS.load(f.name), 1.0, 'wider'), AS.derive(p, 1.0, 'wider'))
+            self.assertGreater(AS.derive(AS.load(f.name), 1.0, 'wider')[0], AS.derive(p, 1.0, 'wider')[0])
+        finally:
+            os.unlink(f.name)
 
 
 class SettingsTest(unittest.TestCase):

@@ -856,7 +856,7 @@ class Spec(unittest.TestCase):
         self.assertEqual(bytes(r[0:3]), bytes([round(0.12 * 255), round(0.06 * 255), round(0.06 * 255)]))
 
 
-AVP = {'L': (1.782, 1.019, 1.019, 1.217), 'R': (1.032, 1.820, 1.033, 1.236)}   # R.E.A.L. log |tan| L,R,D,U (GOAL.md:365)
+AVP = {'L': (1.7321, 1.0, 1.1918, 1.0), 'R': (1.0, 1.7321, 1.1918, 1.0)}   # device CompositorServices |tan| L,R,D,U (avp-field.json)
 SIM_VIEW = '1,1,0.5625,0.5625'                  # simulator drawable view |tan| (chart-matrix-20261022 m6 capture.json)
 CENTRED = '0.5,0.45,3,3,0.536,-0.159'
 
@@ -866,7 +866,7 @@ def csv(values):
 
 
 class AvpFrustum(Base):
-    """Debug eye tangents: the server renders the recorded AVP per-eye frustum (x fov scale, foveation shift), the
+    """Debug eye tangents: the server renders the device AVP per-eye frustum (x fov scale, foveation shift), the
     simulator shows its centre. Every chart line in view lands within 0.05 deg of the asymmetric prediction."""
     SIM = ['--render', '3648x2912', '--tangents', SIM_VIEW, '--phys', '1280x720', '--logical', '1600x900']
 

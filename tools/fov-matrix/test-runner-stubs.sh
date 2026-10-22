@@ -146,7 +146,7 @@ t "grep '^st	' $T/o11.out | grep -q '	9.00	'" "median encode ms unchanged"
 t "head -1 $T/o11.out | grep -q 'notes	encode_ms_p95	encode_over_budget\$'" "new summary columns are last"
 
 echo "== debug eye tangents reach the client launch"
-AVP='L:1.782,1.019,1.019,1.217;R:1.032,1.820,1.033,1.236'
+AVP='L:1.7321,1,1.1918,1;R:1,1.7321,1.1918,1'
 printf 'av\t0.85\t1.0\t0.5,0.45,3,3,0,0\t100\t90\teye_tangents=%s\npl\t0.85\t1.0\t0.5,0.45,3,3,0,0\t100\t90\n' "$AVP" > "$T/avp.tsv"
 rm -f "$T/data/launch.args"
 run "$T/avp.tsv" "$T/o12" > "$T/o12.out" 2> "$T/o12.err"; rc=$?

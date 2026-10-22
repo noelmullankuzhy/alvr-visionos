@@ -86,9 +86,18 @@ disabled): `enc-base100` (flag `dump`, split ForceTwo, 100 Mbps: normal chart as
 
 ## Vision Pro frustum in the simulator
 
-`points-chart-avp.tsv` (`a100`/`a085`/`a070` x `asrun`/`centred`/`wider`, foveation as `points-chart-sim.tsv`, 100 Mbps)
-makes the simulator client report the recorded AVP per-eye frustum (|tan| L 1.782,1.019,1.019,1.217; R 1.032,1.820,1.033,1.236,
-L,R,D,U, GOAL.md:365) x `fov_scale` instead of its own view. Needs a client with `-ALVRDebugEyeTangents` (debug/simulator builds).
+`points-chart-avp.tsv` (`a100`/`a085`/`a070` x `asrun`/`centred`/`wider`, 100 Mbps) makes the simulator client report
+the device AVP per-eye frustum (CompositorServices |tan| L,R,D,U: L 1.7321,1,1.1918,1; R 1,1.7321,1.1918,1) x `fov_scale`
+instead of its own view. Needs a client with `-ALVRDebugEyeTangents` (debug/simulator builds).
+
+The file is generated: the frustum, the visible field (default the 21 Oct seal-on 31/43/33/35 deg nasal/temporal/up/down)
+and the foveation sizes live in `avp-field.json`; `centred` (band on the field centre) and `wider` (band spans the field)
+derive from it per fov scale. After changing it (e.g. a seal-off field), regenerate (a test checks they agree):
+
+```sh
+python3 tools/diag/avp-sharpness.py points > tools/fov-matrix/points-chart-avp.tsv
+python3 tools/diag/avp-sharpness.py doc > docs/lumen/avp-frustum-sharpness.md
+```
 
 - **Extra column** `eye_tangents=L:l,r,d,u;R:l,r,d,u` (not a session path): the runner appends
   `-ALVRDebugEyeTangents "<value>"` to the `simctl launch` arguments; without the column the launch is unchanged.
