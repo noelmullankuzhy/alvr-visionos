@@ -502,21 +502,49 @@ final class DiagCaptureGate {
     let requests: DiagCaptureRequests
     private let lock = NSLock()
     private var busy = false
-    init(requests: DiagCaptureRequests) { self.requests = requests }
+    // With a slot: wait (requests stay pending) while another readback holds it; hold it from a request to finished().
+    private let slot: DiagReadbackSlot?
+    init(requests: DiagCaptureRequests, slot: DiagReadbackSlot? = nil) { self.requests = requests; self.slot = slot }
 
     func next(nowMs: Int, idle: Bool, streamFrame: Bool) -> Outcome {
         lock.lock(); defer { lock.unlock() }
         if busy { return .busy(pendingStreaming: requests.streamingPending) }
+        if let slot, !slot.acquire(Self.slotName) { return .waiting("readback_in_flight") }
         if let request = requests.take(nowMs: nowMs, idle: idle, streamFrame: streamFrame) {
             busy = true
             return .request(request)
         }
+        slot?.release(Self.slotName)
         if !idle && !streamFrame && requests.streamingPending { return .waiting("no_stream_frame") }
         return .none
     }
 
     func finished() {
-        lock.lock(); busy = false; lock.unlock()
+        lock.lock(); busy = false; slot?.release(Self.slotName); lock.unlock()
+    }
+
+    static let slotName = "frame_capture"
+}
+
+// One full drawable readback in flight per process (the frame-capture session and the resolution chart's auto capture
+// each read back whole drawables, up to ~500 MB with foveation off): held from submit until the write finishes.
+final class DiagReadbackSlot {
+    static let shared = DiagReadbackSlot()
+    private let lock = NSLock()
+    private var owner: String?
+
+    var holder: String? { lock.lock(); defer { lock.unlock() }; return owner }
+
+    func acquire(_ who: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard owner == nil else { return false }
+        owner = who
+        return true
+    }
+
+    // Only the holder releases.
+    func release(_ who: String) {
+        lock.lock(); if owner == who { owner = nil }; lock.unlock()
     }
 }
 

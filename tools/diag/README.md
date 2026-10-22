@@ -909,7 +909,15 @@ DIAG chartcap step=quality rq_set=0.500 rq=<read back>
 DIAG chartcap eye=L|R rq=<read back>|unavailable rq_set confirmed=yes|no fov=on|off dir=chart-.. slice physical=WxH patches=24
 DIAG chartcap step=done captures=3 failed=0 fov fov_off restore=<rq>
 DIAG chartcap error=capture_failed dir=..   (with DIAG capture error=..)
+DIAG chartcap error=encoder_nil rq_set=..   (no render encoder that frame)
 ```
+
+A failed capture (no encoder, failed write) counts in `failed=` and the walk moves
+on, so it always reaches `done` and restores the entry quality. One full drawable
+readback is in flight per process: while a **Capture diagnostic frames** capture
+is being written the chart capture retries on the next frame, and a frame-capture
+request waits (`capture_trigger step=waiting why=readback_in_flight`, kept pending)
+while a chart capture is being written.
 
 `capture.json` is the frame-capture format (`slices`: eye, view, slice, png, width,
 height, pixel format, `rate_map` tables) plus `trigger.reason=chartcap` and

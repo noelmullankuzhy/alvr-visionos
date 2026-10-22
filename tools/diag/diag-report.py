@@ -867,12 +867,15 @@ def chart_capture_patches(directory):
                 profile = patch_profile(width, height, pixels, rect, patch.get('orientation'))
                 result = count_bars(profile, len(profile) / (CHART_PATCH_DEG * cpd))
                 expected = expected_bars(cpd)
-                rows.append(dict(eye=view.get('eye'), rq=chart.get('rq'), fov=chart.get('fov'), pos=patch.get('position'),
+                logical = number(patch.get('nyquist_logical_cpd'))
+                rows.append(dict(eye=view.get('eye'), rq=chart.get('rq'), rq_set=chart.get('rq_set'), fov=chart.get('fov'),
+                                 pos=patch.get('position'),
+                                 above_nyquist='unknown' if logical is None else 'yes' if cpd > logical * 1.001 else 'no',
                                  orient=patch.get('orientation'), cpd=int(cpd), expected=expected, count=result['count'],
                                  bar_spread_px=result['bar_spread_px'], gap_spread_px=result['gap_spread_px'],
                                  period_px='{:.2f}'.format(len(profile) / (CHART_PATCH_DEG * cpd)),
                                  **{'class': classify_bars(result, expected)},
-                                 nyquist_logical_cpd=number(patch.get('nyquist_logical_cpd')),
+                                 nyquist_logical_cpd=logical,
                                  nyquist_physical_cpd=number(patch.get('nyquist_physical_cpd')),
                                  dir=folder.name, t_ms=number(data.get('t_ms'))))
     return rows
@@ -880,14 +883,16 @@ def chart_capture_patches(directory):
 
 def chart_capture_summary(patches, records):
     """Per capture, eye, position and orientation: the finest correct and finest count-correct cpd, both Nyquists
-    and the grid verdict (grating_limit on the finest count-correct level)."""
+    and the grid verdict (grating_limit on the finest count-correct level). Patches above their logical Nyquist
+    (above_nyquist=yes, 0.1 % slack as grating_rows) are listed apart and never count as finest."""
     groups = {}
     for p in patches:
-        groups.setdefault((p['dir'], p['eye'], p['rq'], p['fov'], p['pos'], p['orient']), []).append(p)
+        groups.setdefault((p['dir'], p['eye'], p['rq'], p['rq_set'], p['fov'], p['pos'], p['orient']), []).append(p)
     rows = []
-    for (folder, eye, rq, fov, pos, orient), items in groups.items():
-        correct = [p['cpd'] for p in items if p['class'] == 'correct']
-        counted = [p['cpd'] for p in items if p['count'] == p['expected']]
+    for (folder, eye, rq, rq_set, fov, pos, orient), items in groups.items():
+        within = [p for p in items if p['above_nyquist'] != 'yes']
+        correct = [p['cpd'] for p in within if p['class'] == 'correct']
+        counted = [p['cpd'] for p in within if p['count'] == p['expected']]
         logical = [p['nyquist_logical_cpd'] for p in items if p['nyquist_logical_cpd'] is not None]
         captured = [p['nyquist_physical_cpd'] for p in items if p['nyquist_physical_cpd'] is not None]
         line = next((r for r in records if r['topic'] == 'chartcap' and r['fields'].get('dir') == folder
@@ -895,7 +900,9 @@ def chart_capture_summary(patches, records):
         physical = grating_physical_nyquist(records, line['source'], eye, rq, fov, pos, orient, line['t_ms']) if line else None
         reference = physical if physical is not None else (min(captured) if captured else None)
         limit = grating_limit(max(counted) if counted else None, reference)
-        rows.append(dict(eye=eye, rq=rq, fov=fov, pos=pos, orient=orient,
+        rows.append(dict(eye=eye, rq=rq, rq_set=rq_set, fov=fov, pos=pos, orient=orient,
+                         above_nyquist_cpd=','.join(str(p['cpd']) for p in sorted(items, key=lambda p: p['cpd'])
+                                                    if p['above_nyquist'] == 'yes') or None,
                          finest_correct_cpd=max(correct) if correct else None,
                          finest_count_correct_cpd=max(counted) if counted else None,
                          nyquist_logical_cpd='{:.2f}'.format(min(logical)) if logical else None,
@@ -905,7 +912,7 @@ def chart_capture_summary(patches, records):
                                        'lens/eye limited': 'below grid Nyquist'}.get(limit, limit),
                          classes=','.join('{}:{}'.format(p['cpd'], p['class']) for p in sorted(items, key=lambda p: p['cpd'])),
                          dir=folder))
-    return sorted(rows, key=lambda r: tuple(str(r[k]) for k in ('eye', 'rq', 'fov', 'pos', 'orient', 'dir')))
+    return sorted(rows, key=lambda r: tuple(str(r[k]) for k in ('eye', 'rq', 'rq_set', 'fov', 'pos', 'orient', 'dir')))
 
 
 def resolution_report(records, directory=None):
@@ -938,14 +945,17 @@ def resolution_report(records, directory=None):
               'finest_count_correct_cpd: count as drawn. nyquist_physical_cpd: nearest rrm sample (as above); '
               'nyquist_physical_capture_cpd: the capture\'s own rate map at the patch (lowest in the set). grid_verdict: '
               'carries to grid Nyquist = finest count-correct within one level of the physical Nyquist; below grid '
-              'Nyquist = it fails earlier; undetermined = no Nyquist or nothing counted.', '']
+              'Nyquist = it fails earlier; undetermined = no Nyquist or nothing counted. rq_set: the quality requested '
+              '(rq=unavailable without read-back). Patches above their logical Nyquist (above_nyquist_cpd) are '
+              'counted and listed but never the finest.', '']
     lines += table(chart_capture_summary(patches, records),
-                   ('eye', 'rq', 'fov', 'pos', 'orient', 'finest_correct_cpd', 'finest_count_correct_cpd', 'nyquist_logical_cpd',
-                    'nyquist_physical_cpd', 'nyquist_physical_capture_cpd', 'grid_verdict', 'classes', 'dir')) + ['']
+                   ('eye', 'rq', 'rq_set', 'fov', 'pos', 'orient', 'finest_correct_cpd', 'finest_count_correct_cpd',
+                    'nyquist_logical_cpd', 'nyquist_physical_cpd', 'nyquist_physical_capture_cpd', 'grid_verdict',
+                    'above_nyquist_cpd', 'classes', 'dir')) + ['']
     lines += ['Auto capture patches (correct / uneven: count right, widths within 1 px or not; missing: count low, bars '
               'merged to grey or flat; aliased: count wrong at full contrast):', '']
     lines += table(patches, ('eye', 'rq', 'fov', 'pos', 'orient', 'cpd', 'expected', 'count', 'bar_spread_px', 'gap_spread_px',
-                             'period_px', 'class', 'dir')) + ['']
+                             'period_px', 'class', 'above_nyquist', 'dir')) + ['']
     lines += measurements(selected, ('phase', 's', 'fix', 'eye', 'rq', 'fov', 'cpd', 'orient', 'seen')) + ['']
     return lines
 

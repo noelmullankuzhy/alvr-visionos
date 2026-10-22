@@ -598,7 +598,7 @@ class ChartCaptureCounterTests(unittest.TestCase):
         vc_spec = importlib.util.spec_from_file_location('verify_capture', SCRIPT.with_name('verify-capture.py'))
         vc = importlib.util.module_from_spec(vc_spec)
         vc_spec.loader.exec_module(vc)
-        width, height = 240, 100
+        width, height = 240, 160
         pix = bytearray([0, 0, 0, 255] * width * height)
 
         def put(x, y, v):
@@ -614,6 +614,10 @@ class ChartCaptureCounterTests(unittest.TestCase):
         for y in range(20, 80):
             for i in range(60):
                 put(150 + i, y, 128)
+        # temporal20 V 8 cpd drawn cleanly (counts correctly) but logged above its logical Nyquist (7.5): never finest.
+        for y in range(90, 150):
+            for i, v in enumerate(v8):
+                put(10 + i, y, v)
         capture = root / 'captures' / 'chart-20261022T100000Z-rq1.00-fovon'
         capture.mkdir(parents=True)
         vc.write_png(capture / 'drawable-0-texture-0-slice-0.png', width, height, pix)
@@ -628,7 +632,8 @@ class ChartCaptureCounterTests(unittest.TestCase):
                                                    viewport=[0, 0, 6261, 5023], screen=[6261, 5023], physical=[2432, 2368], mapped=True,
                                                    patches=[patch('axis', 8, 'V', [10.0, 20.0, 70.0, 80.0], 20.0, 20.0),
                                                             patch('axis', 20, 'H', [100.0, 20.0, 130.0, 65.0], 20.0, 15.0),
-                                                            patch('axis', 12, 'V', [150.0, 20.0, 210.0, 80.0], 20.0, 20.0)])]))
+                                                            patch('axis', 12, 'V', [150.0, 20.0, 210.0, 80.0], 20.0, 20.0),
+                                                            patch('temporal20', 8, 'V', [10.0, 90.0, 70.0, 150.0], 7.5, 20.0)])]))
         (capture / 'capture.json').write_text(json.dumps(meta))
         (root / 'diag-a.log').write_text(
             'DIAG grating t_ms=1 chart=on mode=auto foveation=on\n'
@@ -647,11 +652,20 @@ class ChartCaptureCounterTests(unittest.TestCase):
             patches = report.chart_capture_patches(root)
             summary = report.chart_capture_summary(patches, records)
             out = report.generate(root)
-        key = {(p['orient'], p['cpd']): p for p in patches}
-        self.assertEqual((key[('V', 8)]['count'], key[('V', 8)]['class']), (12, 'correct'))
-        self.assertEqual(key[('H', 20)]['class'], 'aliased')
-        self.assertEqual((key[('V', 12)]['count'], key[('V', 12)]['class']), (0, 'missing'))
-        rows = {r['orient']: r for r in summary}
+        key = {(p['pos'], p['orient'], p['cpd']): p for p in patches}
+        self.assertEqual((key[('axis', 'V', 8)]['count'], key[('axis', 'V', 8)]['class']), (12, 'correct'))
+        self.assertEqual(key[('axis', 'H', 20)]['class'], 'aliased')
+        self.assertEqual((key[('axis', 'V', 12)]['count'], key[('axis', 'V', 12)]['class']), (0, 'missing'))
+        # Above the logical Nyquist: counted and classified, but never the finest (as grating_rows).
+        self.assertEqual(key[('temporal20', 'V', 8)]['class'], 'correct')
+        self.assertEqual(key[('temporal20', 'V', 8)]['above_nyquist'], 'yes')
+        above = [r for r in summary if r['pos'] == 'temporal20'][0]
+        self.assertIsNone(above['finest_correct_cpd'])
+        self.assertIsNone(above['finest_count_correct_cpd'])
+        self.assertEqual(above['above_nyquist_cpd'], '8')
+        self.assertEqual(above['grid_verdict'], 'undetermined')
+        rows = {r['orient']: r for r in summary if r['pos'] == 'axis'}
+        self.assertEqual(rows['V']['rq_set'], '1.000')
         self.assertEqual(rows['V']['finest_correct_cpd'], 8)
         self.assertEqual(rows['V']['finest_count_correct_cpd'], 8)
         self.assertEqual(rows['V']['nyquist_logical_cpd'], '20.00')
@@ -663,7 +677,15 @@ class ChartCaptureCounterTests(unittest.TestCase):
         self.assertEqual(report.classify_bars(result, 30), 'missing')
         self.assertEqual(rows['V']['grid_verdict'], 'below grid Nyquist')
         self.assertIn('Auto capture', out)
-        self.assertIn('| L | 1.000 | on | axis | V | 8 | 8 | 20.00 | 20.00 | 20.00 | below grid Nyquist |', out)
+        self.assertIn('| L | 1.000 | 1.000 | on | axis | V | 8 | 8 | 20.00 | 20.00 | 20.00 | below grid Nyquist |', out)
+        # No read-back: rq=unavailable rows stay apart by rq_set.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.capture_dir(root)
+            path = next(root.rglob('capture.json'))
+            path.write_text(path.read_text().replace('"rq": "1.000", "rq_set": "1.000"', '"rq": "unavailable", "rq_set": "0.500"'))
+            summary = report.chart_capture_summary(report.chart_capture_patches(root), [])
+        self.assertEqual({(r['rq'], r['rq_set']) for r in summary}, {('unavailable', '0.500')})
         self.assertIn('| L | 1.000 | on | axis | V | 8 | 12 | 12 |', out)
 
 

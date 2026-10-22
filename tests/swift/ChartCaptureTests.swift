@@ -97,7 +97,7 @@ private func testMetadata() {
 }
 
 private func testAutoSession() {
-    let s = AutoCaptureSession()
+    let s = AutoCaptureSession(restore: 0.75)
     expectEqual(s.frame(actual: 1.0, max: 1.0), .setQuality(0.5), "first step sets 0.5")
     for _ in 0..<5 { expect(s.frame(actual: 1.0, max: 1.0) == nil, "waits for the read-back") }
     for i in 0..<30 {
@@ -105,25 +105,84 @@ private func testAutoSession() {
         expect(i < 29 ? step == nil : step == .capture(quality: 0.5, confirmed: true, frames: 35), "30 confirmed frames, then capture \(i) \(String(describing: step))")
     }
     expect(s.frame(actual: 0.5, max: 1.0) == nil, "one capture in flight")
-    s.captured()
+    s.captured(ok: true)
     expectEqual(s.frame(actual: 0.5, max: 1.0), .setQuality(0.75), "next quality")
     // Clamped to the layer's maximum: 1.0 with max 0.8 is confirmed at 0.8.
     for _ in 0..<30 { _ = s.frame(actual: 0.75, max: 0.8) }
-    s.captured()
+    s.captured(ok: true)
     expectEqual(s.frame(actual: 0.75, max: 0.8), .setQuality(1.0), "last quality")
     var step: AutoCaptureSession.Step?
     for _ in 0..<30 { step = s.frame(actual: 0.8, max: 0.8) }
     expectEqual(step, .capture(quality: 1.0, confirmed: true, frames: 30), "clamped quality confirmed")
-    s.captured()
-    expectEqual(s.frame(actual: 0.8, max: 0.8), .done, "done after three")
-    expect(s.frame(actual: 0.8, max: 0.8) == nil && s.finished, "finished")
+    s.captured(ok: true)
+    expectEqual(s.frame(actual: 0.8, max: 0.8), .done(restore: 0.75), "done after three, restoring the entry quality")
+    expect(s.frame(actual: 0.8, max: 0.8) == nil && s.finished && s.captures == 3 && s.failures == 0, "finished")
     // No read-back (non-26 SDK): capture unconfirmed after the timeout.
-    let n = AutoCaptureSession()
+    let n = AutoCaptureSession(restore: nil)
     _ = n.frame(actual: nil, max: nil)
     var last: AutoCaptureSession.Step?
     for _ in 0..<AutoCaptureSession.timeoutFrames { last = n.frame(actual: nil, max: nil) ?? last }
     expectEqual(last, .capture(quality: 0.5, confirmed: false, frames: AutoCaptureSession.timeoutFrames), "timeout capture")
-    expectEqual(AutoCaptureSession().statusText, "0.50", "status shows the quality")
+    expectEqual(AutoCaptureSession(restore: nil).statusText, "0.50", "status shows the quality")
+}
+
+// Walk q through set -> 30 confirmed frames -> capture; returns the capture step.
+private func toCapture(_ s: AutoCaptureSession, _ q: Float) -> AutoCaptureSession.Step? {
+    expectEqual(s.frame(actual: 1.0, max: 1.0), .setQuality(q), "set \(q)")
+    var step: AutoCaptureSession.Step?
+    for _ in 0..<30 { step = s.frame(actual: q, max: 1.0) }
+    return step
+}
+
+private func testAutoSessionFailuresAndRetry() {
+    // A nil encoder (or a failed write) on step 2 counts as a failed capture; the walk continues, reaches done and restores.
+    let s = AutoCaptureSession(restore: 0.9)
+    expectEqual(toCapture(s, 0.5), .capture(quality: 0.5, confirmed: true, frames: 30), "step 1")
+    s.captured(ok: true)
+    expectEqual(toCapture(s, 0.75), .capture(quality: 0.75, confirmed: true, frames: 30), "step 2")
+    s.captured(ok: false)
+    expectEqual(toCapture(s, 1.0), .capture(quality: 1.0, confirmed: true, frames: 30), "step 3 after the failure")
+    s.captured(ok: true)
+    expectEqual(s.frame(actual: 1.0, max: 1.0), .done(restore: 0.9), "done restores the entry quality")
+    expect(s.captures == 2 && s.failures == 1, "two written, one failed")
+    // Readback slot busy: the capture is deferred and offered again on the next frame, nothing counted.
+    let r = AutoCaptureSession(restore: nil)
+    _ = toCapture(r, 0.5)
+    r.deferCapture()
+    expectEqual(r.frame(actual: 0.5, max: 1.0), .capture(quality: 0.5, confirmed: true, frames: 31), "retried next frame")
+    expect(r.captures == 0 && r.failures == 0, "a deferral is not a capture")
+    // Every quality failing still ends in done with the restore.
+    let f = AutoCaptureSession(restore: 0.5)
+    for q in GratingChart.qualities { _ = toCapture(f, q); f.captured(ok: false) }
+    expectEqual(f.frame(actual: 1.0, max: 1.0), .done(restore: 0.5), "all failed: still done and restored")
+}
+
+private func testReadbackSlot() {
+    let slot = DiagReadbackSlot()
+    let requests = DiagCaptureRequests(acceptsMarks: true)
+    let gate = DiagCaptureGate(requests: requests, slot: slot)
+    _ = gate.next(nowMs: 0, idle: true, streamFrame: false)   // first idle frame starts the 3 s timer
+    expect(slot.holder == nil, "no request: the gate does not keep the slot")
+    expect(slot.acquire("chartcap") && slot.holder == "chartcap", "free slot taken")
+    expect(!slot.acquire("frame_capture"), "one readback in flight")
+    // The frame-capture gate waits (request kept pending, not consumed) while the chart capture holds the slot.
+    if case .waiting(let why) = gate.next(nowMs: 3000, idle: true, streamFrame: false) {
+        expectEqual(why, "readback_in_flight", "waits for the chart capture")
+    } else { expect(false, "gate must wait while the slot is held") }
+    slot.release("chartcap")
+    if case .request(let r) = gate.next(nowMs: 3100, idle: true, streamFrame: false) {
+        expect(r.reason == "start_timer" && r.number == 1, "pending request taken after release")
+    } else { expect(false, "request after release") }
+    expect(slot.holder == "frame_capture", "the gate holds the slot for its capture")
+    expect(!slot.acquire("chartcap"), "chart capture deferred while the frame capture is in flight")
+    gate.finished()
+    expect(slot.holder == nil && slot.acquire("chartcap"), "released when the frame capture finishes")
+    slot.release("frame_capture")
+    expect(slot.holder == "chartcap", "release by a non-holder is ignored")
+    // Without a slot the gate behaves as before.
+    let plain = DiagCaptureGate(requests: DiagCaptureRequests(acceptsMarks: true))
+    _ = plain.next(nowMs: 0, idle: true, streamFrame: false)
+    if case .request = plain.next(nowMs: 3000, idle: true, streamFrame: false) {} else { expect(false, "no slot: unchanged") }
 }
 
 private func testGeometryWithoutHighlight() {
@@ -142,6 +201,8 @@ private func testGeometryWithoutHighlight() {
         testRectMapping()
         testMetadata()
         testAutoSession()
+        testAutoSessionFailuresAndRetry()
+        testReadbackSlot()
         testGeometryWithoutHighlight()
         finishTests("ChartCapture")
     }

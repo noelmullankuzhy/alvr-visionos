@@ -368,22 +368,27 @@ enum ChartCapture {
 
 // Auto capture walk, one frame at a time: per render quality, set it, wait for the read-back to match (the layer's
 // maximum clamps it) for settleFrames frames, capture once and wait for the write. No read-back: capture
-// unconfirmed after timeoutFrames.
+// unconfirmed after timeoutFrames. A failed capture (no encoder, failed write) still moves on, so the walk always
+// reaches done, which carries the quality to restore.
 final class AutoCaptureSession {
-    enum Step: Equatable { case setQuality(Float), capture(quality: Float, confirmed: Bool, frames: Int), done }
+    enum Step: Equatable { case setQuality(Float), capture(quality: Float, confirmed: Bool, frames: Int), done(restore: Float?) }
     static let settleFrames = 30, timeoutFrames = 600
 
+    let restore: Float?
     private(set) var index = 0
     private(set) var finished = false
+    private(set) var captures = 0, failures = 0
     private var requested = false, inFlight = false
     private var frames = 0, confirmedFrames = 0
+
+    init(restore: Float?) { self.restore = restore }
 
     var quality: Float? { index < GratingChart.qualities.count ? GratingChart.qualities[index] : nil }
     var statusText: String { quality.map { String(format: "%.2f", $0) } ?? "donE" }
 
     func frame(actual: Float?, max: Float?) -> Step? {
         guard !finished, !inFlight else { return nil }
-        guard let q = quality else { finished = true; return .done }
+        guard let q = quality else { finished = true; return .done(restore: restore) }
         guard requested else { requested = true; frames = 0; confirmedFrames = 0; return .setQuality(q) }
         frames += 1
         let target = Swift.min(q, max ?? q)
@@ -393,12 +398,17 @@ final class AutoCaptureSession {
         return nil
     }
 
-    // The capture was written (or failed): the next quality.
-    func captured() {
+    // The capture was written (ok) or failed: the next quality.
+    func captured(ok: Bool) {
+        guard inFlight else { return }
+        if ok { captures += 1 } else { failures += 1 }
         inFlight = false
         requested = false
         index += 1
     }
+
+    // The readback slot is busy: offer the same capture again next frame.
+    func deferCapture() { inFlight = false }
 }
 
 // The grating walk: per render quality, every patch in order; seen / not seen records and moves on.

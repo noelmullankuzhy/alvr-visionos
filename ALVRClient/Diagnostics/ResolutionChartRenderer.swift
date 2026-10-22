@@ -39,8 +39,8 @@ final class ResolutionChartRenderer {
     private var geometryKey = ""
     private var pinches: [AnyHashable: (start: Double, right: Bool)] = [:]
     private var padHeld: [GratingSession.Action: Bool] = [:]
-    private let auto: AutoCaptureSession?
-    private var autoCaptures = 0, autoFailed = 0
+    private let autoMode: Bool
+    private var auto: AutoCaptureSession?   // from the end of the sweep, holding the quality to restore
 
     // nil unless Diagnostics is on, the setting picks a mode and the corner chart is off.
     static func make(device: MTLDevice, layerRenderer: LayerRenderer) -> ResolutionChartRenderer? {
@@ -68,23 +68,23 @@ final class ResolutionChartRenderer {
         Diag.log("grating", ["chart": "on", "mode": auto ? "auto" : mode.rawValue, "foveation": foveation ? "on" : "off",
                              "foveation_setting": settings.resolutionFoveation ? "on" : "off"])
         return ResolutionChartRenderer(session: GratingSession(mode: mode), pipeline: pipeline, depthState: depthState, foveation: foveation,
-                                       auto: auto ? AutoCaptureSession() : nil)
+                                       autoMode: auto)
     }
 
     private init(session: GratingSession, pipeline: MTLRenderPipelineState, depthState: MTLDepthStencilState, foveation: Bool,
-                 auto: AutoCaptureSession?) {
+                 autoMode: Bool) {
         self.session = session
         self.pipeline = pipeline
         self.depthState = depthState
         self.foveation = foveation
-        self.auto = auto
+        self.autoMode = autoMode
     }
 
     // Judgments are ignored during the 20 s sweep.
     func apply(_ action: GratingSession.Action, actualQuality: Float? = nil) {
         lock.lock()
         defer { lock.unlock() }
-        guard gratingStarted, auto == nil else { return }
+        guard gratingStarted, !autoMode else { return }
         for event in session.apply(action) {
             switch event {
             case let .judged(index, seen, quality):
@@ -233,7 +233,8 @@ final class ResolutionChartRenderer {
         if fixation == nil && !gratingStarted {
             gratingStarted = true
             restoreQuality = actual
-            if auto != nil {
+            if autoMode {
+                auto = AutoCaptureSession(restore: actual)
                 // The layer's foveation is fixed when the space is configured: a foveation-off pass needs the
                 // Resolution chart foveation setting off and a new entry.
                 Diag.log("chartcap", ["step": "start", "fov": foveation ? "on" : "off", "fov_off": foveation ? "unavailable" : "this_pass",
@@ -253,10 +254,10 @@ final class ResolutionChartRenderer {
                 Diag.log("chartcap", ["step": "quality", "rq_set": ChartCapture.quality(q), "rq": ChartCapture.quality(actual)])
             case let .capture(q, confirmed, frames)?:
                 captureStep = (q, confirmed, frames)
-            case .done?:
-                pendingQuality = restoreQuality
-                Diag.log("chartcap", ["step": "done", "captures": autoCaptures, "failed": autoFailed, "fov": foveation ? "on" : "off",
-                                      "fov_off": foveation ? "unavailable" : "this_pass", "restore": ChartCapture.quality(restoreQuality)])
+            case let .done(restore)?:
+                pendingQuality = restore
+                Diag.log("chartcap", ["step": "done", "captures": auto.captures, "failed": auto.failures, "fov": foveation ? "on" : "off",
+                                      "fov_off": foveation ? "unavailable" : "this_pass", "restore": ChartCapture.quality(restore)])
             case nil:
                 break
             }
@@ -284,7 +285,7 @@ final class ResolutionChartRenderer {
             geometryKey = key
             var vertices: [SIMD4<Float>] = []
             for (eye, v, t) in views {
-                for q in GratingChart.geometry(t, eye: eye, session: session, fixation: fixation, highlight: auto == nil, status: status) {
+                for q in GratingChart.geometry(t, eye: eye, session: session, fixation: fixation, highlight: !autoMode, status: status) {
                     let points = q.vertices
                     for i in [0, 1, 2, 1, 3, 2] {
                         vertices += [SIMD4<Float>(Float(points[i].x), Float(points[i].y), Float(v), 0), q.color]
@@ -310,7 +311,14 @@ final class ResolutionChartRenderer {
         pass.depthAttachment.clearDepth = 0.000000001
         pass.rasterizationRateMap = rasterizationRateMap
         pass.renderTargetArrayLength = viewports.count
-        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
+            // Nothing drawn to read back: a failed capture, so the walk moves on and still restores at done.
+            if let captureStep {
+                Diag.log("chartcap", ["error": "encoder_nil", "rq_set": ChartCapture.quality(captureStep.quality)])
+                lock.lock(); auto?.captured(ok: false); lock.unlock()
+            }
+            return
+        }
         encoder.label = "Resolution Chart"
         encoder.setViewports(viewports)
         if viewports.count > 1 {
@@ -336,6 +344,11 @@ final class ResolutionChartRenderer {
     // chart pass by DiagFrameCapture (PNG per slice + capture.json); the patch rects are mapped now, through this frame's map.
     private func capture(_ commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, quality q: Float, actual: Float?,
                          confirmed: Bool, frames: Int) {
+        // One full readback per process: while a frame capture holds the slot, retry next frame (nothing counted).
+        guard DiagReadbackSlot.shared.acquire(Self.slotName) else {
+            lock.lock(); auto?.deferCapture(); lock.unlock()
+            return
+        }
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let name = ChartCapture.directoryName(stamp: stamp, quality: q, foveation: foveation)
         let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -378,12 +391,14 @@ final class ResolutionChartRenderer {
         }
         DiagFrameCapture.submit(buffer: commandBuffer, targets: targets, directory: directory,
                                 metadata: ["chart_capture": metadata, "trigger": ["reason": "chartcap"]]) { [weak self] ok in
-            guard let self else { return }
+            DiagReadbackSlot.shared.release(Self.slotName)
             if !ok { Diag.log("chartcap", ["error": "capture_failed", "dir": name]) }
+            guard let self else { return }
             self.lock.lock()
-            if ok { self.autoCaptures += 1 } else { self.autoFailed += 1 }
-            self.auto?.captured()
+            self.auto?.captured(ok: ok)
             self.lock.unlock()
         }
     }
+
+    private static let slotName = "chartcap"
 }
