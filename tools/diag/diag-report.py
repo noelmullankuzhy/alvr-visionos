@@ -666,7 +666,8 @@ def dots_outlines(records):
 
 def outline_report(records):
     lines = ['### Outline slider', '',
-             'Each `dots_outline` line is one RIGHT hold with no cursor. shape=lens (default): the measured '
+             'Each `dots_outline` line is one LEFT slider step (0.5 deg), the settled value at a slider '
+             'release, or a RIGHT hold with no cursor. shape=lens (default): the measured '
              'seal-on visible field of that eye (reference) moved radially by offset_deg (positive outward); rays '
              'lists the drawn eccentricity per measured ray and rays between them interpolate linearly in '
              'eccentricity. shape=rect (or no shape, older lines): the rendered frustum inset by inset_deg along '

@@ -68,6 +68,8 @@ struct BoundaryDotsSession {
         set { if shape == .lens { offset = newValue } else { inset = newValue } }
     }
     var sliderRange: ClosedRange<Double> { shape == .lens ? BoundaryDotsOutline.offsetRange : BoundaryDotsOutline.insetRange }
+    /// Hand right moves the outline outward in both styles: the offset up (lens), the inset down (rect).
+    var sliderSign: Double { shape == .lens ? 1 : -1 }
 
     mutating func toggleShape() {
         shape = shape == .lens ? .rect : .lens
@@ -253,6 +255,11 @@ enum BoundaryDotsLensReference {
     static let source = "Management/goals/rdr2-vr/evidence/device-20261021/diag-20261021T152509Z.log, seal on: "
         + "dots_summary eye=L (11 rays), the 13 other rays from dots_summary eye=Both"
     // The summaries apply clears: Both 240 is 30 (its later 32.5 mark was cleared), not the last confirm.
+    // Caveat: the 13 rays from the eye=Both walk (0, 15, 30, 60, 90, 240, 255, 270, 285, 300, 315, 330, 345)
+    // are binocular readings. On the nasal side (around 0) the right eye sees further, so the left eye's
+    // own edge is probably narrower than this table says, and the R mirror carries the same error. A later
+    // L-only walk replaces `left`/`right` plus `tag`/`date`/`source`, and with them the hand values in
+    // BoundaryOutlineTests (the offset 0/+5 limits, the 0.256134 / 0.368449 areas and the `rays=` lines).
     static let left: [Double: Double] = [
         0: 37.5, 15: 35, 30: 35, 45: 35, 60: 30, 75: 30, 90: 30, 105: 32.5,
         120: 32.5, 135: 35, 150: 37.5, 165: 37.5, 180: 40, 195: 42.5, 210: 40, 225: 40,
@@ -461,16 +468,41 @@ struct BoundaryDotsDrag<ID: Hashable> {
     }
 }
 
-// Left-hand slider for the outline inset while no cursor is selected: hand travel
-// along the head frame's horizontal axis (right = more inset), 1 cm per degree,
-// snapped to 0.5 deg within 0...30 and relative to the inset at the grab.
+// Left-hand slider for the outline value while no cursor is selected: hand travel
+// along the head frame's horizontal axis times `sign` (session `sliderSign`: right =
+// outline outward), 1 cm per degree, snapped to 0.5 deg within `range` and relative
+// to the value at the grab.
 enum BoundaryDotsSliderMap {
     static let metresPerDeg = 0.01
 
     static func inset(from start: Double, displacement: SIMD3<Double>,
-                      range: ClosedRange<Double> = BoundaryDotsOutline.insetRange) -> Double {
+                      range: ClosedRange<Double> = BoundaryDotsOutline.insetRange, sign: Double = 1) -> Double {
         guard displacement.x.isFinite else { return start }
-        return BoundaryDotsOutline.clamp(start + displacement.x / metresPerDeg, to: range)
+        return BoundaryDotsOutline.clamp(start + sign * displacement.x / metresPerDeg, to: range)
+    }
+}
+
+/// Which slider updates write a `dots_outline` line: each snapped value change during a slide
+/// (one line per 0.5 deg step, not per frame) and the settled value once more at release.
+/// `reset()` at every new grab; `logs` is asked after the update is applied to the session.
+struct BoundaryDotsSliderLog {
+    private var logged: (eye: BoundaryDotsEye, shape: BoundaryDotsOutlineShape, value: Double)?
+
+    mutating func reset() { logged = nil }
+
+    mutating func logs(_ update: BoundaryDotsSliderUpdate?, session: BoundaryDotsSession) -> Bool {
+        switch update {
+        case .move?:
+            if let logged, logged.eye == session.eye, logged.shape == session.shape,
+               logged.value == session.sliderValue { return false }
+            logged = (session.eye, session.shape, session.sliderValue)
+            return true
+        case .release?:
+            logged = nil
+            return true
+        case nil:
+            return false
+        }
     }
 }
 
@@ -498,7 +530,8 @@ struct BoundaryDotsSlider<ID: Hashable> {
     mutating func update(id: ID, hand: BoundaryDotsHand?, phase: BoundaryDotsPinchPhase,
                          position: SIMD3<Double>, headRotation: simd_quatd,
                          inset: Double, enabled: Bool,
-                         range: ClosedRange<Double> = BoundaryDotsOutline.insetRange) -> BoundaryDotsSliderUpdate? {
+                         range: ClosedRange<Double> = BoundaryDotsOutline.insetRange,
+                         sign: Double = 1) -> BoundaryDotsSliderUpdate? {
         guard var active = grab else {
             if phase == .active, hand == .left, enabled, all(position .== position) {
                 grab = Grab(id: id, origin: position, start: inset, current: inset)
@@ -518,7 +551,7 @@ struct BoundaryDotsSlider<ID: Hashable> {
             active = Grab(id: id, origin: position, start: inset, current: inset)
         } else {
             let displacement = headRotation.inverse.act(position - active.origin)
-            active.current = BoundaryDotsSliderMap.inset(from: active.start, displacement: displacement, range: range)
+            active.current = BoundaryDotsSliderMap.inset(from: active.start, displacement: displacement, range: range, sign: sign)
         }
         if phase == .ended {
             grab = nil

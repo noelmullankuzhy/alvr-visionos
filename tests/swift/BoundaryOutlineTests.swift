@@ -96,6 +96,16 @@ enum BoundaryOutlineTests {
         expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [0.5, 0, 0]), 30, "clamp at 30")
         expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [-0.5, 0, 0]), 0, "clamp at 0")
         expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [.nan, 0, 0]), 15, "non-finite ignored")
+        // Hand right = outline outward in both styles: lens offset up (sign +1), rect inset down (sign -1).
+        var styles = BoundaryDotsSession()
+        expectEqual(styles.sliderSign, 1, "lens: hand right raises the offset")
+        styles.shape = .rect
+        expectEqual(styles.sliderSign, -1, "rect: hand right lowers the inset")
+        expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [0.03, 0, 0], sign: -1), 12, "rect 3 cm right is inset -3 (outward)")
+        expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [-0.03, 0, 0], sign: -1), 18, "rect 3 cm left is inset +3 (inward)")
+        expectEqual(BoundaryDotsSliderMap.inset(from: 0, displacement: [0.03, 0, 0], range: BoundaryDotsOutline.offsetRange,
+                                                sign: 1), 3, "lens 3 cm right is offset +3 (outward)")
+        expectEqual(BoundaryDotsSliderMap.inset(from: 1, displacement: [0.05, 0, 0], sign: -1), 0, "rect clamps at inset 0")
 
         let level = simd_quatd(ix: 0, iy: 0, iz: 0, r: 1)
         let yawLeft = simd_quatd(angle: .pi / 2, axis: [0, 1, 0])
@@ -284,6 +294,13 @@ enum BoundaryOutlineTests {
                                       inset: 0, enabled: true, range: BoundaryDotsOutline.offsetRange), .move(-4), "negative offsets reachable")
         expectEqual(lensSlider.update(id: 1, hand: .left, phase: .cancelled, position: origin, headRotation: level,
                                       inset: -4, enabled: true, range: BoundaryDotsOutline.offsetRange), .move(0), "cancel restores")
+        var rectSlider = BoundaryDotsSlider<Int>()
+        expectEqual(rectSlider.update(id: 1, hand: .left, phase: .active, position: origin, headRotation: level,
+                                      inset: 15, enabled: true, sign: -1), nil)
+        expectEqual(rectSlider.update(id: 1, hand: .left, phase: .active, position: origin + [0.04, 0, 0], headRotation: level,
+                                      inset: 15, enabled: true, sign: -1), .move(11), "rect slide right: inset down, outline out")
+        expectEqual(rectSlider.update(id: 1, hand: .left, phase: .ended, position: origin + [0.04, 0, 0], headRotation: level,
+                                      inset: 11, enabled: true, sign: -1), .release(from: 15, to: 11))
 
         // Session: per-eye offsets, the slider value follows the style, toggling keeps both values.
         var lens = BoundaryDotsSession()
@@ -310,6 +327,62 @@ enum BoundaryOutlineTests {
         lens.offset = 5
         expectEqual(Diag.line(topic: "dots_outline", tMs: 4, fields: lens.outlineFields(frustum: right, source: "m5_view")!),
                     "DIAG dots_outline t_ms=4 eye=R shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:45,15:42.5,30:42.5,45:40,60:37.5,75:37.5,90:35,105:35,120:35,135:40,150:40,165:40,180:42.5,195:42.5,210:37.5,225:37.5,240:37.5,255:35,270:37.5,285:37.5,300:35,315:45,330:45,345:47.5")
+
+        // Slider logging: one dots_outline line per snapped value change during a slide (not per frame)
+        // and one more at release with the settled value; a slide within one 0.5 deg step logs nothing.
+        var logged = BoundaryDotsSession()
+        logged.eye = .left
+        var logSlider = BoundaryDotsSlider<Int>()
+        var sliderLog = BoundaryDotsSliderLog()
+        var lines: [String] = []
+        func slide(_ id: Int, _ dx: Double, _ phase: BoundaryDotsPinchPhase = .active, enabled: Bool = true) {
+            if !logSlider.active { sliderLog.reset() }
+            let update = logSlider.update(id: id, hand: .left, phase: phase, position: origin + [dx, 0, 0], headRotation: level,
+                                          inset: logged.sliderValue, enabled: enabled, range: logged.sliderRange,
+                                          sign: logged.sliderSign)
+            switch update {
+            case .move(let value)?, .release(_, let value)?: logged.sliderValue = value
+            case nil: break
+            }
+            if sliderLog.logs(update, session: logged), let fields = logged.outlineFields(frustum: left, source: "device_default") {
+                lines.append(Diag.line(topic: "dots_outline", tMs: 10 + lines.count, fields: fields))
+            }
+        }
+        for dx in [0.0, 0.001, 0.002, 0.006, 0.007, 0.011, 0.012, 0.014, 0.016, 0.017] { slide(1, dx) }
+        slide(1, 0.017, .ended)
+        expectEqual(lines.count, 4, "three snap steps and a release: four lines")
+        expectEqual(lines.map { $0.components(separatedBy: " ").first { $0.hasPrefix("offset_deg=") } ?? "" },
+                    ["offset_deg=0.500", "offset_deg=1.000", "offset_deg=1.500", "offset_deg=1.500"], "offsets per step, settled at release")
+        expectEqual(lines.last, "DIAG dots_outline t_ms=13 eye=L shape=lens offset_deg=1.500 nasal_deg=39.000 temporal_deg=41.500 up_deg=31.500 down_deg=34.000 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:39,15:36.5,30:36.5,45:36.5,60:31.5,75:31.5,90:31.5,105:34,120:34,135:36.5,150:39,165:39,180:41.5,195:44,210:41.5,225:41.5,240:31.5,255:34,270:34,285:31.5,300:34,315:34,330:34,345:39")
+        lines = []
+        for dx in [0.0, 0.002, -0.002, 0.0024, 0.0] { slide(2, dx) }
+        slide(2, 0.001, .ended)
+        expectEqual(lines, [], "a slide within one step logs nothing")
+        // Rect: hand right lowers the inset; a cancel restores and logs.
+        logged.toggleShape()
+        for dx in [0.0, 0.006] { slide(3, dx) }
+        expectEqual(logged.inset, 14.5, "rect hand right lowers the inset")
+        slide(3, 0.006, .cancelled)
+        expectEqual(lines.count, 2, "rect step and cancel")
+        expect(lines.allSatisfy { $0.contains("shape=rect") }, "rect slides log rect lines")
+        expectEqual(lines.last?.contains("inset_deg=15.000"), true, "cancel logs the restored inset")
+        // The same value on another eye is a new line (an eye switch mid-slide re-anchors it).
+        lines = []
+        for dx in [0.0, 0.006] { slide(4, dx) }
+        logged.eye = .right
+        for dx in [0.008, 0.014] { slide(4, dx) }
+        expectEqual(lines.map { $0.contains("eye=R") }, [false, true], "L 14.5 then R 14.5: two lines")
+        slide(4, 0.014, .ended)
+        expectEqual(lines.count, 3, "release logs R")
+        // A slide ended by a cursor (no release line) does not suppress the next slide's first step.
+        lines = []
+        for dx in [0.0, 0.006] { slide(5, dx) }
+        slide(5, 0.006, enabled: false)
+        slide(5, 0.006, .ended, enabled: false)
+        logged.inset = 14.5
+        for dx in [0.0, 0.006] { slide(6, dx) }
+        expectEqual(lines.count, 2, "R 14.0 in both slides: each logs")
+        expect(lines.allSatisfy { $0.contains("eye=R") && $0.contains("inset_deg=14.000") }, "R inset 14 twice")
 
         // Logged tangents (m5_view, drawable 0: view 0 = L, view 1 = R) replace the device defaults.
         BoundaryDotsTangents.reset()

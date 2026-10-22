@@ -665,6 +665,13 @@ input during dots measurement; its state remains alive so auto-enter stays consu
      the other 13 from the Both summary; R is the mirror of L about the vertical until
      an R walk exists). The data block is `BoundaryDotsLensReference` in
      `BoundaryDots.swift` (source and date included); replace it from a later walk.
+     **Caveat:** the 13 rays from the `eye=Both` walk (0, 15, 30, 60, 90, 240, 255,
+     270, 285, 300, 315, 330, 345°) are binocular readings, so on the nasal side the
+     left eye's own edge is probably narrower than the table says, and the R mirror
+     carries the same error. A later L-only walk replaces the `left`/`right`
+     dictionaries plus `tag`/`date`/`source`, and the hand values in
+     `BoundaryOutlineTests` (offset 0/+5 limits, areas 0.256134/0.368449, the `rays=`
+     lines) are updated with it.
      The slider moves the whole shape radially by **offset** degrees: outline point on
      ray φ = reference(φ) + offset, rays between the 24 measured ones linear in
      eccentricity; −10…+20°, default 0, positive = outward (a larger field than the
@@ -678,11 +685,13 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    0/180/90/270° rays) are shown under the centre cross. With no cursor selected
    (status shows `left drag: lens outline` or `rect outline`), **pinch and hold with
    the left hand and drag right/left**: horizontal hand travel in the head frame
-   changes the value, **1 cm = 1°**, right = larger number (lens: outline grows; rect:
-   inset grows, outline shrinks), snapped to 0.5°, relative to the value at the grab.
+   changes the value, **1 cm = 1°**, right = outline outward in both styles (lens:
+   offset up; rect: inset down), snapped to 0.5°, relative to the value at the grab.
    Release keeps the value; a cancelled pinch restores it; selecting a cursor mid-slide
-   ends the slide at its value. Drag until the line sits on the edge you can just see
-   all round, then **hold the right pinch >= 0.5 s** (no cursor) to log it. Each eye
+   ends the slide at its value. Every 0.5° step of a slide logs a `dots_outline` line
+   (one per step, not per frame) and the release logs the settled value once more.
+   Drag until the line sits on the edge you can just see all round, then **hold the
+   right pinch >= 0.5 s** (no cursor) to log it again as the deliberate mark. Each eye
    keeps its own offset and inset; Both shows no outline (it is monocular). When a ray
    cursor is selected the left drag moves the cursor (step 3) instead (status shows
    `left drag: cursor`); quick right pinch the centre cross to deselect it and get the
@@ -777,7 +786,8 @@ DIAG dots_outline t_ms=104 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 te
 DIAG dots_outline t_ms=105 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000
 ```
 
-`dots_outline` (right hold, no cursor, L or R): `shape=lens` lines carry
+`dots_outline` (each left slider step, the slider release, and a right hold with no
+cursor; L or R): `shape=lens` lines carry
 `offset_deg`, the `reference` tag and `rays` (the drawn eccentricity on each measured
 ray, reference + offset); their limits are read from that polygon at 0/90/180/270°.
 `shape=rect` lines carry `inset_deg`; their limits are the frustum side minus the

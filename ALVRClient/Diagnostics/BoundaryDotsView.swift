@@ -13,6 +13,7 @@ private final class BoundaryDotsScene {
     private var pinches = BoundaryDotsPinches<SpatialEventCollection.Event.ID>()
     private var drag = BoundaryDotsDrag<SpatialEventCollection.Event.ID>()
     private var slider = BoundaryDotsSlider<SpatialEventCollection.Event.ID>()
+    private var sliderLog = BoundaryDotsSliderLog()
     private let cursorEntity = ModelEntity()
     private let statusEntity = ModelEntity()
     private let outlineEntity = ModelEntity()
@@ -190,9 +191,12 @@ private final class BoundaryDotsScene {
             let rotation = simd_quatd(vector: SIMD4<Double>(root.orientation.vector))
             // Without a cursor the left drag is the outline slider; a started slide or cursor drag keeps its meaning.
             if slider.active || (!drag.active && session.cursor == nil) {
-                switch slider.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
-                                     headRotation: rotation, inset: session.sliderValue,
-                                     enabled: session.cursor == nil && session.eye != .both, range: session.sliderRange) {
+                if !slider.active { sliderLog.reset() }
+                let update = slider.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
+                                           headRotation: rotation, inset: session.sliderValue,
+                                           enabled: session.cursor == nil && session.eye != .both,
+                                           range: session.sliderRange, sign: session.sliderSign)
+                switch update {
                 case .move(let value)?, .release(_, let value)?:
                     // A slider step changes only the outline and its labels: no dot materials.
                     session.sliderValue = value
@@ -200,6 +204,12 @@ private final class BoundaryDotsScene {
                     refreshStatus()
                 case nil:
                     break
+                }
+                // One dots_outline line per snapped step and one at release.
+                if sliderLog.logs(update, session: session),
+                   let (frustum, source) = BoundaryDotsTangents.frustum(session.eye),
+                   let fields = session.outlineFields(frustum: frustum, source: source) {
+                    Diag.log("dots_outline", fields)
                 }
             } else {
                 switch drag.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
