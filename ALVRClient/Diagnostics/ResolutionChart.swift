@@ -230,7 +230,9 @@ enum GratingChart {
     }
 
     // Sweep (fixation given): the dot alone. Grating: patches, labels, the selected patch's frame and the status.
-    static func geometry(_ t: CornerTangents, eye: CornerEye, session: GratingSession, fixation: RateMapSampling.Fixation?) -> [CornerChart.Quad] {
+    // Auto capture: no frame (highlight false) and its own status.
+    static func geometry(_ t: CornerTangents, eye: CornerEye, session: GratingSession, fixation: RateMapSampling.Fixation?,
+                         highlight: Bool = true, status: String? = nil) -> [CornerChart.Quad] {
         guard session.lit(eye) else { return [] }
         let white: SIMD4<Float> = [1, 1, 1, 1], grey: SIMD4<Float> = [0.6, 0.6, 0.6, 1], yellow: SIMD4<Float> = [1, 1, 0, 1]
         if let f = fixation {
@@ -245,9 +247,10 @@ enum GratingChart {
         for (i, p) in patches.enumerated() {
             out += bars(p).map { quad(t, eye: eye, $0, color: white) }
             text("\(p.cpd)", labelRect(p), grey)
-            if session.finished == false && i == session.index { out += frame(p).map { quad(t, eye: eye, $0, color: yellow) } }
+            if highlight && session.finished == false && i == session.index { out += frame(p).map { quad(t, eye: eye, $0, color: yellow) } }
         }
-        text(session.statusText, statusRect(session.statusText), white)
+        let status = status ?? session.statusText
+        text(status, statusRect(status), white)
         return out
     }
 
@@ -276,7 +279,125 @@ enum GratingChart {
     // The layer configuration drops foveation only for this diagnostic, when chosen, in the offline diagnostics space
     // with no stream connected; every other entry keeps production's choice.
     static func foveationDisabled(diagnostics: Bool, chart: String, foveation: Bool, entry: LayerEntry, connected: Bool) -> Bool {
-        diagnostics && CornerChartMode(setting: chart) != .off && !foveation && entry == .diagnostics && !connected
+        diagnostics && ResolutionChartSetting.mode(chart) != .off && !foveation && entry == .diagnostics && !connected
+    }
+}
+
+// The Resolution chart setting: the corner chart's eye modes plus Auto capture (both eyes lit, no input).
+enum ResolutionChartSetting {
+    static let autoCapture = "Auto capture"
+    static let choices = CornerChartMode.allCases.map(\.rawValue) + [autoCapture]
+    static func isAuto(_ setting: String) -> Bool { setting == autoCapture }
+    static func mode(_ setting: String) -> CornerChartMode { isAuto(setting) ? .both : CornerChartMode(setting: setting) }
+}
+
+// Auto capture: the drawn chart read back from each eye's drawable (physical texture, through the rate map), with the
+// patch rectangles in logical and physical pixels, for diag-report.py to count the bars. Pixels: origin top left, y down.
+enum ChartCapture {
+    struct Rect: Equatable { var x0, y0, x1, y1: Double }
+
+    struct View {
+        let eye: CornerEye, view, slice, textureIndex: Int, tangents: CornerTangents
+        // Logical viewport x, y, w, h; rate-map screen and physical sizes (the texture's when there is no map).
+        let viewport: [Double], screen, physical: [Int]
+        let map: RateMapSampling.Mapping?
+    }
+
+    // The patch's NDC quad (exact Fick corners) in view-local logical pixels.
+    static func logicalRect(_ t: CornerTangents, width: Double, height: Double, eye: CornerEye, patch p: GratingChart.Patch) -> Rect {
+        let n = GratingChart.quad(t, eye: eye, GratingChart.patchRect(p), color: [1, 1, 1, 1]).rect
+        return Rect(x0: (n.x0 + 1) / 2 * width, y0: (1 - n.y1) / 2 * height, x1: (n.x1 + 1) / 2 * width, y1: (1 - n.y0) / 2 * height)
+    }
+
+    // Corners through the frame's logical -> physical map (separable, so the corners bound the rect); nil map: 1:1.
+    static func physicalRect(_ r: Rect, map: RateMapSampling.Mapping?) -> Rect {
+        guard let map else { return r }
+        let c = [map(r.x0, r.y0), map(r.x1, r.y0), map(r.x0, r.y1), map(r.x1, r.y1)]
+        return Rect(x0: c.map(\.x).min()!, y0: c.map(\.y).min()!, x1: c.map(\.x).max()!, y1: c.map(\.y).max()!)
+    }
+
+    // Half the physical px/deg across the bars at the patch centre: logical Nyquist x the map's rate there.
+    static func nyquistPhysical(_ t: CornerTangents, width: Double, height: Double, eye: CornerEye, patch p: GratingChart.Patch,
+                                map: RateMapSampling.Mapping?) -> Double? {
+        let r = logicalRect(t, width: width, height: height, eye: eye, patch: p)
+        let rate = map.map { RateMapSampling.rate($0, x: (r.x0 + r.x1) / 2, y: (r.y0 + r.y1) / 2, horizontal: p.orientation == .vertical,
+                                                  width: width, height: height) } ?? 1
+        return rate.map { $0 * GratingChart.nyquistLogical(t, width: width, height: height, eye: eye, patch: p) }
+    }
+
+    static func expectedBars(_ p: GratingChart.Patch) -> Int { GratingChart.bars(p).count }
+
+    static func patches(_ v: View) -> [[String: Any]] {
+        let w = v.viewport[2], h = v.viewport[3], t = v.tangents
+        return GratingChart.patches.map { p in
+            let l = logicalRect(t, width: w, height: h, eye: v.eye, patch: p), ph = physicalRect(l, map: v.map)
+            return ["position": p.position.rawValue, "cpd": p.cpd, "orientation": p.orientation.rawValue,
+                    "temporal_deg": p.temporalDeg, "up_deg": p.upDeg, "expected_bars": expectedBars(p),
+                    "logical_rect": [l.x0, l.y0, l.x1, l.y1], "physical_rect": [ph.x0, ph.y0, ph.x1, ph.y1],
+                    "nyquist_logical_cpd": GratingChart.nyquistLogical(t, width: w, height: h, eye: v.eye, patch: p),
+                    "nyquist_physical_cpd": nyquistPhysical(t, width: w, height: h, eye: v.eye, patch: p, map: v.map) as Any? ?? NSNull()]
+        }
+    }
+
+    static func viewRecord(_ v: View) -> [String: Any] {
+        let t = v.tangents
+        return ["eye": v.eye.rawValue, "view": v.view, "slice": v.slice, "texture_index": v.textureIndex,
+                "tangents": [t.left, t.right, t.bottom, t.top], "viewport": v.viewport, "screen": v.screen, "physical": v.physical,
+                "mapped": v.map != nil, "patches": patches(v)]
+    }
+
+    static func quality(_ q: Float?) -> String { q.map { String(format: "%.3f", $0) } ?? "unavailable" }
+
+    // capture.json "chart_capture".
+    static func metadata(views: [View], requested: Float, actual: Float?, confirmed: Bool, foveation: Bool, frames: Int) -> [String: Any] {
+        ["mode": "auto", "rq": quality(actual), "rq_set": quality(requested), "rq_confirmed": confirmed, "fov": foveation ? "on" : "off",
+         "settle_frames": frames, "patch_deg": GratingChart.patchDeg, "views": views.map(viewRecord)]
+    }
+
+    static func fields(eye: CornerEye, requested: Float, actual: Float?, confirmed: Bool, foveation: Bool, dir: String, slice: Int,
+                       physical: [Int]) -> KeyValuePairs<String, Any> {
+        ["eye": eye.rawValue, "rq": quality(actual), "rq_set": quality(requested), "confirmed": confirmed ? "yes" : "no",
+         "fov": foveation ? "on" : "off", "dir": dir, "slice": slice, "physical": physical.map(String.init).joined(separator: "x"),
+         "patches": GratingChart.patches.count]
+    }
+
+    static func directoryName(stamp: String, quality: Float, foveation: Bool) -> String {
+        String(format: "chart-%@-rq%.2f-fov%@", stamp, quality, foveation ? "on" : "off")
+    }
+}
+
+// Auto capture walk, one frame at a time: per render quality, set it, wait for the read-back to match (the layer's
+// maximum clamps it) for settleFrames frames, capture once and wait for the write. No read-back: capture
+// unconfirmed after timeoutFrames.
+final class AutoCaptureSession {
+    enum Step: Equatable { case setQuality(Float), capture(quality: Float, confirmed: Bool, frames: Int), done }
+    static let settleFrames = 30, timeoutFrames = 600
+
+    private(set) var index = 0
+    private(set) var finished = false
+    private var requested = false, inFlight = false
+    private var frames = 0, confirmedFrames = 0
+
+    var quality: Float? { index < GratingChart.qualities.count ? GratingChart.qualities[index] : nil }
+    var statusText: String { quality.map { String(format: "%.2f", $0) } ?? "donE" }
+
+    func frame(actual: Float?, max: Float?) -> Step? {
+        guard !finished, !inFlight else { return nil }
+        guard let q = quality else { finished = true; return .done }
+        guard requested else { requested = true; frames = 0; confirmedFrames = 0; return .setQuality(q) }
+        frames += 1
+        let target = Swift.min(q, max ?? q)
+        if let actual, abs(actual - target) < 0.005 { confirmedFrames += 1 }
+        if confirmedFrames >= Self.settleFrames { inFlight = true; return .capture(quality: q, confirmed: true, frames: frames) }
+        if frames >= Self.timeoutFrames { inFlight = true; return .capture(quality: q, confirmed: false, frames: frames) }
+        return nil
+    }
+
+    // The capture was written (or failed): the next quality.
+    func captured() {
+        inFlight = false
+        requested = false
+        index += 1
     }
 }
 

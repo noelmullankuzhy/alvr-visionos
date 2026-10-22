@@ -1,0 +1,148 @@
+// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/CornerChart.swift ALVRClient/Diagnostics/ResolutionChart.swift
+import Foundation
+
+private func near(_ a: Double, _ b: Double, _ tol: Double = 1e-6) -> Bool { abs(a - b) <= tol }
+// Device values (diag-20261021T135020Z.log): quality 1.0 logical screen, 40 logical px/deg on axis.
+private let leftEye = CornerTangents(left: 1.7321, right: 1, bottom: 1.1918, top: 1)
+private let rightEye = CornerTangents(left: 1, right: 1.7321, bottom: 1.1918, top: 1)
+private let w = 6261.0, h = 5023.0
+private func deg(_ r: Double) -> Double { r * 180 / Double.pi }
+
+private func testSetting() {
+    expectEqual(ResolutionChartSetting.choices, ["Off", "Both eyes", "Left only", "Right only", "Auto capture"], "picker values")
+    expect(ResolutionChartSetting.isAuto("Auto capture") && !ResolutionChartSetting.isAuto("Both eyes"), "auto setting")
+    expectEqual(ResolutionChartSetting.mode("Auto capture"), .both, "auto capture lights both eyes")
+    expectEqual(ResolutionChartSetting.mode("Left only"), .left, "manual modes unchanged")
+    expectEqual(ResolutionChartSetting.mode("nonsense"), .off, "unknown: off")
+    expect(GratingChart.foveationDisabled(diagnostics: true, chart: "Auto capture", foveation: false, entry: .diagnostics, connected: false),
+           "auto capture may drop foveation like the manual walk")
+    expect(!GratingChart.foveationDisabled(diagnostics: true, chart: "Auto capture", foveation: false, entry: .stream, connected: false),
+           "never in a streaming space")
+}
+
+private func testRectMapping() {
+    let v8 = GratingChart.patches.first { $0.position == .axis && $0.cpd == 8 && $0.orientation == .vertical }!
+    let t26 = GratingChart.patches.first { $0.position == .temporal20 && $0.cpd == 20 && $0.orientation == .horizontal }!
+    for (eye, t) in [(CornerEye.left, leftEye), (.right, rightEye)] {
+        // Logical rect: the patch's NDC quad in Metal pixels (origin top left, y down); the axis patch is centred 1 deg up.
+        let r = ChartCapture.logicalRect(t, width: w, height: h, eye: eye, patch: v8)
+        let a = RateMapSampling.axis(t, width: w, height: h), k = RateMapSampling.pxPerTan(t, width: w, height: h)
+        expect(near((r.x0 + r.x1) / 2, a.x, 0.5), "\(eye) axis patch centred on the axis x \(r)")
+        expect(near((r.y0 + r.y1) / 2, a.y - tan(1 * Double.pi / 180) * k.y, 0.5), "\(eye) 1 deg up (smaller y) \(r)")
+        expect(near(r.x1 - r.x0, 2 * tan(0.75 * Double.pi / 180) * k.x, 0.01), "\(eye) 1.5 deg wide: 60 logical px \(r.x1 - r.x0)")
+        expect(r.y1 > r.y0 && r.x1 > r.x0, "ordered")
+        // Temporal: screen left for L, right for R.
+        let tr = ChartCapture.logicalRect(t, width: w, height: h, eye: eye, patch: t26)
+        expect(eye == .left ? tr.x1 < a.x : tr.x0 > a.x, "\(eye) temporal side")
+        expect(near(deg(atan(((tr.x0 + tr.x1) / 2 - a.x) / k.x)), eye == .left ? -26 : 26, 0.05), "\(eye) 26 deg temporal")
+    }
+    // Synthetic separable rate map: x halves left of 3000 logical px and is 1:1 right of it; y at 0.4.
+    let map: RateMapSampling.Mapping = { x, y in (x < 3000 ? 0.5 * x : 1500 + (x - 3000), 0.4 * y) }
+    let lr = ChartCapture.logicalRect(leftEye, width: w, height: h, eye: .left, patch: v8)
+    let pr = ChartCapture.physicalRect(lr, map: map)
+    expect(lr.x0 > 3000 && near(pr.x0, 1500 + lr.x0 - 3000) && near(pr.x1, 1500 + lr.x1 - 3000), "x through the map \(pr)")
+    expect(near(pr.y0, 0.4 * lr.y0) && near(pr.y1, 0.4 * lr.y1), "y through the map")
+    expectEqual(ChartCapture.physicalRect(lr, map: nil), lr, "no rate map: physical = logical")
+    // Physical Nyquist: logical Nyquist x the map's rate across the bars (V: x, H: y).
+    let nl = GratingChart.nyquistLogical(leftEye, width: w, height: h, eye: .left, patch: v8)
+    expect(near(ChartCapture.nyquistPhysical(leftEye, width: w, height: h, eye: .left, patch: v8, map: map)!, nl, 1e-6), "V: x rate 1")
+    let h8 = GratingChart.patches.first { $0.position == .axis && $0.cpd == 8 && $0.orientation == .horizontal }!
+    let nh = GratingChart.nyquistLogical(leftEye, width: w, height: h, eye: .left, patch: h8)
+    expect(near(ChartCapture.nyquistPhysical(leftEye, width: w, height: h, eye: .left, patch: h8, map: map)!, 0.4 * nh, 1e-6), "H: y rate 0.4")
+}
+
+private func view(_ eye: CornerEye, map: RateMapSampling.Mapping?) -> ChartCapture.View {
+    ChartCapture.View(eye: eye, view: eye == .left ? 0 : 1, slice: eye == .left ? 0 : 1, textureIndex: 0,
+                      tangents: eye == .left ? leftEye : rightEye, viewport: [0, 0, w, h], screen: [6261, 5023], physical: [2432, 2368],
+                      map: map)
+}
+
+private func testMetadata() {
+    let map: RateMapSampling.Mapping = { x, y in (0.4 * x, 0.45 * y) }
+    let meta = ChartCapture.metadata(views: [view(.left, map: map), view(.right, map: nil)], requested: 0.75, actual: 0.75,
+                                     confirmed: true, foveation: true, frames: 31)
+    expect(JSONSerialization.isValidJSONObject(meta), "capture.json serialisable")
+    expectEqual(Set(meta.keys), ["mode", "rq", "rq_set", "rq_confirmed", "fov", "settle_frames", "patch_deg", "views"], "chart_capture keys")
+    expectEqual(meta["rq"] as? String, "0.750", "rq read back")
+    expectEqual(meta["fov"] as? String, "on", "fov")
+    let views = meta["views"] as! [[String: Any]]
+    expectEqual(views.count, 2, "one entry per eye")
+    let l = views[0]
+    expectEqual(Set(l.keys), ["eye", "view", "slice", "texture_index", "tangents", "viewport", "screen", "physical", "mapped", "patches"],
+                "view keys")
+    expectEqual(l["eye"] as? String, "L", "eye")
+    expectEqual(l["screen"] as? [Int], [6261, 5023], "screen size")
+    expectEqual(l["physical"] as? [Int], [2432, 2368], "physical size")
+    let patches = l["patches"] as! [[String: Any]]
+    expectEqual(patches.count, 24, "every patch")
+    let p = patches[0]
+    expectEqual(Set(p.keys), ["position", "cpd", "orientation", "temporal_deg", "up_deg", "logical_rect", "physical_rect",
+                              "nyquist_logical_cpd", "nyquist_physical_cpd", "expected_bars"], "patch keys")
+    expectEqual(p["position"] as? String, "axis", "position")
+    expectEqual(p["cpd"] as? Int, 8, "cpd")
+    expectEqual(p["orientation"] as? String, "V", "orientation")
+    expectEqual(p["expected_bars"] as? Int, 12, "ceil(1.5 x 8)")
+    let lr = p["logical_rect"] as! [Double], pr = p["physical_rect"] as! [Double]
+    expect(lr.count == 4 && pr.count == 4 && near(pr[0], 0.4 * lr[0], 1e-9) && near(pr[3], 0.45 * lr[3], 1e-9), "rects \(lr) \(pr)")
+    expectEqual(patches.map { $0["expected_bars"] as! Int }.prefix(6).map { $0 }, [12, 15, 18, 21, 26, 30], "expected counts")
+    expect(near(p["nyquist_physical_cpd"] as! Double, 0.4 * (p["nyquist_logical_cpd"] as! Double), 1e-9), "physical Nyquist")
+    expectEqual((views[1]["mapped"] as? Bool), false, "right view without a map")
+    let unconfirmed = ChartCapture.metadata(views: [], requested: 0.5, actual: nil, confirmed: false, foveation: false, frames: 600)
+    expect(unconfirmed["rq"] as? String == "unavailable" && unconfirmed["fov"] as? String == "off"
+           && unconfirmed["rq_confirmed"] as? Bool == false, "no read back")
+    let line = Diag.line(topic: "chartcap", tMs: 5, fields: ChartCapture.fields(eye: .left, requested: 0.5, actual: 0.5, confirmed: true,
+                                                                               foveation: true, dir: "chart-x", slice: 0, physical: [1216, 1184]))
+    expectEqual(line, "DIAG chartcap t_ms=5 eye=L rq=0.500 rq_set=0.500 confirmed=yes fov=on dir=chart-x slice=0 physical=1216x1184 patches=24", "chartcap line")
+    expectEqual(ChartCapture.directoryName(stamp: "20261022T101010Z", quality: 0.75, foveation: true), "chart-20261022T101010Z-rq0.75-fovon", "dir")
+}
+
+private func testAutoSession() {
+    let s = AutoCaptureSession()
+    expectEqual(s.frame(actual: 1.0, max: 1.0), .setQuality(0.5), "first step sets 0.5")
+    for _ in 0..<5 { expect(s.frame(actual: 1.0, max: 1.0) == nil, "waits for the read-back") }
+    for i in 0..<30 {
+        let step = s.frame(actual: 0.5, max: 1.0)
+        expect(i < 29 ? step == nil : step == .capture(quality: 0.5, confirmed: true, frames: 35), "30 confirmed frames, then capture \(i) \(String(describing: step))")
+    }
+    expect(s.frame(actual: 0.5, max: 1.0) == nil, "one capture in flight")
+    s.captured()
+    expectEqual(s.frame(actual: 0.5, max: 1.0), .setQuality(0.75), "next quality")
+    // Clamped to the layer's maximum: 1.0 with max 0.8 is confirmed at 0.8.
+    for _ in 0..<30 { _ = s.frame(actual: 0.75, max: 0.8) }
+    s.captured()
+    expectEqual(s.frame(actual: 0.75, max: 0.8), .setQuality(1.0), "last quality")
+    var step: AutoCaptureSession.Step?
+    for _ in 0..<30 { step = s.frame(actual: 0.8, max: 0.8) }
+    expectEqual(step, .capture(quality: 1.0, confirmed: true, frames: 30), "clamped quality confirmed")
+    s.captured()
+    expectEqual(s.frame(actual: 0.8, max: 0.8), .done, "done after three")
+    expect(s.frame(actual: 0.8, max: 0.8) == nil && s.finished, "finished")
+    // No read-back (non-26 SDK): capture unconfirmed after the timeout.
+    let n = AutoCaptureSession()
+    _ = n.frame(actual: nil, max: nil)
+    var last: AutoCaptureSession.Step?
+    for _ in 0..<AutoCaptureSession.timeoutFrames { last = n.frame(actual: nil, max: nil) ?? last }
+    expectEqual(last, .capture(quality: 0.5, confirmed: false, frames: AutoCaptureSession.timeoutFrames), "timeout capture")
+    expectEqual(AutoCaptureSession().statusText, "0.50", "status shows the quality")
+}
+
+private func testGeometryWithoutHighlight() {
+    let session = GratingSession(mode: .both)
+    let framed = GratingChart.geometry(leftEye, eye: .left, session: session, fixation: nil)
+    let plain = GratingChart.geometry(leftEye, eye: .left, session: session, fixation: nil, highlight: false, status: "0.50")
+    let frame = GratingChart.frame(GratingChart.patches[0]).count
+    let statusDiff = CornerChart.text(session.statusText, in: CornerChart.Rect(x0: 0, y0: 0, x1: 1, y1: 1), vertical: false, color: [1, 1, 1, 1]).count
+        - CornerChart.text("0.50", in: CornerChart.Rect(x0: 0, y0: 0, x1: 1, y1: 1), vertical: false, color: [1, 1, 1, 1]).count
+    expectEqual(framed.count - plain.count, frame + statusDiff, "no yellow frame, custom status")
+}
+
+@main enum ChartCaptureTests {
+    static func main() {
+        testSetting()
+        testRectMapping()
+        testMetadata()
+        testAutoSession()
+        testGeometryWithoutHighlight()
+        finishTests("ChartCapture")
+    }
+}
