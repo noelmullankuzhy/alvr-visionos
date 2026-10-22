@@ -349,16 +349,21 @@ enum ChartCapture {
     static func quality(_ q: Float?) -> String { q.map { String(format: "%.3f", $0) } ?? "unavailable" }
 
     // capture.json "chart_capture".
-    static func metadata(views: [View], requested: Float, actual: Float?, confirmed: Bool, foveation: Bool, frames: Int) -> [String: Any] {
+    // settle: what released the capture (AutoCaptureSession.settle); expectedScreen: the map screen size it waited for.
+    static func metadata(views: [View], requested: Float, actual: Float?, confirmed: Bool, foveation: Bool, frames: Int,
+                         settle: String = "none", expectedScreen: [Int]? = nil) -> [String: Any] {
         ["mode": "auto", "rq": quality(actual), "rq_set": quality(requested), "rq_confirmed": confirmed, "fov": foveation ? "on" : "off",
-         "settle_frames": frames, "patch_deg": GratingChart.patchDeg, "views": views.map(viewRecord)]
+         "settle_frames": frames, "settle": settle, "expected_screen": expectedScreen as Any? ?? NSNull(),
+         "patch_deg": GratingChart.patchDeg, "views": views.map(viewRecord)]
     }
 
+    // screen / physical: the capture frame's settled map sizes.
     static func fields(eye: CornerEye, requested: Float, actual: Float?, confirmed: Bool, foveation: Bool, dir: String, slice: Int,
-                       physical: [Int]) -> KeyValuePairs<String, Any> {
-        ["eye": eye.rawValue, "rq": quality(actual), "rq_set": quality(requested), "confirmed": confirmed ? "yes" : "no",
-         "fov": foveation ? "on" : "off", "dir": dir, "slice": slice, "physical": physical.map(String.init).joined(separator: "x"),
-         "patches": GratingChart.patches.count]
+                       physical: [Int], screen: [Int]? = nil, expectedScreen: [Int]? = nil, settle: String = "none") -> KeyValuePairs<String, Any> {
+        func size(_ s: [Int]?) -> String { s.map { $0.map(String.init).joined(separator: "x") } ?? "none" }
+        return ["eye": eye.rawValue, "rq": quality(actual), "rq_set": quality(requested), "confirmed": confirmed ? "yes" : "no",
+                "fov": foveation ? "on" : "off", "dir": dir, "slice": slice, "screen": size(screen), "physical": size(physical),
+                "expected_screen": size(expectedScreen), "settle": settle, "patches": GratingChart.patches.count]
     }
 
     static func directoryName(stamp: String, quality: Float, foveation: Bool) -> String {
@@ -366,35 +371,65 @@ enum ChartCapture {
     }
 }
 
-// Auto capture walk, one frame at a time: per render quality, set it, wait for the read-back to match (the layer's
-// maximum clamps it) for settleFrames frames, capture once and wait for the write. No read-back: capture
-// unconfirmed after timeoutFrames. A failed capture (no encoder, failed write) still moves on, so the walk always
-// reaches done, which carries the quality to restore.
+// Auto capture walk, one frame at a time: per render quality, set it, wait for it to settle, capture once and wait for
+// the write. Settled: with a reference map (the rate map's screen size at the entry quality) the frame's map screen size
+// within 1 % of the expected size for the target quality (the layer's maximum clamps it) for settleFrames consecutive
+// frames. The quality read-back echoes the setter at once while visionOS animates the map over many frames (22 Oct
+// device run), so it confirms only without a map. Not settled: capture unconfirmed after timeoutFrames. A failed
+// capture (no encoder, failed write) still moves on, so the walk always reaches done, which carries the quality to restore.
 final class AutoCaptureSession {
     enum Step: Equatable { case setQuality(Float), capture(quality: Float, confirmed: Bool, frames: Int), done(restore: Float?) }
-    static let settleFrames = 30, timeoutFrames = 600
+    static let settleFrames = 30, timeoutFrames = 600, screenTolerance = 0.01
 
     let restore: Float?
+    let reference: [Int]?
     private(set) var index = 0
     private(set) var finished = false
     private(set) var captures = 0, failures = 0
+    private(set) var settle = "none"   // rate_map, render_quality or timeout: what released the last capture
     private var requested = false, inFlight = false
     private var frames = 0, confirmedFrames = 0
+    private var target: Float?
 
-    init(restore: Float?) { self.restore = restore }
+    // reference: the rate map's screen size at `restore` (nil: no map, the read-back confirms).
+    init(restore: Float?, reference: [Int]? = nil) { self.restore = restore; self.reference = reference }
 
     var quality: Float? { index < GratingChart.qualities.count ? GratingChart.qualities[index] : nil }
     var statusText: String { quality.map { String(format: "%.2f", $0) } ?? "donE" }
 
-    func frame(actual: Float?, max: Float?) -> Step? {
+    // Device fit (22 Oct): screen = full size x (0.5 + 0.5 q); 1.0 6261x5023, 0.75 5479x4395, 0.5 4696x3767.
+    static func expectedScreen(quality: Float, reference: [Int], referenceQuality: Float) -> [Int] {
+        let k = (0.5 + 0.5 * Double(quality)) / (0.5 + 0.5 * Double(referenceQuality))
+        return reference.map { Int((Double($0) * k).rounded()) }
+    }
+
+    static func matches(_ screen: [Int], _ expected: [Int]) -> Bool {
+        screen.count == expected.count && zip(screen, expected).allSatisfy { abs(Double($0 - $1)) <= screenTolerance * Double($1) }
+    }
+
+    // The expected map screen size for the current step (nil without a reference or before the step is set).
+    var expectedScreen: [Int]? {
+        guard let reference, let restore, let target else { return nil }
+        return Self.expectedScreen(quality: target, reference: reference, referenceQuality: restore)
+    }
+
+    func frame(actual: Float?, max: Float?, screen: [Int]? = nil) -> Step? {
         guard !finished, !inFlight else { return nil }
         guard let q = quality else { finished = true; return .done(restore: restore) }
+        target = Swift.min(q, max ?? q)
         guard requested else { requested = true; frames = 0; confirmedFrames = 0; return .setQuality(q) }
         frames += 1
-        let target = Swift.min(q, max ?? q)
-        if let actual, abs(actual - target) < 0.005 { confirmedFrames += 1 }
-        if confirmedFrames >= Self.settleFrames { inFlight = true; return .capture(quality: q, confirmed: true, frames: frames) }
-        if frames >= Self.timeoutFrames { inFlight = true; return .capture(quality: q, confirmed: false, frames: frames) }
+        let byMap = reference != nil && restore != nil
+        if byMap {
+            if let screen, let expected = expectedScreen, Self.matches(screen, expected) { confirmedFrames += 1 } else { confirmedFrames = 0 }
+        } else if let actual, let target, abs(actual - target) < 0.005 {
+            confirmedFrames += 1
+        }
+        if confirmedFrames >= Self.settleFrames {
+            inFlight = true; settle = byMap ? "rate_map" : "render_quality"
+            return .capture(quality: q, confirmed: true, frames: frames)
+        }
+        if frames >= Self.timeoutFrames { inFlight = true; settle = "timeout"; return .capture(quality: q, confirmed: false, frames: frames) }
         return nil
     }
 

@@ -224,6 +224,7 @@ final class ResolutionChartRenderer {
         lock.lock()
         lastActual = actual
         if startMs == nil { startMs = now }
+        let screen = rasterizationRateMap.map { [$0.screenSize.width, $0.screenSize.height] }
         let elapsed = now - startMs!
         let fixation = RateMapSampling.fixation(elapsedMs: elapsed)
         if let s = RateMapSampling.dueSample(elapsedMs: elapsed, taken: sweepTaken) {
@@ -234,26 +235,28 @@ final class ResolutionChartRenderer {
             gratingStarted = true
             restoreQuality = actual
             if autoMode {
-                auto = AutoCaptureSession(restore: actual)
+                auto = AutoCaptureSession(restore: actual, reference: screen)
                 // The layer's foveation is fixed when the space is configured: a foveation-off pass needs the
                 // Resolution chart foveation setting off and a new entry.
                 Diag.log("chartcap", ["step": "start", "fov": foveation ? "on" : "off", "fov_off": foveation ? "unavailable" : "this_pass",
                                       "why": foveation ? "layer_foveation_fixed_at_entry" : "layer_without_foveation",
-                                      "restore": ChartCapture.quality(actual)])
+                                      "restore": ChartCapture.quality(actual),
+                                      "reference_screen": screen.map { $0.map(String.init).joined(separator: "x") } ?? "none"])
             } else {
                 pendingQuality = session.quality
                 Diag.log("grating", ["walk": "start", "quality": String(format: "%.3f", session.quality ?? 0),
                                      "restore": actual.map { String(format: "%.3f", $0) } ?? "none"])
             }
         }
-        var captureStep: (quality: Float, confirmed: Bool, frames: Int)?
+        var captureStep: (quality: Float, confirmed: Bool, frames: Int, settle: String, expected: [Int]?)?
         if gratingStarted, let auto {
-            switch auto.frame(actual: actual, max: Self.maxQuality(layer)) {
+            switch auto.frame(actual: actual, max: Self.maxQuality(layer), screen: screen) {
             case let .setQuality(q)?:
                 pendingQuality = q
-                Diag.log("chartcap", ["step": "quality", "rq_set": ChartCapture.quality(q), "rq": ChartCapture.quality(actual)])
+                Diag.log("chartcap", ["step": "quality", "rq_set": ChartCapture.quality(q), "rq": ChartCapture.quality(actual),
+                                      "expected_screen": auto.expectedScreen.map { $0.map(String.init).joined(separator: "x") } ?? "none"])
             case let .capture(q, confirmed, frames)?:
-                captureStep = (q, confirmed, frames)
+                captureStep = (q, confirmed, frames, auto.settle, auto.expectedScreen)
             case let .done(restore)?:
                 pendingQuality = restore
                 Diag.log("chartcap", ["step": "done", "captures": auto.captures, "failed": auto.failures, "fov": foveation ? "on" : "off",
@@ -336,14 +339,14 @@ final class ResolutionChartRenderer {
         encoder.endEncoding()
         if let captureStep {
             capture(commandBuffer, drawable: drawable, quality: captureStep.quality, actual: actual, confirmed: captureStep.confirmed,
-                    frames: captureStep.frames)
+                    frames: captureStep.frames, settle: captureStep.settle, expectedScreen: captureStep.expected)
         }
     }
 
     // Auto capture: every colour texture of this drawable (physical, as rendered through the rate map) read back after the
     // chart pass by DiagFrameCapture (PNG per slice + capture.json); the patch rects are mapped now, through this frame's map.
     private func capture(_ commandBuffer: MTLCommandBuffer, drawable: LayerRenderer.Drawable, quality q: Float, actual: Float?,
-                         confirmed: Bool, frames: Int) {
+                         confirmed: Bool, frames: Int, settle: String, expectedScreen: [Int]?) {
         // One full readback per process: while a frame capture holds the slot, retry next frame (nothing counted).
         guard DiagReadbackSlot.shared.acquire(Self.slotName) else {
             lock.lock(); auto?.deferCapture(); lock.unlock()
@@ -379,7 +382,8 @@ final class ResolutionChartRenderer {
                                                      "viewport": [vp.originX, vp.originY, vp.width, vp.height],
                                                      "tangents": [t.x, t.y, t.z, t.w], "texture_index": index])
         }
-        let metadata = ChartCapture.metadata(views: views, requested: q, actual: actual, confirmed: confirmed, foveation: foveation, frames: frames)
+        let metadata = ChartCapture.metadata(views: views, requested: q, actual: actual, confirmed: confirmed, foveation: foveation, frames: frames,
+                                             settle: settle, expectedScreen: expectedScreen)
         let maps = drawable.rasterizationRateMaps
         let targets = drawable.colorTextures.enumerated().map { index, texture in
             DiagFrameCapture.Target(texture: texture, views: targetViews[index] ?? [],
@@ -387,7 +391,8 @@ final class ResolutionChartRenderer {
         }
         for v in views {
             Diag.log("chartcap", ChartCapture.fields(eye: v.eye, requested: q, actual: actual, confirmed: confirmed, foveation: foveation,
-                                                     dir: name, slice: v.slice, physical: v.physical))
+                                                     dir: name, slice: v.slice, physical: v.physical, screen: v.screen,
+                                                     expectedScreen: expectedScreen, settle: settle))
         }
         DiagFrameCapture.submit(buffer: commandBuffer, targets: targets, directory: directory,
                                 metadata: ["chart_capture": metadata, "trigger": ["reason": "chartcap"]]) { [weak self] ok in

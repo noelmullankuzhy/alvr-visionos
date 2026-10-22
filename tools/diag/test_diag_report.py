@@ -688,6 +688,96 @@ class ChartCaptureCounterTests(unittest.TestCase):
         self.assertEqual({(r['rq'], r['rq_set']) for r in summary}, {('unavailable', '0.500')})
         self.assertIn('| L | 1.000 | on | axis | V | 8 | 12 | 12 |', out)
 
+    def test_count_right_above_either_physical_nyquist_is_suspect(self):
+        """A patch counting correctly above its own capture Nyquist or the rrm Nyquist cannot be carried by the grid
+        (22 Oct: temporal20 patches span 16-26 deg, each with its own Nyquist): suspect, never the finest."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.capture_dir(root)
+            path = next(root.rglob('capture.json'))
+            meta = json.loads(path.read_text())
+            temporal = meta['chart_capture']['views'][0]['patches'][3]
+            temporal['nyquist_logical_cpd'], temporal['nyquist_physical_cpd'] = 20.0, 6.0   # within logical, above capture
+            path.write_text(json.dumps(meta))
+            log = root / 'diag-a.log'
+            log.write_text(log.read_text().replace('0:40.00,20:34.50', '0:14.00,20:34.50'))   # rrm Nyquist on axis: 7
+            records, _, _ = report.read_logs(root)
+            patches = report.chart_capture_patches(root)
+            summary = report.chart_capture_summary(patches, records)
+            out = report.generate(root)
+        rows = {(r['pos'], r['orient']): r for r in summary}
+        side = rows[('temporal20', 'V')]
+        self.assertEqual((side['finest_correct_cpd'], side['finest_count_correct_cpd'], side['suspect_cpd']), (None, None, '8'))
+        self.assertEqual(side['above_nyquist_cpd'], None)
+        self.assertIn('8:correct', side['classes'])
+        axis = rows[('axis', 'V')]
+        self.assertEqual(axis['nyquist_physical_cpd'], '7.00')
+        self.assertEqual((axis['finest_correct_cpd'], axis['suspect_cpd']), (None, '8'))
+        self.assertEqual(rows[('axis', 'H')]['suspect_cpd'], None)   # aliased, not counted right: not suspect
+        key = {(p['pos'], p['orient'], p['cpd']): p for p in patches}
+        self.assertEqual(key[('temporal20', 'V', 8)]['nyquist_physical_capture_cpd'], 6.0)
+        self.assertIn('suspect_cpd', out)
+        self.assertIn('| L | 1.000 | on | temporal20 | V | 8 | 12 | 12 | 0 | 0 | 5.00 | correct | no | 6.0 |', out)
+
+
+class ResolutionTablesRegressionTests(unittest.TestCase):
+    """W30-era rrm and grating tables: a fixed input and the exact expected rows, so a report change cannot alter them
+    silently."""
+    LOG = (
+        'DIAG grating t_ms=1 chart=on mode="Both eyes" foveation=on\n'
+        'DIAG rrm t_ms=1000 phase=sweep s=0 fix=centre fix_x_deg=0 fix_y_deg=0 eye=L drawable=0 view=0 layer=0 rq=1.000 fov=on '
+        'map=ok screen=6261x5023 physical=2432x2368 viewport=0,0,6261,5023 tan_left=1.7321 tan_right=1.0000 tan_bottom=1.1918 '
+        'tan_top=1.0000 axis_x=3969.3 axis_y=2291.8 logical_ppd_x=39.997 logical_ppd_y=39.999 '
+        'h_rate=-40:0.1488,-30:0.2689,-20:0.7619,-10:0.9697,-5:1.0000,0:1.0000,5:1.0000,10:0.9697,20:0.7619,30:0.2667,40:0.1482 '
+        'h_ppd=-40:10.14,-30:14.34,-20:34.51,-10:39.99,-5:40.30,0:40.00,5:40.30,10:39.99,20:34.51,30:14.22,40:10.10 '
+        'v_rate=-40:0.1749,-30:0.3299,-20:0.8889,-10:0.9697,-5:1.0000,0:1.0000,5:1.0000,10:0.9697,20:0.4384,30:0.2133,40:0.1397 '
+        'v_ppd=-40:11.92,-30:17.59,-20:40.26,-10:39.99,-5:40.31,0:40.00,5:40.31,10:39.99,20:19.86,30:11.38,40:9.52 '
+        'h_peak_deg=0.0 v_peak_deg=-0.5 map_hash=cdaf9dea\n'
+        'DIAG rrm t_ms=30000 phase=quality s=0 fix=none fix_x_deg=0 fix_y_deg=0 eye=L drawable=0 view=0 layer=0 rq=0.500 fov=on '
+        'map=ok screen=4696x3767 physical=1952x1888 viewport=0,0,4696,3767 h_rate=-20:0.5000,0:1.0000,20:0.5000 '
+        'h_ppd=-20:15.00,0:30.00,20:15.00 v_rate=0:1.0000 v_ppd=0:30.00 h_peak_deg=0.0 v_peak_deg=0.0 map_hash=bbbb\n'
+        + ''.join('DIAG grating t_ms={} eye=both pos={} cpd={} orient={} seen={} rq={} rq_set={} fov=on nyquist_logical_cpd={} '
+                  'above_nyquist={} temporal_deg=0.0 up_deg=1.0 size_deg=1.5\n'.format(t, pos, cpd, orient, seen, rq, rq, nyq, above)
+                  for t, pos, cpd, orient, seen, rq, nyq, above in (
+                      (31000, 'axis', 8, 'V', 'yes', '0.500', '15.00', 'no'),
+                      (31001, 'axis', 14, 'V', 'yes', '0.500', '15.00', 'no'),
+                      (31002, 'axis', 17, 'V', 'yes', '0.500', '15.00', 'yes'),
+                      (31003, 'temporal20', 10, 'V', 'no', '0.500', '16.00', 'no'),
+                      (2000, 'axis', 17, 'V', 'yes', '1.000', '20.00', 'no'),
+                      (2001, 'axis', 20, 'V', 'no', '1.000', '20.00', 'no'),
+                      (2002, 'axis', 12, 'H', 'yes', '1.000', '20.00', 'no'))))
+
+    def test_rrm_and_grating_tables_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'diag-a.log').write_text(self.LOG)
+            out = report.generate(Path(directory)).splitlines()
+        start = out.index('## Resolution measurement')
+        end = next(i for i in range(start + 1, len(out)) if out[i].startswith(('## ', 'Auto capture (')))
+        self.assertEqual([line for line in out[start:end] if line.startswith('|')], EXPECTED_RESOLUTION_TABLES)
+
+
+# Generated from develop 6cc2720 (W30-era rrm and grating tables) for ResolutionTablesRegressionTests.LOG.
+EXPECTED_RESOLUTION_TABLES = [
+    '| eye | rq | fov | line | -40 | -30 | -20 | -10 | -5 | 0 | 5 | 10 | 20 | 30 | 40 | peak_deg | phase | map | screen | physical | source |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| L | 0.500 | on | h | no data | no data | 15.00 | no data | no data | 30.00 | no data | no data | 15.00 | no data | no data | 0.0 | quality | ok | 4696x3767 | 1952x1888 | diag-a.log:3 |',
+    '| L | 0.500 | on | v | no data | no data | no data | no data | no data | 30.00 | no data | no data | no data | no data | no data | 0.0 | quality | ok | 4696x3767 | 1952x1888 | diag-a.log:3 |',
+    '| L | 1.000 | on | h | 10.14 | 14.34 | 34.51 | 39.99 | 40.30 | 40.00 | 40.30 | 39.99 | 34.51 | 14.22 | 10.10 | 0.0 | sweep | ok | 6261x5023 | 2432x2368 | diag-a.log:2 |',
+    '| L | 1.000 | on | v | 11.92 | 17.59 | 40.26 | 39.99 | 40.31 | 40.00 | 40.31 | 39.99 | 19.86 | 11.38 | 9.52 | -0.5 | sweep | ok | 6261x5023 | 2432x2368 | diag-a.log:2 |',
+    '| eye | rq | fov | samples | hashes | peaks | verdict | source |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| L | 1.000 | on | 1 | 1 | centre:0/-0.5 | no data | diag-a.log:2 |',
+    '| eye | rq | fov | pos | orient | finest_seen_cpd | nyquist_logical_cpd | nyquist_physical_cpd | limit | judged | seen_cpd | not_seen_cpd | above_nyquist_cpd | run | source |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| both | 0.500 | on | axis | V | 14 | 15.00 | 15.00 | render-grid limited | 2 | 8,14 | no data | 17 | 1 | diag-a.log:6 |',
+    '| both | 0.500 | on | temporal20 | V | no data | 16.00 | 7.50 | undetermined | 1 | no data | 10 | no data | 1 | diag-a.log:7 |',
+    '| both | 1.000 | on | axis | V | 17 | 20.00 | 20.00 | render-grid limited | 2 | 17 | 20 | no data | 1 | diag-a.log:9 |',
+    '| both | 1.000 | on | axis | H | 12 | 20.00 | 20.00 | lens/eye limited | 1 | 12 | no data | no data | 1 | diag-a.log:10 |',
+    '| eye | rq | fov | pos | orient | cpd | seen | nyquist_logical_cpd | run | source |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    '| both | 0.500 | on | axis | V | 17 | yes | 15.00 | 1 | diag-a.log:6 |',
+]
+
 
 if __name__ == '__main__':
     unittest.main()

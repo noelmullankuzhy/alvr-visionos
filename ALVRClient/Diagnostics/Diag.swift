@@ -458,6 +458,21 @@ final class DiagCaptureRequests {
         return filePending
     }
 
+    // Would take() hand out a request on this frame? Consumes nothing; keeps the same first-frame stamps as take(), so the
+    // start timer and after_ms count from the first frame either one sees.
+    func due(nowMs: Int, idle: Bool, streamFrame: Bool = false) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard count < 24 else { return false }
+        guard idle else {
+            guard streamFrame else { return false }
+            if firstStreamMs == nil { firstStreamMs = nowMs }
+            return filePending || afterMs.map { !afterTaken && nowMs - firstStreamMs! >= $0 } ?? false
+        }
+        firstStreamMs = nil; afterTaken = false
+        if firstIdleMs == nil { firstIdleMs = nowMs }
+        return !marks.isEmpty || !timerTaken && nowMs - firstIdleMs! >= 3000
+    }
+
     func take(nowMs: Int, idle: Bool, streamFrame: Bool = false) -> Request? {
         lock.lock(); defer { lock.unlock() }
         guard count < 24 else { return nil }
@@ -509,14 +524,21 @@ final class DiagCaptureGate {
     func next(nowMs: Int, idle: Bool, streamFrame: Bool) -> Outcome {
         lock.lock(); defer { lock.unlock() }
         if busy { return .busy(pendingStreaming: requests.streamingPending) }
-        if let slot, !slot.acquire(Self.slotName) { return .waiting("readback_in_flight") }
+        // A request first, then the slot: with nothing due, another readback in flight is not a wait.
+        if let slot {
+            guard requests.due(nowMs: nowMs, idle: idle, streamFrame: streamFrame) else { return nothingTaken(idle: idle, streamFrame: streamFrame) }
+            guard slot.acquire(Self.slotName) else { return .waiting("readback_in_flight") }
+        }
         if let request = requests.take(nowMs: nowMs, idle: idle, streamFrame: streamFrame) {
             busy = true
             return .request(request)
         }
         slot?.release(Self.slotName)
-        if !idle && !streamFrame && requests.streamingPending { return .waiting("no_stream_frame") }
-        return .none
+        return nothingTaken(idle: idle, streamFrame: streamFrame)
+    }
+
+    private func nothingTaken(idle: Bool, streamFrame: Bool) -> Outcome {
+        !idle && !streamFrame && requests.streamingPending ? .waiting("no_stream_frame") : .none
     }
 
     func finished() {

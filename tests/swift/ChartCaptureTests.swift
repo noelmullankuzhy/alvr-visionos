@@ -60,9 +60,12 @@ private func view(_ eye: CornerEye, map: RateMapSampling.Mapping?) -> ChartCaptu
 private func testMetadata() {
     let map: RateMapSampling.Mapping = { x, y in (0.4 * x, 0.45 * y) }
     let meta = ChartCapture.metadata(views: [view(.left, map: map), view(.right, map: nil)], requested: 0.75, actual: 0.75,
-                                     confirmed: true, foveation: true, frames: 31)
+                                     confirmed: true, foveation: true, frames: 31, settle: "rate_map", expectedScreen: [5479, 4395])
     expect(JSONSerialization.isValidJSONObject(meta), "capture.json serialisable")
-    expectEqual(Set(meta.keys), ["mode", "rq", "rq_set", "rq_confirmed", "fov", "settle_frames", "patch_deg", "views"], "chart_capture keys")
+    expectEqual(Set(meta.keys), ["mode", "rq", "rq_set", "rq_confirmed", "fov", "settle_frames", "settle", "expected_screen", "patch_deg",
+                                 "views"], "chart_capture keys")
+    expectEqual(meta["settle"] as? String, "rate_map", "settle reason")
+    expectEqual(meta["expected_screen"] as? [Int], [5479, 4395], "expected screen")
     expectEqual(meta["rq"] as? String, "0.750", "rq read back")
     expectEqual(meta["fov"] as? String, "on", "fov")
     let views = meta["views"] as! [[String: Any]]
@@ -90,9 +93,15 @@ private func testMetadata() {
     let unconfirmed = ChartCapture.metadata(views: [], requested: 0.5, actual: nil, confirmed: false, foveation: false, frames: 600)
     expect(unconfirmed["rq"] as? String == "unavailable" && unconfirmed["fov"] as? String == "off"
            && unconfirmed["rq_confirmed"] as? Bool == false, "no read back")
+    expect(unconfirmed["settle"] as? String == "none" && unconfirmed["expected_screen"] is NSNull, "defaults")
     let line = Diag.line(topic: "chartcap", tMs: 5, fields: ChartCapture.fields(eye: .left, requested: 0.5, actual: 0.5, confirmed: true,
-                                                                               foveation: true, dir: "chart-x", slice: 0, physical: [1216, 1184]))
-    expectEqual(line, "DIAG chartcap t_ms=5 eye=L rq=0.500 rq_set=0.500 confirmed=yes fov=on dir=chart-x slice=0 physical=1216x1184 patches=24", "chartcap line")
+                                                                               foveation: true, dir: "chart-x", slice: 0, physical: [1952, 1888],
+                                                                               screen: [4696, 3767], expectedScreen: [4696, 3767], settle: "rate_map"))
+    expectEqual(line, "DIAG chartcap t_ms=5 eye=L rq=0.500 rq_set=0.500 confirmed=yes fov=on dir=chart-x slice=0 screen=4696x3767 "
+                + "physical=1952x1888 expected_screen=4696x3767 settle=rate_map patches=24", "chartcap line with the settled sizes")
+    let bare = Diag.line(topic: "chartcap", tMs: 5, fields: ChartCapture.fields(eye: .right, requested: 0.5, actual: nil, confirmed: false,
+                                                                               foveation: false, dir: "d", slice: 1, physical: [8, 8]))
+    expect(bare.hasSuffix("screen=none physical=8x8 expected_screen=none settle=none patches=24"), "no sizes: none \(bare)")
     expectEqual(ChartCapture.directoryName(stamp: "20261022T101010Z", quality: 0.75, foveation: true), "chart-20261022T101010Z-rq0.75-fovon", "dir")
 }
 
@@ -157,6 +166,70 @@ private func testAutoSessionFailuresAndRetry() {
     expectEqual(f.frame(actual: 1.0, max: 1.0), .done(restore: 0.5), "all failed: still done and restored")
 }
 
+// The 22 Oct device run (diag-20261022T085526Z.log): the quality read-back echoes the setter at once while visionOS animates
+// the rate map over many frames; settled screens 6261x5023 (1.0), 5479x4395 (0.75), 4696x3767 (0.5).
+private func testRateMapSettle() {
+    expectEqual(AutoCaptureSession.expectedScreen(quality: 0.5, reference: [6261, 5023], referenceQuality: 1.0), [4696, 3767], "0.5 from 1.0")
+    expectEqual(AutoCaptureSession.expectedScreen(quality: 0.75, reference: [6261, 5023], referenceQuality: 1.0), [5478, 4395], "0.75 from 1.0")
+    expectEqual(AutoCaptureSession.expectedScreen(quality: 0.5, reference: [5479, 4395], referenceQuality: 0.75), [4696, 3767], "0.5 from 0.75")
+    expect(AutoCaptureSession.matches([5479, 4395], [5478, 4395]) && AutoCaptureSession.matches([4740, 3802], [4696, 3767]),
+           "within 1 %")
+    expect(!AutoCaptureSession.matches([4750, 3767], [4696, 3767]) && !AutoCaptureSession.matches([4696], [4696, 3767]), "outside 1 %")
+
+    let s = AutoCaptureSession(restore: 1.0, reference: [6261, 5023])
+    expectEqual(s.frame(actual: 1.0, max: 1.0, screen: [6261, 5023]), .setQuality(0.5), "set 0.5")
+    expectEqual(s.expectedScreen, [4696, 3767], "expected for the step")
+    // The device sequence: the property reads 0.5 at once, the map shrinks 6220x4990 ... 5321x4269. The old rule captured
+    // here (30 frames of rq=0.500, physical 2176x2080); the map rule waits.
+    var w = 6220, h = 4990
+    while w > 5321 {
+        expect(s.frame(actual: 0.5, max: 1.0, screen: [w, h]) == nil, "animating \(w)x\(h): no capture")
+        w -= 12; h -= 10
+    }
+    for _ in 0..<40 { expect(s.frame(actual: 0.5, max: 1.0, screen: [4800, 3850]) == nil, "2 % off: no capture") }
+    for _ in 0..<29 { expect(s.frame(actual: 0.5, max: 1.0, screen: [4700, 3770]) == nil, "in band, under 30 frames") }
+    expect(s.frame(actual: 0.5, max: 1.0, screen: [4800, 3850]) == nil, "out of band again: the count restarts")
+    for i in 0..<30 {
+        let step = s.frame(actual: 0.5, max: 1.0, screen: [4696, 3767])
+        if i < 29 { expect(step == nil, "settling \(i)") } else {
+            if case .capture(0.5, true, _)? = step {} else { expect(false, "30 consecutive matching frames: capture \(String(describing: step))") }
+        }
+    }
+    expectEqual(s.settle, "rate_map", "confirmed by the map")
+    s.captured(ok: true)
+    // The read-back alone never confirms in map mode: wrong property, right map still captures.
+    expectEqual(s.frame(actual: 0.5, max: 1.0, screen: [4696, 3767]), .setQuality(0.75), "set 0.75")
+    var step: AutoCaptureSession.Step?
+    for _ in 0..<30 { step = s.frame(actual: 0.5, max: 1.0, screen: [5479, 4395]) }
+    if case .capture(0.75, true, 30)? = step {} else { expect(false, "map settled at 0.75 \(String(describing: step))") }
+    s.captured(ok: true)
+    // Clamped by the layer maximum: 1.0 with max 0.8 settles at the 0.8 size (6261 x 0.9).
+    _ = s.frame(actual: 0.75, max: 0.8, screen: [5479, 4395])
+    expectEqual(s.expectedScreen, [5635, 4521], "clamped target size")
+    for _ in 0..<30 { step = s.frame(actual: 0.8, max: 0.8, screen: [5635, 4521]) }
+    if case .capture(1.0, true, 30)? = step {} else { expect(false, "clamped size confirmed") }
+    s.captured(ok: true)
+    expectEqual(s.frame(actual: 0.8, max: 0.8, screen: [5635, 4521]), .done(restore: 1.0), "done")
+
+    // A map that never settles: unconfirmed capture at the timeout.
+    let t = AutoCaptureSession(restore: 1.0, reference: [6261, 5023])
+    _ = t.frame(actual: 1.0, max: 1.0, screen: [6261, 5023])
+    var last: AutoCaptureSession.Step?
+    for _ in 0..<AutoCaptureSession.timeoutFrames { last = t.frame(actual: 0.5, max: 1.0, screen: [5321, 4269]) ?? last }
+    expectEqual(last, .capture(quality: 0.5, confirmed: false, frames: AutoCaptureSession.timeoutFrames), "timeout")
+    expectEqual(t.settle, "timeout", "settle reason")
+    // No map on a frame (nil screen) never counts in map mode.
+    let n = AutoCaptureSession(restore: 1.0, reference: [6261, 5023])
+    _ = n.frame(actual: 1.0, max: 1.0, screen: nil)
+    for _ in 0..<40 { expect(n.frame(actual: 0.5, max: 1.0, screen: nil) == nil, "no map: no confirmation") }
+    // Without a reference (no map at the start) the read-back confirms, as before.
+    let p = AutoCaptureSession(restore: 1.0)
+    _ = p.frame(actual: 1.0, max: 1.0)
+    for _ in 0..<30 { step = p.frame(actual: 0.5, max: 1.0, screen: [5321, 4269]) }
+    if case .capture(0.5, true, 30)? = step {} else { expect(false, "property fallback") }
+    expectEqual(p.settle, "render_quality", "fallback reason")
+}
+
 private func testReadbackSlot() {
     let slot = DiagReadbackSlot()
     let requests = DiagCaptureRequests(acceptsMarks: true)
@@ -179,6 +252,30 @@ private func testReadbackSlot() {
     expect(slot.holder == nil && slot.acquire("chartcap"), "released when the frame capture finishes")
     slot.release("frame_capture")
     expect(slot.holder == "chartcap", "release by a non-holder is ignored")
+    // Chart capture in flight and no frame-capture request: nothing to wait for (no waiting line), slot untouched.
+    let quiet = DiagReadbackSlot()
+    let idleGate = DiagCaptureGate(requests: DiagCaptureRequests(acceptsMarks: true), slot: quiet)
+    expect(quiet.acquire("chartcap"), "chart capture holds the slot")
+    if case .none = idleGate.next(nowMs: 0, idle: true, streamFrame: false) {} else { expect(false, "no request: .none, not waiting") }
+    if case .none = idleGate.next(nowMs: 2999, idle: true, streamFrame: false) {} else { expect(false, "still no request before 3 s") }
+    if case .none = idleGate.next(nowMs: 100, idle: false, streamFrame: true) {} else { expect(false, "stream frame, no request: .none") }
+    expect(quiet.holder == "chartcap", "the gate never touched the chart's slot")
+    // A streaming request with no stream frame still reports no_stream_frame, slot held or not.
+    let streaming = DiagCaptureRequests(acceptsMarks: true)
+    streaming.requestStreaming()
+    if case .waiting(let why) = DiagCaptureGate(requests: streaming, slot: quiet).next(nowMs: 0, idle: false, streamFrame: false) {
+        expectEqual(why, "no_stream_frame", "streaming request waits for a stream frame")
+    } else { expect(false, "no_stream_frame wait") }
+    // The same request on a stream frame while the chart holds the slot: readback_in_flight, request kept.
+    let streamGate = DiagCaptureGate(requests: streaming, slot: quiet)
+    if case .waiting(let why) = streamGate.next(nowMs: 0, idle: false, streamFrame: true) {
+        expectEqual(why, "readback_in_flight", "real request waits for the chart capture")
+    } else { expect(false, "stream request waits on the slot") }
+    expect(streaming.streamingPending, "request kept pending")
+    quiet.release("chartcap")
+    if case .request(let r) = streamGate.next(nowMs: 11, idle: false, streamFrame: true) {
+        expectEqual(r.reason, "request_file", "taken once the slot is free")
+    } else { expect(false, "stream request taken after release") }
     // Without a slot the gate behaves as before.
     let plain = DiagCaptureGate(requests: DiagCaptureRequests(acceptsMarks: true))
     _ = plain.next(nowMs: 0, idle: true, streamFrame: false)
@@ -202,6 +299,7 @@ private func testGeometryWithoutHighlight() {
         testMetadata()
         testAutoSession()
         testAutoSessionFailuresAndRetry()
+        testRateMapSettle()
         testReadbackSlot()
         testGeometryWithoutHighlight()
         finishTests("ChartCapture")
