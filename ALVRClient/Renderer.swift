@@ -170,6 +170,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
     private var rqSweep: RQRenderer?
     // Corner chart (decision 65): Metal renderer, no stream; nil unless Diagnostics is on and the setting picks a mode.
     let cornerChart: CornerChartRenderer?
+    // Resolution chart (ResolutionChart.swift): same conditions, Resolution chart setting; the corner chart wins.
+    let resolutionChart: ResolutionChartRenderer?
     private var diagEye: DiagEyeRenderer?
     let diagFrameCapture: DiagFrameCaptureSession?
     var hdrEnabled = false
@@ -229,6 +231,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         self.commandQueue = self.device.makeCommandQueue()!
         self.diagProbe = layerRenderer != nil && Diag.isOn ? DiagRenderProbe(device: self.device) : nil
         self.cornerChart = layerRenderer.flatMap { CornerChartRenderer.make(device: $0.device, layerRenderer: $0) }
+        self.resolutionChart = layerRenderer.flatMap { ResolutionChartRenderer.make(device: $0.device, layerRenderer: $0) }
         self.diagFrameCapture = layerRenderer != nil && Diag.isOn && ALVRClientApp.gStore.settings.captureDiagnosticFrames
             ? DiagFrameCaptureSession() : nil
         if layerRenderer == nil && Diag.isOn { DiagEye.unsupported() }
@@ -1213,6 +1216,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             else if let cornerChart, !renderingStreaming {
                 reprojectedFramesInARow = 0
                 cornerChart.encode(commandBuffer: commandBuffer, drawable: drawable, viewports: viewports, rasterizationRateMap: rasterizationRateMap)
+            }
+            else if let resolutionChart, let layerRenderer, !renderingStreaming {
+                reprojectedFramesInARow = 0
+                resolutionChart.encode(commandBuffer: commandBuffer, layer: layerRenderer, drawable: drawable, drawableIndex: 0,
+                                       viewports: viewports, rasterizationRateMap: rasterizationRateMap)
             }
             else
             {

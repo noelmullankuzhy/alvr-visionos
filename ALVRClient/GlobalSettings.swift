@@ -41,6 +41,10 @@ struct GlobalSettings: Codable {
     var renderQualitySweep: Bool = false
     // Corner chart (decision 65, CornerChartMode raw value): with Diagnostics on and no stream; read at renderer start.
     var cornerChart: String = CornerChartMode.off.rawValue
+    // Resolution chart (ResolutionChart.swift, CornerChartMode raw value) and its foveation choice: Diagnostics only,
+    // no stream; read at renderer start / layer configuration.
+    var resolutionChart: String = CornerChartMode.off.rawValue
+    var resolutionFoveation: Bool = true
     // Two windows with the decoded left and right eye images and per-eye counters (EyeDecodeWindows.swift).
     var eyeDecodeWindows: Bool = GlobalSettings.eyeDecodeWindowsDefault
 
@@ -88,6 +92,8 @@ struct GlobalSettings: Codable {
         self.diagnostics = try container.decodeIfPresent(Bool.self, forKey: .diagnostics) ?? self.diagnostics
         self.captureDiagnosticFrames = try container.decodeIfPresent(Bool.self, forKey: .captureDiagnosticFrames) ?? self.captureDiagnosticFrames
         self.cornerChart = try container.decodeIfPresent(String.self, forKey: .cornerChart) ?? self.cornerChart
+        self.resolutionChart = try container.decodeIfPresent(String.self, forKey: .resolutionChart) ?? self.resolutionChart
+        self.resolutionFoveation = try container.decodeIfPresent(Bool.self, forKey: .resolutionFoveation) ?? self.resolutionFoveation
         self.eyeDecodeWindows = try container.decodeIfPresent(Bool.self, forKey: .eyeDecodeWindows) ?? self.eyeDecodeWindows
     }
 }

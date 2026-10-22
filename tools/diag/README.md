@@ -760,6 +760,81 @@ the drawable are retained without clamping; an unexpected area above 1 exposes
 the approximation or inconsistent measurements. Incomplete walks show **no data**,
 not zero area. A visible-but-unhighlightable dot must remain a tracker-limit note.
 
+## Resolution measurement
+
+Measures what the Vision Pro renders and what the wearer resolves: (1) the rendered
+density from each frame's rasterization rate map, in physical px per degree through
+the eye axis, and whether that map follows gaze; (2) the finest square-wave grating
+seen through the lens. About 5 minutes on the headset; Metal immersive space, no
+stream. Code: `ALVRClient/Diagnostics/ResolutionChart.swift` (math, tested by
+`tests/swift/ResolutionChartTests.swift`) and `ResolutionChartRenderer.swift`.
+
+1. Turn on **Diagnostics** and restart the app. Under Advanced Settings set
+   **Corner chart** to Off, **Resolution chart** to **Both eyes** (or Left only /
+   Right only: the other eye is black), leave **Resolution chart foveation** on and
+   **Render quality sweep** off. Leave the streamer disconnected.
+2. **Enter diagnostics** (Metal). Keep the head still. For 20 s a white 0.5° dot
+   steps centre → 20° left → 20° right → 15° up → 15° down, 4 s each: follow it
+   with the eyes only. Each view logs one `rrm` line per second (20 per eye).
+3. The grating chart appears, head-locked: two sets of 1.5° patches, one centred
+   on the eye axis and one 20° temporal. Top row vertical bars, bottom row
+   horizontal; 10, 15, 20, 25, 30, 35 cycles/deg left to right (towards temporal),
+   each labelled. The status under the axis set shows render quality and patch
+   number (`0.50 1-24`). A yellow frame marks the current patch; the walk starts at
+   render quality **0.5**.
+4. Look at the framed patch. **Hold the right pinch (>= 0.5 s)** if you can see the
+   bars (any orientation-correct stripes, not moiré or a grey field), **hold the
+   left pinch** if not; either records and moves to the next patch. A quick right /
+   left pinch moves forward / back without recording (redo a patch: the last
+   judgment wins). Gamepad: d-pad right/up, left/down; A seen, B not seen.
+   About 3 s per patch; 24 patches per quality.
+5. After patch 24 the quality steps to **0.75**, then **1.0** (each change logs an
+   `rrm` line with the new map size). After the last 1.0 patch the status reads
+   `donE` and the previous render quality is restored. Leave the space.
+6. Optional, foveation off: switch **Resolution chart foveation** off, leave and
+   re-enter **Enter diagnostics** (the layer is configured on entry), repeat 2-5.
+   `m1_config foveation=` and `grating chart=on foveation=` record what the layer
+   actually got; `rrm map=none` means the drawable had no rate map. Switch the
+   setting back on afterwards.
+7. Pull `diag-*.log` and run `diag-report.py`; see **Resolution measurement**.
+
+Log lines (`+` deg is screen right / up; logical coordinates are Metal's, origin
+top left, y down; the eye axis is `x = tan_left/(tan_left+tan_right)·W`,
+`y = tan_top/(tan_top+tan_bottom)·H` of the view's viewport):
+
+```
+DIAG rrm phase=sweep|quality s=0..19 fix=centre|left20|right20|up15|down15|none fix_x_deg fix_y_deg
+         eye=L|R drawable view layer rq=<read back> fov=on|off map=ok|none screen=WxH physical=WxH
+         viewport=x,y,w,h tan_left tan_right tan_bottom tan_top axis_x axis_y logical_ppd_x logical_ppd_y
+         h_rate=-40:r,...,40:r h_ppd=-40:p,... v_rate=... v_ppd=... h_peak_deg v_peak_deg map_hash
+DIAG grating chart=on mode=.. foveation=on|off foveation_setting=on|off
+DIAG grating walk=start quality=0.500 restore=..  |  quality=0.750  |  chart=done restore=..
+DIAG grating eye=both|L|R pos=axis|temporal20 cpd=10..35 orient=V|H seen=yes|no rq=<read back>
+         rq_set=<requested> fov=on|off temporal_deg up_deg size_deg=1.5
+```
+
+`*_rate` is physical px per logical px (central difference of
+`physicalCoordinates(screenCoordinates:layer:)` over ±2 logical px) at 0, ±5, ±10,
+±20, ±30, ±40°; `*_ppd` = rate × logical px/deg, where logical px/deg =
+(W/(tan_left+tan_right))·π/180·sec²θ (40.0 on axis at quality 1.0). Angles outside
+the viewport are omitted. `*_peak_deg` is the centre of the highest-rate plateau
+on a 1° scan within ±40°; `map_hash` is FNV-1a of the map's parameter data, so an
+unchanged hash means an unchanged map. Patch positions and sizes are true angles
+(Fick: tan x = tan az, tan y = tan el / cos az) from the view tangents, not logical
+pixels; bars are drawn as geometry through the rate map, so they render (and alias)
+exactly as any app content would. The finest-cpd result is one wearer, one fit.
+
+The report gives: a rendered px/deg profile per eye, quality and foveation (h and v
+rows, one column per angle); a gaze-follow verdict per eye and sweep (`fixed`: one
+map hash and peaks within 1°; `follows gaze`: peaks move ≥5° towards each
+fixation; otherwise `changes, not with gaze`); and the finest seen cpd per eye
+label, quality, foveation, position and orientation, with every judged level.
+
+Limits: selection is by stepping, not gaze, so the tested patch is the framed one;
+look at it. Both eyes labels a binocular judgment. Starting a stream replaces the
+chart; leaving mid-walk does not restore the quality of that (discarded) layer.
+Do not run the render quality sweep at the same time (both set the quality).
+
 ## Repeatable diagnostic report (D8)
 
 ```sh

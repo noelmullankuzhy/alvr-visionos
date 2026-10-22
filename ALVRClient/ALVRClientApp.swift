@@ -22,7 +22,10 @@ struct ContentStageConfiguration: CompositorLayerConfiguration {
         configuration.depthFormat = .depth32Float
         configuration.colorFormat = .bgra8Unorm_srgb
     
-        let foveationEnabled = capabilities.supportsFoveation
+        let settings = ALVRClientApp.gStore.settings
+        // Diagnostics resolution chart only: a configuration without foveation when chosen (off by default).
+        let foveationEnabled = capabilities.supportsFoveation && !GratingChart.foveationDisabled(
+            diagnostics: Diag.isOn, chart: settings.resolutionChart, foveation: settings.resolutionFoveation)
         configuration.isFoveationEnabled = foveationEnabled
 
 #if XCODE_BETA_26
