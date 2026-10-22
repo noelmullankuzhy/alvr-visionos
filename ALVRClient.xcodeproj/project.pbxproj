@@ -98,6 +98,7 @@
 		D65D5E012C00000100650002 /* DiagEyeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = D65D5E022C00000100650002 /* DiagEyeRenderer.swift */; };
 		B26548012C00000100000001 /* BoundaryDots.swift in Sources */ = {isa = PBXBuildFile; fileRef = B26548022C00000100000001 /* BoundaryDots.swift */; };
 		B26548012C00000100000002 /* BoundaryDotsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B26548022C00000100000002 /* BoundaryDotsView.swift */; };
+		B26548012C00000100000003 /* ProjectionOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B26548022C00000100000003 /* ProjectionOverlay.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -238,6 +239,7 @@
 		D65D5E022C00000100650002 /* DiagEyeRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/DiagEyeRenderer.swift; sourceTree = "<group>"; };
 		B26548022C00000100000001 /* BoundaryDots.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/BoundaryDots.swift; sourceTree = "<group>"; };
 		B26548022C00000100000002 /* BoundaryDotsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/BoundaryDotsView.swift; sourceTree = "<group>"; };
+		B26548022C00000100000003 /* ProjectionOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Diagnostics/ProjectionOverlay.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -347,6 +349,7 @@
 				D65D0E022C00000100650006 /* CornerChart.swift */,
 				B26548022C00000100000002 /* BoundaryDotsView.swift */,
 				B26548022C00000100000001 /* BoundaryDots.swift */,
+				B26548022C00000100000003 /* ProjectionOverlay.swift */,
 				D65D0E022C00000100650008 /* CornerChartRenderer.swift */,
 				D65D0E022C000001006531F2 /* ResolutionChart.swift */,
 				D65D0E022C000001006531F4 /* ResolutionChartRenderer.swift */,
@@ -604,6 +607,7 @@
 				D65D0E012C00000100650005 /* CornerChart.swift in Sources */,
 				B26548012C00000100000002 /* BoundaryDotsView.swift in Sources */,
 				B26548012C00000100000001 /* BoundaryDots.swift in Sources */,
+				B26548012C00000100000003 /* ProjectionOverlay.swift in Sources */,
 				D65D0E012C00000100650007 /* CornerChartRenderer.swift in Sources */,
 				D65D0E012C000001006531F1 /* ResolutionChart.swift in Sources */,
 				D65D0E012C000001006531F3 /* ResolutionChartRenderer.swift in Sources */,

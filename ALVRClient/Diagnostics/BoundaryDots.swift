@@ -75,6 +75,32 @@ struct BoundaryDotsSession {
         shape = shape == .lens ? .rect : .lens
     }
 
+    /// Points row for the foveation rect and px/deg readout while no stream is up; a pinch on the fov button cycles it.
+    private(set) var foveationPoint = ProjectionFoveation.defaultName
+    var foveationRow: ProjectionFoveation {
+        ProjectionFoveation.named(foveationPoint) ?? ProjectionFoveation.points[0]
+    }
+
+    mutating func nextFoveationPoint() {
+        let rows = ProjectionFoveation.points
+        let index = rows.firstIndex { $0.name == foveationPoint } ?? -1
+        foveationPoint = rows[(index + 1) % rows.count].name
+    }
+
+    /// One eye's drawn outline at its own slider value (lens: reference + offset; rect: frustum - inset); nil for Both.
+    func outline(_ eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum) -> [BoundaryDot]? {
+        guard eye != .both else { return nil }
+        return shape == .lens ? BoundaryDotsLensReference.outline(eye, offsetDeg: offsets[eye] ?? 0)
+                              : frustum.outline(insetDeg: insets[eye] ?? BoundaryDotsOutline.defaultInsetDeg)
+    }
+
+    /// One eye's projection readout; `stream` nil uses the selected points row.
+    func projection(_ eye: BoundaryDotsEye, frustum: BoundaryDotsFrustum, stream: ProjectionStream? = nil) -> ProjectionReadout? {
+        outline(eye, frustum: frustum).flatMap {
+            ProjectionReadout(eye: eye, frustum: frustum, outline: $0, stream: stream ?? .points(foveationRow))
+        }
+    }
+
     /// Clears the selected eye's cursor so the left drag moves the outline again.
     mutating func deselect() -> Bool {
         cursors.removeValue(forKey: eye) != nil
@@ -134,15 +160,19 @@ struct BoundaryDotsSession {
     }
 
     /// The `dots_outline` line for the selected eye; nil for Both (the outline is monocular).
-    /// Lens lines carry the drawn per-ray eccentricities (reference + offset) on the 24 measured rays.
-    func outlineFields(frustum: BoundaryDotsFrustum, source: String) -> KeyValuePairs<String, Any>? {
+    /// Lens lines carry the drawn per-ray eccentricities (reference + offset) on the 24 measured rays. Both styles
+    /// end with the projection readout (bbox, foveation rect, px/deg) for `stream` (nil: the selected points row).
+    func outlineFields(frustum: BoundaryDotsFrustum, source: String, stream: ProjectionStream? = nil) -> KeyValuePairs<String, Any>? {
         let posix = Locale(identifier: "en_US_POSIX")
         let tangents = String(format: "%.4f,%.4f,%.4f,%.4f", locale: posix, frustum.left, frustum.right, frustum.bottom, frustum.top)
+        guard let p = projection(eye, frustum: frustum, stream: stream) else { return nil }
         if shape == .rect {
             guard let limits = frustum.limits(eye: eye, insetDeg: inset) else { return nil }
             return ["eye": eye.rawValue, "shape": shape.rawValue, "inset_deg": inset, "nasal_deg": limits.nasal,
                     "temporal_deg": limits.temporal, "up_deg": limits.up, "down_deg": limits.down,
-                    "tangent_source": source, "tangents": tangents]
+                    "tangent_source": source, "tangents": tangents,
+                    "bbox_deg": p.bboxDeg, "bbox_tan": p.bboxTan, "fov_source": p.stream.source, "fov_live": p.fovLive,
+                    "foveation": p.foveation, "fov_rect_deg": p.fovRectDeg, "render_px": p.renderPx, "pxdeg_frustum": p.pxdegFrustum, "pxdeg_bbox": p.pxdegBbox]
         }
         guard let limits = BoundaryDotsLensReference.limits(eye, offsetDeg: offset) else { return nil }
         let rays = stride(from: 0.0, to: 360, by: 15).compactMap { ray -> String? in
@@ -152,7 +182,9 @@ struct BoundaryDotsSession {
         }.joined(separator: ",")
         return ["eye": eye.rawValue, "shape": shape.rawValue, "offset_deg": offset, "nasal_deg": limits.nasal,
                 "temporal_deg": limits.temporal, "up_deg": limits.up, "down_deg": limits.down,
-                "tangent_source": source, "tangents": tangents, "reference": BoundaryDotsLensReference.tag, "rays": rays]
+                "tangent_source": source, "tangents": tangents, "reference": BoundaryDotsLensReference.tag, "rays": rays,
+                "bbox_deg": p.bboxDeg, "bbox_tan": p.bboxTan, "fov_source": p.stream.source, "fov_live": p.fovLive,
+                "foveation": p.foveation, "fov_rect_deg": p.fovRectDeg, "render_px": p.renderPx, "pxdeg_frustum": p.pxdegFrustum, "pxdeg_bbox": p.pxdegBbox]
     }
 }
 

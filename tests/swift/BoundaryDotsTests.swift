@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/EntryEnterPolicy.swift ALVRClient/AutoEnterPolicy.swift
+// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/ProjectionOverlay.swift ALVRClient/EntryEnterPolicy.swift ALVRClient/AutoEnterPolicy.swift
 import Foundation
 import simd
 

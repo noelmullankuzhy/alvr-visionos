@@ -3,6 +3,21 @@ import QuartzCore
 import RealityKit
 import SwiftUI
 
+/// What the projection overlay last drew; a refresh with the same inputs rebuilds nothing.
+private struct ProjectionShown: Equatable {
+    struct Eye: Equatable {
+        let eye: BoundaryDotsEye
+        let frustum: BoundaryDotsFrustum
+        let outline: [BoundaryDot]
+    }
+    let eye: BoundaryDotsEye
+    let shape: BoundaryDotsOutlineShape
+    let value: Double
+    let stream: ProjectionStream?
+    let foveationPoint: String
+    let eyes: [Eye]
+}
+
 /// World-space entities follow the device pose; no head anchor or gaze data is used.
 @MainActor
 private final class BoundaryDotsScene {
@@ -16,10 +31,16 @@ private final class BoundaryDotsScene {
     private var sliderLog = BoundaryDotsSliderLog()
     private let cursorEntity = ModelEntity()
     private let statusEntity = ModelEntity()
-    private let outlineEntity = ModelEntity()
     private let insetEntity = ModelEntity()
     private let limitsEntity = ModelEntity()
-    private var outlineShown: (eye: BoundaryDotsEye, shape: BoundaryDotsOutlineShape, value: Double, frustum: BoundaryDotsFrustum)?
+    /// Per eye: frustum rectangle, lens/rect outline, its bbox, foveation rect, axis circle, three readout lines.
+    private var layers: [BoundaryDotsEye: [ModelEntity]] = [:]
+    private var readoutEntities: [BoundaryDotsEye: [ModelEntity]] = [:]
+    private var crossEntities: [ModelEntity] = []
+    private let fovButtonLabel = ModelEntity()
+    private var fovButtonShown: String?
+    private var projectionShown: ProjectionShown?
+    private var hueMaterials: [BoundaryDotsEye: UnlitMaterial] = [:]
     private var dotStates = BoundaryDotsDotStates()
     private var statusShown: String?
     private var eyeEntities: [BoundaryDotsEye: ModelEntity] = [:]
@@ -29,7 +50,6 @@ private final class BoundaryDotsScene {
 
     private let dim = UnlitMaterial(color: UIColor(white: 0.18, alpha: 1))
     private let white = UnlitMaterial(color: .white)
-    private let bright = UnlitMaterial(color: UIColor(red: 0.2, green: 1, blue: 0.4, alpha: 1))
 
     func install(in content: RealityViewContent) {
         guard !started else { return }
@@ -58,7 +78,11 @@ private final class BoundaryDotsScene {
 
         installCursor()
         root.addChild(cursorEntity)
-        root.addChild(outlineEntity)
+        for eye in [BoundaryDotsEye.left, .right] {
+            layers[eye] = (0..<5).map { _ in ModelEntity() }
+            readoutEntities[eye] = (0..<3).map { _ in ModelEntity() }
+            for entity in layers[eye]! + readoutEntities[eye]! { root.addChild(entity) }
+        }
         statusEntity.position = [-0.65, -0.27, -9.9]
         root.addChild(statusEntity)
         for entity in [insetEntity, limitsEntity] { root.addChild(entity) }
@@ -70,9 +94,18 @@ private final class BoundaryDotsScene {
         centre.position = [0, 0, -10]
         makeInteractive(centre)
         for size in [SIMD3<Float>(0.09, 0.015, 0.01), SIMD3<Float>(0.015, 0.09, 0.01)] {
-            centre.addChild(ModelEntity(mesh: .generateBox(size: size), materials: [white]))
+            let bar = ModelEntity(mesh: .generateBox(size: size), materials: [white])
+            crossEntities.append(bar)
+            centre.addChild(bar)
         }
         root.addChild(centre)
+        // A quick right pinch cycles the points row the foveation rect and px/deg use while no stream is up.
+        let fovButton = ModelEntity(mesh: buttonMesh, materials: [dim])
+        fovButton.name = "fov_row"
+        fovButton.position = [1.2, -0.5, -10]
+        makeInteractive(fovButton)
+        fovButton.addChild(fovButtonLabel)
+        root.addChild(fovButton)
         refresh()
         for (index, eye) in BoundaryDotsEye.allCases.enumerated() {
             let button = ModelEntity(mesh: buttonMesh, materials: [eye == session.eye ? white : dim])
@@ -206,11 +239,7 @@ private final class BoundaryDotsScene {
                     break
                 }
                 // One dots_outline line per snapped step and one at release.
-                if sliderLog.logs(update, session: session),
-                   let (frustum, source) = BoundaryDotsTangents.frustum(session.eye),
-                   let fields = session.outlineFields(frustum: frustum, source: source) {
-                    Diag.log("dots_outline", fields)
-                }
+                if sliderLog.logs(update, session: session) { logOutline() }
             } else {
                 switch drag.update(id: event.id, hand: hand, phase: phase, position: SIMD3<Double>(handPosition),
                                    headRotation: rotation, cursor: session.cursor) {
@@ -234,13 +263,16 @@ private final class BoundaryDotsScene {
         if pinch.held {
             if let dot = session.confirm() {
                 Diag.log("dots", session.markFields(dot, action: "confirm", via: "step"))
-            } else if let (frustum, source) = BoundaryDotsTangents.frustum(session.eye),
-                      let fields = session.outlineFields(frustum: frustum, source: source) {
-                Diag.log("dots_outline", fields)
+            } else {
+                logOutline()
             }
         } else if let name = pinch.target {
             if name == "leave" { return true }
             if name == "centre", !session.deselect(), session.eye != .both { session.toggleShape() }
+            if name == "fov_row" {
+                session.nextFoveationPoint()
+                logOutline()
+            }
             if name.hasPrefix("eye_"), let eye = BoundaryDotsEye(rawValue: String(name.dropFirst(4))) {
                 session.eye = eye
             } else if name.hasPrefix("dot_"), let index = Int(name.dropFirst(4)),
@@ -252,6 +284,27 @@ private final class BoundaryDotsScene {
         }
         refresh()
         return false
+    }
+
+    /// The selected eye's `dots_outline` line (none for Both).
+    private func logOutline() {
+        if let (frustum, source) = BoundaryDotsTangents.frustum(session.eye),
+           let fields = session.outlineFields(frustum: frustum, source: source, stream: liveStream()) {
+            Diag.log("dots_outline", fields)
+        }
+    }
+
+    /// The streaming session's render size and foveation (read only, as EventHandler captured them at stream
+    /// start); nil while no stream is up, which is always the case while Boundary dots is visible (offline only),
+    /// so the selected points row is what shows in practice.
+    private func liveStream() -> ProjectionStream? {
+        guard EventHandler.shared.streamingActive, let event = EventHandler.shared.streamEvent else { return nil }
+        let started = event.STREAMING_STARTED
+        let ffr = started.enable_foveated_encoding ? Settings.getAlvrSettings()?.video.foveated_encoding : nil
+        return .live(width: Int(started.view_width), height: Int(started.view_height),
+                     centerSize: ffr.map { [Double($0.centerSizeX), Double($0.centerSizeY)] },
+                     shift: ffr.map { [Double($0.centerShiftX), Double($0.centerShiftY)] },
+                     edgeRatio: ffr.map { [Double($0.edgeRatioX), Double($0.edgeRatioY)] })
     }
 
     private func refresh() {
@@ -283,54 +336,120 @@ private final class BoundaryDotsScene {
                                           materials: [UnlitMaterial(color: UIColor(white: 0.3, alpha: 1))])
     }
 
-    /// The selected eye's outline (lens: measured field + offset; rect: frustum - inset), its value
-    /// and four side limits under the centre cross. Both is not monocular: outline and labels are hidden.
+    /// The projection overlay of the selected eye, or of both in Both, in that eye's hue: the frustum rectangle
+    /// (live tangents), the lens/rect outline at the eye's own slider value, its bbox (thinner), the foveation rect
+    /// (white) and the 0.5 deg axis circle, with three readout lines per eye. A single eye also shows the outline
+    /// value and four side limits under the centre cross. Rebuilt only when an input changes.
     private func refreshOutline() {
-        let eye = session.eye, shape = session.shape, value = session.sliderValue
-        guard let (frustum, _) = BoundaryDotsTangents.frustum(eye),
-              let limits = shape == .lens ? BoundaryDotsLensReference.limits(eye, offsetDeg: value)
-                                          : frustum.limits(eye: eye, insetDeg: value),
-              let outline = shape == .lens ? BoundaryDotsLensReference.outline(eye, offsetDeg: value)
-                                           : frustum.outline(insetDeg: value) else {
-            outlineShown = nil
-            for entity in [outlineEntity, insetEntity, limitsEntity] { entity.isEnabled = false }
+        let eye = session.eye, stream = liveStream()
+        let eyes: [BoundaryDotsEye] = eye == .both ? [.left, .right] : [eye]
+        let drawnEyes = eyes.compactMap { side -> ProjectionShown.Eye? in
+            guard let (frustum, _) = BoundaryDotsTangents.frustum(side),
+                  let outline = session.outline(side, frustum: frustum) else { return nil }
+            return ProjectionShown.Eye(eye: side, frustum: frustum, outline: outline)
+        }
+        let shown = ProjectionShown(eye: eye, shape: session.shape, value: session.sliderValue, stream: stream,
+                                    foveationPoint: session.foveationPoint, eyes: drawnEyes)
+        let fovLabel = "fov \(stream?.source ?? session.foveationPoint)"
+        if fovLabel != fovButtonShown {
+            fovButtonShown = fovLabel
+            fovButtonLabel.model = ModelComponent(mesh: .generateText(fovLabel, extrusionDepth: 0.001, font: .systemFont(ofSize: 0.11)),
+                                                  materials: [white])
+            let bounds = fovButtonLabel.visualBounds(relativeTo: fovButtonLabel)
+            fovButtonLabel.position = [-bounds.center.x, 0.16, 0]
+        }
+        guard shown != projectionShown else { return }
+        projectionShown = shown
+        for bar in crossEntities { bar.model?.materials = [hueMaterial(eye)] }
+        for side in [BoundaryDotsEye.left, .right] {
+            for entity in (layers[side] ?? []) + (readoutEntities[side] ?? []) { entity.isEnabled = eyes.contains(side) }
+        }
+        for (row, drawn) in shown.eyes.enumerated() {
+            guard let layer = layers[drawn.eye],
+                  let readout = session.projection(drawn.eye, frustum: drawn.frustum, stream: stream) else { continue }
+            let hue = hueMaterial(drawn.eye), width = ProjectionOverlay.width
+            // L in front of R by 1 cm so coincident edges (top and bottom) do not z-fight; both in front of the dots.
+            let radius: Float = drawn.eye == .left ? 9.9 : 9.89
+            // Closed ribbons, except the bbox: open dashes, thinner, so it reads apart from the frustum rectangle.
+            let dash = ProjectionOverlay.bboxDash
+            let bboxDashes = ProjectionOverlay.dashes(readout.bbox.path(step: 0.05), dash: dash.dash, gap: dash.gap).map(directions)
+            let ribbons: [([[SIMD3<Double>]], Bool, Double, UnlitMaterial, Float)] = [
+                ([boxDirections(readout.frustum)], true, width.frustum, hue, 0),
+                ([drawn.outline.map(\.direction)], true, width.lens, hue, 0.02),
+                (bboxDashes, false, width.bbox, hue, 0.04),
+                ([readout.fovRect.map(boxDirections) ?? []], true, width.foveation, white, 0.06),
+                ([ProjectionOverlay.axisCircle.map(\.direction)], true, width.circle, hue, 0.08),
+            ]
+            for (entity, ribbon) in zip(layer, ribbons) {
+                entity.model = ribbonMesh(ribbon.0, closed: ribbon.1, widthDeg: ribbon.2, radius: radius - ribbon.4).map {
+                    ModelComponent(mesh: $0, materials: [ribbon.3])
+                }
+            }
+            for (line, (entity, text)) in zip(readout.lines.indices, zip(readoutEntities[drawn.eye] ?? [], readout.lines)) {
+                setCentredText(entity, text, y: -1.3 - 0.09 * Float(row * readout.lines.count + line), material: hue)
+            }
+        }
+        let value = session.sliderValue
+        guard let drawn = shown.eyes.first, eye != .both,
+              let limits = session.shape == .lens ? BoundaryDotsLensReference.limits(eye, offsetDeg: value)
+                                                  : drawn.frustum.limits(eye: eye, insetDeg: value) else {
+            for entity in [insetEntity, limitsEntity] { entity.isEnabled = false }
             return
         }
-        for entity in [outlineEntity, insetEntity, limitsEntity] { entity.isEnabled = true }
-        if let shown = outlineShown, shown.eye == eye, shown.shape == shape, shown.value == value, shown.frustum == frustum { return }
-        outlineShown = (eye, shape, value, frustum)
-        if let mesh = outlineMesh(outline) {
-            outlineEntity.model = ModelComponent(mesh: mesh, materials: [bright])
-        }
-        let label = shape == .lens ? String(format: "lens offset %+.1f deg", value) : String(format: "rect inset %.1f deg", value)
-        setCentredText(insetEntity, String(format: "%@  area %.0f%%", label, 100 * frustum.areaFraction(of: outline)), y: -0.12)
+        for entity in [insetEntity, limitsEntity] { entity.isEnabled = true }
+        let label = session.shape == .lens ? String(format: "lens offset %+.1f deg", value) : String(format: "rect inset %.1f deg", value)
+        setCentredText(insetEntity, String(format: "%@  area %.0f%%", label, 100 * drawn.frustum.areaFraction(of: drawn.outline)), y: -0.12,
+                       material: hueMaterial(eye))
         setCentredText(limitsEntity, String(format: "nasal %.1f  temporal %.1f  up %.1f  down %.1f",
-                                            limits.nasal, limits.temporal, limits.up, limits.down), y: -0.2)
+                                            limits.nasal, limits.temporal, limits.up, limits.down), y: -0.2, material: hueMaterial(eye))
     }
 
-    private func setCentredText(_ entity: ModelEntity, _ text: String, y: Float) {
+    private func hueMaterial(_ eye: BoundaryDotsEye) -> UnlitMaterial {
+        if let material = hueMaterials[eye] { return material }
+        let rgb = ProjectionOverlay.hue(eye)
+        let material = UnlitMaterial(color: UIColor(red: rgb.x, green: rgb.y, blue: rgb.z, alpha: 1))
+        hueMaterials[eye] = material
+        return material
+    }
+
+    /// A tangent-space box as head-frame directions (x right, y up, forward -z), edges split every 0.05 tan.
+    private func boxDirections(_ box: ProjectionBox) -> [SIMD3<Double>] {
+        directions(box.path(step: 0.05))
+    }
+
+    /// Tangent-space points as head-frame directions.
+    private func directions(_ points: [SIMD2<Double>]) -> [SIMD3<Double>] {
+        points.map { normalize(SIMD3($0.x, $0.y, -1)) }
+    }
+
+    private func setCentredText(_ entity: ModelEntity, _ text: String, y: Float, material: UnlitMaterial) {
         entity.model = ModelComponent(mesh: .generateText(text, extrusionDepth: 0.001, font: .systemFont(ofSize: 0.065)),
-                                      materials: [bright])
+                                      materials: [material])
         let bounds = entity.visualBounds(relativeTo: entity)
         entity.position = [-bounds.center.x, y, -9.9]
     }
 
-    // A closed ribbon of constant angular width on the 9.9 m sphere, in front of the
-    // dots (10 m) and behind the cursor (9.95 m). Both windings, so it shows from inside.
-    private func outlineMesh(_ outline: [BoundaryDot]) -> MeshResource? {
-        let radius: Float = 9.9
-        let half = radius * Float(tan(BoundaryDotsOutline.lineWidthDeg * .pi / 360))
-        let points = outline.map { SIMD3<Float>($0.direction) * radius }
-        guard points.count >= 3 else { return nil }
+    // Ribbons of constant angular width on a sphere of `radius` (9.8-9.9 m), in front of the dots (10 m) and the
+    // cursor (9.95 m), one per strip: closed loops, or open strips (dashes). Both windings, so they show from inside.
+    private func ribbonMesh(_ strips: [[SIMD3<Double>]], closed: Bool, widthDeg: Double, radius: Float) -> MeshResource? {
+        let half = radius * Float(tan(widthDeg * .pi / 360))
         var positions: [SIMD3<Float>] = []
         var triangles: [UInt32] = []
-        for (i, point) in points.enumerated() {
-            let along = normalize(points[(i + 1) % points.count] - points[(i + points.count - 1) % points.count])
-            let side = normalize(cross(normalize(point), along)) * half
-            positions += [point + side, point - side]
-            let a = UInt32(i * 2), b = UInt32(((i + 1) % points.count) * 2)
-            triangles += [a, b, a + 1, a + 1, b, b + 1, a, a + 1, b, a + 1, b + 1, b]
+        for strip in strips {
+            let points = strip.map { SIMD3<Float>($0) * radius }, n = points.count
+            guard n >= (closed ? 3 : 2) else { continue }
+            let base = UInt32(positions.count)
+            for (i, point) in points.enumerated() {
+                let next = closed ? points[(i + 1) % n] : points[min(i + 1, n - 1)]
+                let previous = closed ? points[(i + n - 1) % n] : points[max(i - 1, 0)]
+                let side = normalize(cross(normalize(point), normalize(next - previous))) * half
+                positions += [point + side, point - side]
+                guard closed || i + 1 < n else { continue }
+                let a = base + UInt32(i * 2), b = base + UInt32(((i + 1) % n) * 2)
+                triangles += [a, b, a + 1, a + 1, b, b + 1, a, a + 1, b, a + 1, b + 1, b]
+            }
         }
+        guard !triangles.isEmpty else { return nil }
         var descriptor = MeshDescriptor(name: "boundary_outline")
         descriptor.positions = MeshBuffers.Positions(positions)
         descriptor.primitives = .triangles(triangles)

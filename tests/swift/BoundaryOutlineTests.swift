@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift
+// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/ProjectionOverlay.swift
 import Foundation
 import simd
 
@@ -219,11 +219,11 @@ enum BoundaryOutlineTests {
         expectEqual(session.shape, .lens, "lens is the default style")
         session.shape = .rect
         expectEqual(Diag.line(topic: "dots_outline", tMs: 1, fields: session.outlineFields(frustum: left, source: "device_default")!),
-                    "DIAG dots_outline t_ms=1 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000")
+                    "DIAG dots_outline t_ms=1 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 bbox_deg=45.001,30.489,30.489,35.058 bbox_tan=1.0000,0.5888,0.5888,0.7017 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=45.077")
         session.eye = .right
         session.inset = 30
         expectEqual(Diag.line(topic: "dots_outline", tMs: 2, fields: session.outlineFields(frustum: right, source: "m5_view")!),
-                    "DIAG dots_outline t_ms=2 eye=R shape=rect inset_deg=30.000 nasal_deg=15.000 temporal_deg=30.001 up_deg=15.000 down_deg=20.001 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000")
+                    "DIAG dots_outline t_ms=2 eye=R shape=rect inset_deg=30.000 nasal_deg=15.000 temporal_deg=30.001 up_deg=15.000 down_deg=20.001 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 bbox_deg=18.330,30.001,18.435,21.659 bbox_tan=0.3313,0.5774,0.3333,0.3971 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.372,34.296,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=79.639")
         session.eye = .both
         expect(session.outlineFields(frustum: left, source: "device_default") == nil, "no outline line for Both")
 
@@ -322,11 +322,11 @@ enum BoundaryOutlineTests {
         lens.toggleShape()
         expectEqual(lens.sliderValue, 5, "offset kept across toggles")
         expectEqual(Diag.line(topic: "dots_outline", tMs: 3, fields: lens.outlineFields(frustum: left, source: "device_default")!),
-                    "DIAG dots_outline t_ms=3 eye=L shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:42.5,15:40,30:40,45:40,60:35,75:35,90:35,105:37.5,120:37.5,135:40,150:42.5,165:42.5,180:45,195:47.5,210:45,225:45,240:35,255:37.5,270:37.5,285:35,300:37.5,315:37.5,330:37.5,345:42.5")
+                    "DIAG dots_outline t_ms=3 eye=L shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:42.5,15:40,30:40,45:40,60:35,75:35,90:35,105:37.5,120:37.5,135:40,150:42.5,165:42.5,180:45,195:47.5,210:45,225:45,240:35,255:37.5,270:37.5,285:35,300:37.5,315:37.5,330:37.5,345:42.5 bbox_deg=46.509,42.500,36.545,37.500 bbox_tan=1.0541,0.9163,0.7412,0.7673 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=36.989")
         lens.eye = .right
         lens.offset = 5
         expectEqual(Diag.line(topic: "dots_outline", tMs: 4, fields: lens.outlineFields(frustum: right, source: "m5_view")!),
-                    "DIAG dots_outline t_ms=4 eye=R shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:45,15:42.5,30:42.5,45:40,60:37.5,75:37.5,90:35,105:35,120:35,135:40,150:40,165:40,180:42.5,195:42.5,210:37.5,225:37.5,240:37.5,255:35,270:37.5,285:37.5,300:35,315:45,330:45,345:47.5")
+                    "DIAG dots_outline t_ms=4 eye=R shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:45,15:42.5,30:42.5,45:40,60:37.5,75:37.5,90:35,105:35,120:35,135:40,150:40,165:40,180:42.5,195:42.5,210:37.5,225:37.5,240:37.5,255:35,270:37.5,285:37.5,300:35,315:45,330:45,345:47.5 bbox_deg=42.500,46.509,36.545,37.500 bbox_tan=0.9163,1.0541,0.7412,0.7673 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.372,34.296,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=36.989")
 
         // Slider logging: one dots_outline line per snapped value change during a slide (not per frame)
         // and one more at release with the settled value; a slide within one 0.5 deg step logs nothing.
@@ -353,7 +353,7 @@ enum BoundaryOutlineTests {
         expectEqual(lines.count, 4, "three snap steps and a release: four lines")
         expectEqual(lines.map { $0.components(separatedBy: " ").first { $0.hasPrefix("offset_deg=") } ?? "" },
                     ["offset_deg=0.500", "offset_deg=1.000", "offset_deg=1.500", "offset_deg=1.500"], "offsets per step, settled at release")
-        expectEqual(lines.last, "DIAG dots_outline t_ms=13 eye=L shape=lens offset_deg=1.500 nasal_deg=39.000 temporal_deg=41.500 up_deg=31.500 down_deg=34.000 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:39,15:36.5,30:36.5,45:36.5,60:31.5,75:31.5,90:31.5,105:34,120:34,135:36.5,150:39,165:39,180:41.5,195:44,210:41.5,225:41.5,240:31.5,255:34,270:34,285:31.5,300:34,315:34,330:34,345:39")
+        expectEqual(lines.last, "DIAG dots_outline t_ms=13 eye=L shape=lens offset_deg=1.500 nasal_deg=39.000 temporal_deg=41.500 up_deg=31.500 down_deg=34.000 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:39,15:36.5,30:36.5,45:36.5,60:31.5,75:31.5,90:31.5,105:34,120:34,135:36.5,150:39,165:39,180:41.5,195:44,210:41.5,225:41.5,240:31.5,255:34,270:34,285:31.5,300:34,315:34,330:34,345:39 bbox_deg=43.008,39.000,33.085,34.000 bbox_tan=0.9328,0.8098,0.6515,0.6745 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=41.826")
         lines = []
         for dx in [0.0, 0.002, -0.002, 0.0024, 0.0] { slide(2, dx) }
         slide(2, 0.001, .ended)
