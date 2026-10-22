@@ -18,3 +18,5 @@ local-scratch/
 
 # Python diagnostic tools
 __pycache__/
+# Golden frame sets (tools/golden/golden-frame.py output)
+tools/golden/out/
