@@ -5,6 +5,7 @@
 set -u
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 T=$(mktemp -d "${TMPDIR:-/tmp}/fovmatrix-stub.XXXXXX") || exit 2
+T=$(CDPATH= cd -- "$T" && pwd) || exit 2     # normalised like the runner's own paths ("//" from a TMPDIR ending in "/")
 if [ "${1:-}" = --keep ]; then echo "keeping $T"; else trap 'rm -rf "$T"' EXIT; fi
 FAILS=0
 check() { if [ "$1" = ok ]; then echo "ok   $2"; else echo "FAIL $2"; FAILS=$((FAILS + 1)); fi; }
@@ -31,7 +32,7 @@ case "$2" in
   launch)
     [ -f "$FAKE_DATA/Documents/diag/capture.request" ] && : > "$FAKE_DATA/leftover-seen"
     [ -n "${NOSTREAM:-}" ] || echo 'ALVRSTATS {"frames_decoded":5,"presented_fps":89.5,"decode_ms_mean":7.0}'
-    d="$FAKE_PC/angle-chart/s-$$"; mkdir -p "$d"; : > "$d/chart_L.png"; : > "$d/encoder_input_L.png"; echo '{}' > "$d/meta.json"
+    d="$FAKE_PC/angle-chart/s-$$"; mkdir -p "$d"; : > "$d/chart_L.png"; : > "$d/encoder_input_L.png"; [ -n "${NOMETA:-}" ] || echo '{}' > "$d/meta.json"
     # Live evidence (chart-matrix-20261022 m3): an idle start_timer capture lands first (stream gap) and must NOT be taken as the
     # answer to the request. It sorts after the request capture on purpose (newest-name-wins pulling would take it).
     mkdir -p "$FAKE_DATA/Documents/diag/captures/S-zidle-$$"
@@ -57,8 +58,10 @@ EOF
 : > "$T/harness/pc-alvr-manualip.ps1"
 echo : > "$T/pcps.sh"
 cat > "$T/overlay.py" <<'EOF'
-import json, sys
+import json, os, sys
 a = sys.argv[1:]
+with open(os.environ['OVL_LOG'], 'a') as log:
+    log.write(' '.join(a) + '\n')
 out = a[a.index('--out-json') + 1]
 json.dump({'summary': {'verdict': 'PASS', 'median_abs_residual_deg': 0.02, 'max_abs_residual_deg': 0.2}}, open(out, 'w'))
 open(a[a.index('--out-png') + 1], 'w').close()
@@ -84,12 +87,13 @@ printf 'p1\t1.0\t1.0\t0.5,0.45,3,3,0,0\t500\t90\nbad\t0.7\t1.0\toff\t500\t90\tvi
 
 run() {  # run TSV OUTDIR [extra args]
   tsv=$1; od=$2; shift 2
-  PATH="$T/bin:$PATH" PCW="$T/pc/fov-matrix" FAKE_PC="$T/pc" FAKE_DATA="$T/data" HARNESS="$T/harness" PCPS="$T/pcps.sh" OVERLAY="$T/overlay.py" \
+  PATH="$T/bin:$PATH" PCW="$T/pc/fov-matrix" FAKE_PC="$T/pc" FAKE_DATA="$T/data" HARNESS="$T/harness" PCPS="$T/pcps.sh" OVERLAY="$T/overlay.py" OVL_LOG="$T/overlay.args" \
     ${EXEC:-} sh "$HERE/run-matrix.sh" --points "$tsv" --mode chart --out "$od" --build b1 --bundle-id x.y --capture-timeout 20 \
     --stream-timeout 20 --probe-seconds 1 --settle 1 "$@"
 }
 
 echo "== happy path"
+rm -f "$T/overlay.args"
 run "$T/ok.tsv" "$T/o1" > "$T/o1.out" 2> "$T/o1.err"; rc=$?
 t "[ $rc = 0 ]" "exit 0 (rc=$rc)"
 t "[ \$(wc -l < $T/o1.out) = 3 ]" "stdout is the summary only (header + 2 rows)"
@@ -98,8 +102,24 @@ t "grep -q '89.5	500.0	9.00' $T/o1.out" "fps / bitrate / encode ms from the logs
 t "cmp -s $SESSION $T/session.orig" "session restored byte for byte"
 t "[ -f $T/o1/p1/overlay/render-L.json ] && [ -f $T/o1/p1/overlay/encoded-L.json ] && [ -f $T/o1/p1/overlay/drawable.json ]" "drawable + render + encoded overlays ran"
 t "grep -q 'restored and verified' $T/o1/run.log" "restore verified in the log"
+# W14: the server dump's meta.json carries the tangents the server really rendered (already s x view): render/encoded overlays
+# take them with --meta and must not scale again; the drawable overlay keeps --fov-scale.
+for m in render encoded; do
+  t "grep -q \"^$m .*--meta $T/o1/p1/dump/meta.json\" $T/overlay.args" "$m overlay gets --meta <dump>/meta.json"
+  t "! grep \"^$m \" $T/overlay.args | grep -q -- '--fov-scale'" "$m overlay with --meta is not also given --fov-scale"
+  t "grep \"^$m \" $T/overlay.args | grep -q -- '--render .* --foveation'" "$m overlay keeps --render and --foveation"
+done
+t "grep '^drawable ' $T/overlay.args | grep -q -- '--fov-scale' && ! grep '^drawable ' $T/overlay.args | grep -q -- '--meta'" "drawable overlay keeps --fov-scale and takes no --meta"
 t "grep -q request_file $T/o1/p1/capture/capture.json" "capture was taken on request (capture.json trigger request_file) and pulled"
 t "! [ -e $T/data/Documents/diag/capture.request ]" "request file consumed by the (stub) client"
+
+echo "== server dump without meta.json"
+rm -f "$T/overlay.args"
+# subshell: a prefix assignment before a function call persists (and is exported) under a POSIX sh
+( NOMETA=1 run "$T/ok.tsv" "$T/o10" > "$T/o10.out" 2> "$T/o10.err" ); rc=$?
+t "[ $rc = 0 ] || [ $rc = 1 ]" "no-meta run finishes (rc=$rc)"
+t "grep '^render ' $T/overlay.args | grep -q -- '--fov-scale' && ! grep '^render ' $T/overlay.args | grep -q -- '--meta'" "without meta.json the render overlay falls back to --fov-scale"
+t "grep -q 'meta.json' $T/o10/run.log" "the missing meta.json is noted in the log"
 
 echo "== leftover capture.request from an earlier run"
 mkdir -p "$T/data/Documents/diag"; echo old > "$T/data/Documents/diag/capture.request"; rm -f "$T/data/leftover-seen"
@@ -193,5 +213,13 @@ clear_stale
 
 echo "== a finished run leaves no backup files (normal and failing points)"
 t "! [ -e $T/pc/fov-matrix/session.orig.nonce ] && ! [ -e $T/pc/fov-matrix/session.orig.json ]" "no backup or nonce sidecar left after the earlier runs"
+
+# macOS TMPDIR ends in "/": mktemp then returns a path with "//" that the runner (cd && pwd) normalises, so path greps must too.
+if [ -z "${STUB_NESTED:-}" ]; then
+  echo "== TMPDIR with a trailing slash (macOS default)"
+  mkdir -p "$T/slash"
+  STUB_NESTED=1 TMPDIR="$T/slash/" sh "$0" > "$T/nested.out" 2>&1
+  t "tail -1 $T/nested.out | grep -q 'ALL PASS'" "whole suite passes with a trailing-slash TMPDIR"
+fi
 
 [ "$FAILS" = 0 ] && echo "ALL PASS" || { echo "$FAILS FAILED"; exit 1; }

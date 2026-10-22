@@ -80,7 +80,10 @@ sh tools/fov-matrix/test-runner-stubs.sh      # runner with stub ssh/xcrun: happ
    `stream_extent_deg{side:{measured,predicted}}`, `implied_px_per_deg`/`predicted_px_per_deg` (band) by key search;
    missing keys show `n/a`. Overlay outputs are expected as `overlay/{drawable,render-L,...}.json`.
 3. Chart dump PNG names are unspecified: classified by words (`foveated|encoder|encoded|coded` -> encoded, else render;
-   `L|left|R|right` -> eye). Tangents are not read from `meta.json`; the overlay defaults plus `--fov-scale` apply.
+   `L|left|R|right` -> eye). The render/encoded overlays get `--meta <dump>/meta.json` (the tangents the server really rendered,
+   already s x view, so `--fov-scale` is dropped for them; W14: device tangents misplaced every line); without a `meta.json`
+   in the dump the runner logs it and falls back to the device tangents x `--fov-scale`. The drawable overlay keeps `--fov-scale`.
+   Its verdict can now be `PASS-after-fitted-yaw` (capture.json has no `pose.delta_deg`) or fail with `stream extent unverified`.
 4. The build in `--build` (default `1ce896631ea1`) must be in `alvr-run2.py`'s BUILDS table; the angle-chart build needs an
    entry (dir + Dashboard sha256) there. Chart mode starts no game: SteamVR is started by the ALVR dashboard.
 5. Session keys follow e4 (`...Absolute.width`, `...height.content`, `foveated_encoding.enabled/content.*`,

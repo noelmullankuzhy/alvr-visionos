@@ -18,7 +18,14 @@ Modes (first argument):
 1.7321,1.0,1.1918,1.0 (temporal, nasal, down, up); the right eye is mirrored (1.0,1.7321,1.1918,1.0). The render FOV
 is s x these tangents (--fov-scale). --stream-tangents overrides that stream extent. --foveation is off unless given
 (or --meta says "foveation": true): ALVR pads to 32 px whenever it is enabled, even at c=1. resolved px/deg is 1/PSF, per
-degree of the PSF width, not a pixel count. drawable mode reads the view tangents from capture.json.
+degree of the PSF width, not a pixel count. --meta tangents already include s: do not also pass --fov-scale there.
+drawable mode reads the view tangents from capture.json. Its pixels are measured sRGB-encoded: capture.json "encoding"
+"srgb" is used as is, absent or "linear" (the client's raw drawable) is encoded first. The head-locked lines cannot test s,
+so the stream extent is the check: an extent that is not measured (touches the crop, or the stream background is not
+separable from the surround) FAILs as "stream extent unverified". capture.json pose.delta_deg {yaw, pitch, roll} (display
+minus render, right-handed, yaw +Y, pitch +X, roll +Z, intrinsic Y-X-Z) is compensated in the predicted positions; without
+it one yaw is fitted to the x lines and a pass is labelled PASS-after-fitted-yaw. Drawable px/deg (client pixels) are
+reported apart from the stream (coded) px/deg that the sharpness and prediction use; resolvability is judged in stream px.
 --region crops one eye out of a side-by-side frame (the overlay PNG is that crop); predicted_px and measured_px are in
 source-image coordinates. residual_deg is signed in the image direction (+ right/down). Linear RGB is written as 8-bit
 values directly (no gamma). Exit code 0 PASS, 1 FAIL, 2 bad input. Python 3.9+, standard library only.
@@ -50,6 +57,7 @@ GREEN, MAGENTA, WHITE = (0, 1, 0), (1, 0, 1), (1, 1, 1)
 MIN_CONTRAST, NOISE_SIGMAS = 0.03, 6.0      # a line must stand 6 sigma of its window's background above it
 PASS_MEDIAN_DEG, PASS_MAX_DEG, PASS_EXTENT_DEG, PASS_FOUND = 0.1, 0.5, 0.5, 0.5
 MIN_RESOLVABLE_PX = 2.0                      # lines narrower than this in the image cannot show sharpness
+SEP_MIN = 8                                  # the stream background must stand this many (sRGB) counts above the surround
 
 
 # ---- page maths (frustum-pixel-map.html, section 7) --------------------------------------------------------------
@@ -92,6 +100,75 @@ def v_stats(g=600):
 
 def f32(x):
     return struct.unpack('f', struct.pack('f', x))[0]
+
+
+def _srgb_lut():
+    out = bytearray(256)
+    for i in range(256):
+        x = i / 255
+        out[i] = int(round((12.92 * x if x <= 0.0031308 else 1.055 * x ** (1 / 2.4) - 0.055) * 255))
+    return bytes(out)
+
+
+SRGB_LUT = _srgb_lut()
+
+
+def srgb_encode(pix):
+    """Linear-light RGBA bytes -> sRGB-encoded (alpha untouched)."""
+    out = bytearray(pix)
+    for c in range(3):
+        out[c::4] = bytes(pix[c::4]).translate(SRGB_LUT)
+    return out
+
+
+class Pose:
+    """Display-minus-render head rotation in degrees: right-handed, yaw about +Y, pitch +X, roll +Z, intrinsic Y-X-Z
+    (R = Ry Rx Rz, the display camera's orientation relative to the render camera).
+
+    warp() maps a head-locked chart direction (render frame) to where the display frame sees it, as the axis' tau
+    ('x': tangent, 'y': minus the tangent; row index grows downward). Exact for a pure yaw; with pitch/roll it is the
+    value on the chart's own centre line (the other tangent 0), so a line's tilt is ignored (first order)."""
+
+    def __init__(self, yaw=0.0, pitch=0.0, roll=0.0):
+        self.angles = (yaw, pitch, roll)
+        cy, sy, cp, sp, cr, sr = (math.cos(yaw * D), math.sin(yaw * D), math.cos(pitch * D), math.sin(pitch * D),
+                                  math.cos(roll * D), math.sin(roll * D))
+        ry = ((cy, 0, sy), (0, 1, 0), (-sy, 0, cy))
+        rx = ((1, 0, 0), (0, cp, -sp), (0, sp, cp))
+        rz = ((cr, -sr, 0), (sr, cr, 0), (0, 0, 1))
+        mul = lambda a, b: tuple(tuple(sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)) for i in range(3))
+        self.matrix = mul(mul(ry, rx), rz)
+        self.identity = not any(self.angles)
+
+    def warp(self, axis, tau, inverse=False):
+        if self.identity:
+            return tau
+        if inverse:                                 # display -> render: fixed point of t += target - warp(t)
+            t = tau
+            for _ in range(60):
+                t += tau - self.warp(axis, t)
+            return t
+        v = (tau, 0.0, -1.0) if axis == 'x' else (0.0, -tau, -1.0)
+        m = self.matrix                             # render -> display uses the transpose
+        w = [sum(m[j][i] * v[j] for j in range(3)) for i in range(3)]
+        if w[2] >= -1e-9:
+            return tau                              # direction at or behind the display plane: not drawable
+        return w[0] / -w[2] if axis == 'x' else w[1] / w[2]
+
+    def delta(self):
+        return {'yaw': self.angles[0], 'pitch': self.angles[1], 'roll': self.angles[2]}
+
+
+def pose_from_capture(cap, sl):
+    """pose.delta_deg of capture.json (or of the slice) -> Pose, or None when the capture does not carry one."""
+    pose = cap.get('pose', sl.get('pose'))
+    if not pose or pose.get('delta_deg') is None:
+        return None
+    try:
+        d = pose['delta_deg']
+        return Pose(float(d['yaw']), float(d['pitch']), float(d['roll']))
+    except (KeyError, TypeError, ValueError):
+        raise ValueError('capture.json pose.delta_deg must be {"yaw", "pitch", "roll"} in degrees')
 
 
 def fov_axis(c, s, r, n):
@@ -297,27 +374,31 @@ class EncodedAxis(Axis):
 class DrawableAxis(Axis):
     mode = 'drawable'
 
-    def __init__(self, lo, hi, n_render, view_lo, view_hi, origin, extent, table, fov=None, mirror=False):
+    def __init__(self, lo, hi, n_render, view_lo, view_hi, origin, extent, table, fov=None, mirror=False, pose=None):
         Axis.__init__(self, lo, hi, n_render, (0.0, table[-1]), int(math.ceil(table[-1])))
         self.view_lo, self.view_hi, self.origin, self.extent, self.table = view_lo, view_hi, origin, extent, table
         self.fov, self.mirror = fov, mirror
+        self.pose = pose                   # (Pose, 'x'|'y'): render frame -> display frame, tau stays the render-frame tangent
 
     def px(self, tau):
+        if self.pose:
+            tau = self.pose[0].warp(self.pose[1], tau)
         return vc.interpolate(self.table, self.origin + self.extent * (tau - self.view_lo) / (self.view_hi - self.view_lo))
 
     def tau(self, px):
         logical = vc.inverse(self.table, px)
-        return self.view_lo + (logical - self.origin) / self.extent * (self.view_hi - self.view_lo)
+        tau = self.view_lo + (logical - self.origin) / self.extent * (self.view_hi - self.view_lo)
+        return self.pose[0].warp(self.pose[1], tau, inverse=True) if self.pose else tau
 
 
-def make_axis(kind, mode, lo, hi, n_render, fov=None, drawable=None, shift=0, mirror=False):
+def make_axis(kind, mode, lo, hi, n_render, fov=None, drawable=None, shift=0, mirror=False, pose=None):
     """fov: this axis's foveation (geometry in encoded mode; zones and the page prediction in the others).
     mirror: right-eye columns."""
     if mode == 'render':
         return RenderAxis(lo, hi, n_render, shift, fov, mirror)
     if mode == 'encoded':
         return EncodedAxis(lo, hi, n_render, fov or fov_off(n_render), shift, mirror)
-    return DrawableAxis(lo, hi, n_render, *drawable, fov=fov, mirror=mirror)
+    return DrawableAxis(lo, hi, n_render, *drawable, fov=fov, mirror=mirror, pose=(pose, 'x' if kind == 'h' else 'y') if pose else None)
 
 
 def chart_lines(kind, lo, hi, n_render):
@@ -428,18 +509,23 @@ def rate_table(logical, physical, rmin=0.35):
     return table
 
 
-def synth_drawable(directory, w, h, logical, tangents, s, render, eye):
+def synth_drawable(directory, w, h, logical, tangents, s, render, eye, encoding='linear', pose=None):
     directory.mkdir(parents=True, exist_ok=True)
     left, right, down, up = tangents
     xt, yt = rate_table(logical[0], w), rate_table(logical[1], h)
-    x = make_axis('h', 'drawable', -s * left, s * right, render[0], drawable=(-left, right, 0, logical[0], xt))
-    y = make_axis('v', 'drawable', -s * up, s * down, render[1], drawable=(-up, down, 0, logical[1], yt))
+    x = make_axis('h', 'drawable', -s * left, s * right, render[0], drawable=(-left, right, 0, logical[0], xt), pose=pose)
+    y = make_axis('v', 'drawable', -s * up, s * down, render[1], drawable=(-up, down, 0, logical[1], yt), pose=pose)
     pix = synth_image(x, y, eye)
+    if encoding == 'srgb':
+        pix = srgb_encode(pix)
     vc.write_png(directory / 'slice.png', w, h, bytes(pix))
     meta = {'corner_chart': {'mode': 'Off', 'ring_percents': []}, 'trigger': 'synth', 'slices': [{
         'eye': eye, 'view': 0, 'slice': 0, 'png': 'slice.png', 'width': w, 'height': h,
         'viewport': [0, 0, logical[0], logical[1]], 'tangents': [left, right, down, up],
         'rate_map': {'screen_w': logical[0], 'screen_h': logical[1], 'physical_x': xt, 'physical_y': yt, 'layer': 0}}]}
+    meta['pose'] = {'delta_deg': (pose or Pose()).delta()}
+    if encoding == 'srgb':                      # linear (the client's raw drawable) is the absent default
+        meta['encoding'] = 'srgb'
     (directory / 'capture.json').write_text(json.dumps(meta))
 
 
@@ -536,8 +622,34 @@ def find_line(prof, lo_win, hi_win):
     return {'centre': centre, 'fwhm': fwhm, 'contrast': contrast}
 
 
-def stream_edges(pix, width, region, axis_kind, span):
-    """First and last non-black index along an axis (median over a few rows/columns); None if it touches the crop."""
+def edge_levels(pix, width, region, xspan, yspan):
+    """Surround and stream-background levels (max RGB), to find the stream border relative to the surround itself.
+
+    surround = the lowest of the four outer strips' medians (the stream may reach one side); background = median over
+    the middle of the predicted stream span. The border is separable when the background stands SEP_MIN above the surround."""
+    x0, y0, w, h = region
+
+    def level(x, y):
+        i = ((y0 + y) * width + x0 + x) * 4
+        return max(pix[i:i + 3])
+
+    mw, mh = max(2, w // 100), max(2, h // 100)
+    xs, ys = sample_indices(w * 0.1, w * 0.9, 15), sample_indices(h * 0.1, h * 0.9, 15)
+    strips = ([(x, k) for k in range(mh) for x in xs], [(x, h - 1 - k) for k in range(mh) for x in xs],
+              [(k, y) for k in range(mw) for y in ys], [(w - 1 - k, y) for k in range(mw) for y in ys])
+    surround = min(_median(level(x, y) for x, y in pts) for pts in strips)
+    inner = []
+    for a, b in ((max(0.0, xspan[0] - x0), min(w, xspan[1] - x0)), (max(0.0, yspan[0] - y0), min(h, yspan[1] - y0))):
+        pad = 0.1 * (b - a)
+        inner.append(sample_indices(a + pad, b - pad, 9) if b > a else [])
+    background = _median(level(x, y) for x in inner[0] for y in inner[1])
+    ok = background is not None and background - surround >= SEP_MIN
+    return {'surround': surround, 'background': background, 'separable': ok,
+            'threshold': surround + (background - surround) / 2 if ok else None}
+
+
+def stream_edges(pix, width, region, axis_kind, thr):
+    """First and last index above thr along an axis (median over a few rows/columns); None if it touches the crop."""
     x0, y0, w, h = region
     horizontal = axis_kind == 'h'
     n = w if horizontal else h
@@ -550,7 +662,7 @@ def stream_edges(pix, width, region, axis_kind, span):
         else:
             base = (y0 * width + x0 + k) * 4
             v = [max(pix[base + 4 * width * i:base + 4 * width * i + 3]) for i in range(n)]
-        idx = [i for i in range(n) if v[i] > 6 and v[min(i + 1, n - 1)] > 6 and v[min(i + 2, n - 1)] > 6]
+        idx = [i for i in range(n) if v[i] > thr and v[min(i + 1, n - 1)] > thr and v[min(i + 2, n - 1)] > thr]
         if idx:
             firsts.append(idx[0])
             lasts.append(min(n, idx[-1] + 3))
@@ -565,7 +677,8 @@ def local_scale(axis, tau_of_deg, a_deg, h=0.25):
     return abs(axis.px(tau_of_deg(a_deg + h)) - axis.px(tau_of_deg(a_deg - h))) / (2 * h)
 
 
-def analyse(pix, width, region, xaxis, yaxis):
+def analyse(pix, width, region, xaxis, yaxis, drawable=False):
+    """drawable: sharpness is judged in stream (coded) px, not in the client drawable's px, which outnumber them."""
     x0, y0, w, h = region
     xspan, yspan = xaxis.span(), yaxis.span()
     rel_x = (max(0.0, xspan[0] - x0) + 2, min(w, xspan[1] - x0) - 2)
@@ -596,6 +709,7 @@ def analyse(pix, width, region, xaxis, yaxis):
             rec = {'kind': name, 'axis': axname, 'angle_deg': angle, 'predicted_px': p + off, 'measured_px': None,
                    'residual_px': None, 'residual_deg': None, 'fwhm_px': None, 'fwhm_deg': None, 'contrast': None,
                    'zone': zone, 'nominal_width_deg': nominal, 'nominal_width_px': nominal * scale,
+                   'nominal_width_stream_px': nominal * page,
                    'predicted_px_per_deg': page, 'local_px_per_deg': scale, 'resolvable': False,
                    'psf_deg': None, 'sharpness_px_per_deg': None}
             if found:
@@ -606,7 +720,7 @@ def analyse(pix, width, region, xaxis, yaxis):
                 if found['fwhm'] is not None:
                     rec['fwhm_px'] = found['fwhm']
                     rec['fwhm_deg'] = found['fwhm'] / scale
-                    if rec['nominal_width_px'] >= MIN_RESOLVABLE_PX:
+                    if (rec['nominal_width_stream_px'] if drawable else rec['nominal_width_px']) >= MIN_RESOLVABLE_PX:
                         # the line's own width comes out in quadrature; what is left is the pipeline's blur
                         rec['resolvable'] = True
                         rec['psf_deg'] = math.sqrt(max(0.0, rec['fwhm_deg'] ** 2 - nominal ** 2))
@@ -632,10 +746,12 @@ def _median(values):
     return statistics.median(values) if values else None
 
 
-def zone_stats(zl):
+def zone_stats(zl, drawable=False):
+    """drawable: the client drawable's own px/deg is reported apart (its pixels are not the stream's coded pixels)."""
     rs = [l for l in zl if l['resolvable']]
     psf = _median(l['psf_deg'] for l in rs)
     return {
+        'drawable_px_per_deg': _median(l['local_px_per_deg'] for l in zl) if drawable else None,
         'n_predicted': len(zl), 'n_found': sum(1 for l in zl if l['measured_px'] is not None), 'n_resolvable': len(rs),
         'median_fwhm_deg': _median(l['fwhm_deg'] for l in rs),
         'median_nominal_deg': _median(l['nominal_width_deg'] for l in rs),
@@ -644,7 +760,9 @@ def zone_stats(zl):
         'resolved_px_per_deg': 1 / psf if psf else None,
         # page prediction x nominal / FWHM: falls as the lines blur out; equals the prediction when sharp
         'sharpness_px_per_deg': _median(l['sharpness_px_per_deg'] for l in rs),
-        'predicted_px_per_deg': _median(l['predicted_px_per_deg'] for l in zl)}
+        # the same lines as the measurement (W16: median over resolvable lines vs median prediction over all of them)
+        'predicted_px_per_deg': _median(l['predicted_px_per_deg'] for l in rs),
+        'predicted_px_per_deg_all': _median(l['predicted_px_per_deg'] for l in zl)}
 
 
 def summarise(lines, extent, params, foveated):
@@ -655,7 +773,7 @@ def summarise(lines, extent, params, foveated):
          'median_abs_residual_deg': _median(res), 'max_abs_residual_deg': max(res) if res else None,
          'stream_extent_deg': extent, 'zones': {}, 'axes': {}}
     for zone in ('band', 'edge'):
-        s['zones'][zone] = zone_stats([l for l in lines if l['zone'] == zone])
+        s['zones'][zone] = zone_stats([l for l in lines if l['zone'] == zone], params.get('mode') == 'drawable')
     reasons = []
     for ax in ('x', 'y'):
         al = [l for l in lines if l['axis'] == ax]
@@ -686,6 +804,14 @@ def summarise(lines, extent, params, foveated):
     for side, e in extent.items():
         if e['error_deg'] is not None and abs(e['error_deg']) > PASS_EXTENT_DEG:
             reasons.append('stream extent %s off by %.2f deg' % (side, e['error_deg']))
+    if params.get('mode') == 'drawable':
+        # the head-locked lines cannot test s: the extent is the only check, so an unmeasured one is a failure
+        missing = [side for side, e in extent.items() if e['measured_deg'] is None]
+        if missing:
+            lv, why = params.get('extent_levels'), ''
+            if lv and not lv['separable']:
+                why = '; stream background %s vs surround %s counts is not separable' % (lv['background'], lv['surround'])
+            reasons.append('stream extent unverified (%s%s)' % (', '.join(missing), why))
     s['verdict'] = 'FAIL' if reasons else 'PASS'
     s['verdict_reasons'] = reasons
     s['params'] = params
@@ -822,6 +948,8 @@ def build_parser():
     p.add_argument('--out-json')
     p.add_argument('--kind', choices=['render', 'encoded', 'drawable'], help='synth: which image to write')
     p.add_argument('--out-dir', type=Path, help='synth drawable: capture directory to write')
+    p.add_argument('--encoding', choices=['linear', 'srgb'], default='linear', help='synth drawable: pixel transfer to write')
+    p.add_argument('--pose-delta', default='0,0,0', help='synth drawable: yaw,pitch,roll degrees (display minus render) to bake in and record')
     p.add_argument('--phys', default='2432x2368', help='synth drawable: physical texture size')
     p.add_argument('--logical', default='6261x5023', help='synth drawable: logical screen size')
     return p
@@ -845,7 +973,8 @@ def do_synth(a):
         vc.write_png(a.out_png, w, h, bytes(pix))
     else:
         phys, logical = size_arg(a.phys, '--phys'), size_arg(a.logical, '--logical')
-        synth_drawable(a.out_dir, phys[0], phys[1], logical, tangents, a.fov_scale, render, a.eye)
+        synth_drawable(a.out_dir, phys[0], phys[1], logical, tangents, a.fov_scale, render, a.eye, a.encoding,
+                      Pose(*pair(a.pose_delta, float, 3, '--pose-delta')))
     return 0
 
 
@@ -878,6 +1007,11 @@ def run_measure(a):
         if (width, height) != (sl['width'], sl['height']):
             raise ValueError('texture/PNG size mismatch')
         tangents = tuple(sl['tangents'])
+        encoding = cap.get('encoding', sl.get('encoding', 'linear'))
+        if encoding not in ('srgb', 'linear'):
+            raise ValueError('capture.json encoding must be srgb or linear, got %r' % (encoding,))
+        if encoding == 'linear':                # the client writes linear light: measure on the sRGB-encoded counts
+            pix = srgb_encode(pix)
     else:
         if not a.image:
             raise ValueError('%s needs --image' % mode)
@@ -916,10 +1050,16 @@ def run_measure(a):
     else:
         xt, yt = vc.tables(sl)
         vx, vy, vw, vh = sl['viewport']
-        xaxis = make_axis('h', 'drawable', lo_x, hi_x, render[0], fov=fov[0], mirror=mirror, drawable=(-left, right, vx, vw, xt))
-        yaxis = make_axis('v', 'drawable', lo_y, hi_y, render[1], fov=fov[1], drawable=(-up, down, vy, vh, yt))
+        pose = pose_from_capture(cap, sl)
+
+        def drawable_axes(pose):
+            return (make_axis('h', 'drawable', lo_x, hi_x, render[0], fov=fov[0], mirror=mirror, drawable=(-left, right, vx, vw, xt), pose=pose),
+                    make_axis('v', 'drawable', lo_y, hi_y, render[1], fov=fov[1], drawable=(-up, down, vy, vh, yt), pose=pose))
+        xaxis, yaxis = drawable_axes(pose)
     params = {'mode': mode, 'eye': a.eye, 'fov_scale': s, 'tangents_LRDU': list(tangents), 'render': list(render),
               'foveation': foveation or 'off', 'region': [x0, y0, w, h], 'image_size': [width, height]}
+    if mode == 'drawable':
+        params['encoding'] = encoding
     notes = []
     if mode == 'encoded':
         coded = (fov[0]['coded'], fov[1]['coded'])
@@ -928,14 +1068,30 @@ def run_measure(a):
             params['coded_size_note'] = 'region differs from predicted coded size'
         if meta and coded != (meta['coded'][0] // 2, meta['coded'][1]):
             notes.append('coded size predicted %dx%d per eye, meta says %dx%d for both' % (coded[0], coded[1], meta['coded'][0], meta['coded'][1]))
-    lines = analyse(pix, width, region, xaxis, yaxis)
+    lines = analyse(pix, width, region, xaxis, yaxis, mode == 'drawable')
+    fitted = None
+    if mode == 'drawable':
+        if pose is None:       # no pose in the capture: fit one yaw to the x lines and say so in the verdict
+            fitted = _median(l['residual_deg'] for l in lines if l['axis'] == 'x' and l['residual_deg'] is not None) or 0.0
+            pose = Pose(fitted)
+            xaxis, yaxis = drawable_axes(pose)
+            lines = analyse(pix, width, region, xaxis, yaxis, True)
+        params['pose'] = {'source': 'capture.json' if fitted is None else 'fitted-yaw', 'delta_deg': pose.delta()}
     edges = None
     if mode == 'drawable':
-        xa, xb = stream_edges(pix, width, region, 'h', None)
-        ya, yb = stream_edges(pix, width, region, 'v', None)
+        levels = edge_levels(pix, width, region, xaxis.span(), yaxis.span())
+        params['extent_levels'] = levels
+        xa = xb = ya = yb = None
+        if levels['separable']:
+            xa, xb = stream_edges(pix, width, region, 'h', levels['threshold'])
+            ya, yb = stream_edges(pix, width, region, 'v', levels['threshold'])
         edges = {'left': xa, 'right': xb, 'up': ya, 'down': yb}
     extent = extent_report(mode, xaxis, yaxis, edges)
     summary = summarise(lines, extent, params, {'x': fov[0]['f'] < 0.9999, 'y': fov[1]['f'] < 0.9999})
+    if fitted is not None:
+        summary['fitted_yaw_deg'] = fitted
+        if summary['verdict'] == 'PASS':
+            summary['verdict'] = 'PASS-after-fitted-yaw'
     if notes:
         summary['verdict_reasons'].extend(notes)
         summary['verdict'] = 'FAIL'
@@ -946,7 +1102,7 @@ def run_measure(a):
     if a.out_json:
         Path(a.out_json).write_text(json.dumps({'summary': summary, 'lines': lines}, indent=1))
     print_summary(summary, mode, a.eye, s)
-    return 0 if summary['verdict'] == 'PASS' else 1
+    return 0 if summary['verdict'].startswith('PASS') else 1
 
 
 def print_summary(summary, mode, eye, s):
@@ -963,13 +1119,18 @@ def print_summary(summary, mode, eye, s):
         z = summary['zones'][zone]
         if not z['n_predicted']:
             continue
-        print('  {}: found {}/{}, resolvable {}, sharpness {} px/deg (predicted {}), PSF {} deg, resolved (1/PSF, per deg) {}'.format(
-            zone, z['n_found'], z['n_predicted'], z['n_resolvable'], f(z['sharpness_px_per_deg'], '%.1f'),
+        unit = 'stream px/deg' if z['drawable_px_per_deg'] is not None else 'px/deg'
+        print('  {}: found {}/{}, resolvable {}, sharpness {} {} (predicted {}), PSF {} deg, resolved (1/PSF, per deg) {}'.format(
+            zone, z['n_found'], z['n_predicted'], z['n_resolvable'], f(z['sharpness_px_per_deg'], '%.1f'), unit,
             f(z['predicted_px_per_deg'], '%.1f'), f(z['psf_deg'], '%.4f'), f(z['resolved_px_per_deg'], '%.1f')))
+        if z['drawable_px_per_deg'] is not None:
+            print('    client: drawable px/deg {} (not comparable with the stream figures)'.format(f(z['drawable_px_per_deg'], '%.1f')))
     for side, e in summary['stream_extent_deg'].items():
         if e['measured_deg'] is not None:
             print('  stream {}: measured {:.2f} deg, predicted {:.2f} deg'.format(side, e['measured_deg'], e['predicted_deg']))
-    print('{}{}'.format(summary['verdict'], ''.join('; ' + r for r in summary['verdict_reasons'])))
+    fit = summary.get('fitted_yaw_deg')
+    print('{}{}{}'.format(summary['verdict'], ''.join('; ' + r for r in summary['verdict_reasons']),
+                          '' if fit is None else ' (fitted yaw %.3f deg; capture.json has no pose.delta_deg)' % fit))
 
 
 def main(argv=None):

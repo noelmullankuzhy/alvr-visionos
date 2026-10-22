@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import math
 from pathlib import Path
@@ -463,23 +465,6 @@ class Fix2(Base):
             self.assertEqual(code, 0, (eye, j['summary']['verdict_reasons']))
             self.assertLess(j['summary']['axes']['y']['max_abs_residual_deg'], 0.5)
 
-    def test_stream_edges_with_lifted_surround(self):
-        extra = ['--render', '912x728', '--fov-scale', '0.65', '--phys', '1216x1184']
-        d = self.dir / 'cap'
-        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + extra), 0)
-        cap = json.loads((d / 'capture.json').read_text())
-        sl = cap['slices'][0]
-        w, h, pix = fo.vc.read_png(d / sl['png'])
-        lifted = bytearray(pix)
-        for k in range(0, len(lifted), 4):
-            if max(lifted[k:k + 3]) == 0:
-                lifted[k:k + 3] = b'\x0a\x0a\x0a'
-        fo.vc.write_png(d / sl['png'], w, h, bytes(lifted))
-        out = self.dir / 'lift.json'
-        self.run_main(['drawable', '--capture-dir', d, '--out-json', out] + extra)
-        j = json.loads(out.read_text())
-        self.assertEqual(j['summary']['verdict'], 'PASS', j['summary']['verdict_reasons'])
-
     def test_foveation_enabled_at_c1_pads(self):
         a = fo.fov_axis(1.0, 0.0, 3.0, 1824)
         self.assertEqual(a['coded'] % 32, 0)
@@ -501,6 +486,228 @@ class Fix2(Base):
         j = json.loads(out.read_text())
         self.assertEqual(j['summary']['verdict'], 'PASS', j['summary']['verdict_reasons'])
 
+
+
+class DrawableExtent(Base):
+    """Drawable mode is a valid check only when the stream extent is measured (r3 blocker 1) on sRGB-encoded pixels (W16)."""
+    EXTRA = ['--render', '912x728', '--fov-scale', '0.65', '--phys', '1216x1184']
+    BLACK, BG_L = bytes([0, 0, 0, 255]), bytes([15, 15, 31, 255])
+
+    def capture(self, extra=None, repaint=(), encoding=None):
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + list(extra or self.EXTRA)), 0)
+        cap = json.loads((d / 'capture.json').read_text())
+        if encoding is not None:
+            cap['encoding'] = encoding
+        (d / 'capture.json').write_text(json.dumps(cap))
+        png = d / cap['slices'][0]['png']
+        w, h, pix = fo.vc.read_png(png)
+        pix = bytes(pix)
+        for a, b in repaint:
+            pix = pix.replace(a, b)
+        fo.vc.write_png(png, w, h, pix)
+        return d
+
+    def run_drawable(self, d, s='0.65', name='d'):
+        out = self.dir / (name + '.json')
+        code = self.run_main(['drawable', '--capture-dir', d, '--out-json', out, '--render', '912x728', '--fov-scale', s])
+        return code, json.loads(out.read_text())['summary']
+
+    def measured(self, s):
+        return {k: v['measured_deg'] for k, v in s['stream_extent_deg'].items()}
+
+    def test_lifted_surround_extents_are_measured_and_wrong_s_fails(self):
+        d = self.capture(repaint=[(self.BLACK, bytes([10, 10, 10, 255]))])
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'PASS', s['verdict_reasons'])
+        self.assertEqual(code, 0)
+        for side, v in self.measured(s).items():
+            self.assertIsNotNone(v, side)
+            self.assertLessEqual(abs(s['stream_extent_deg'][side]['error_deg']), 0.5, side)
+        for wrong in ('0.6', '0.7'):
+            code, s = self.run_drawable(d, wrong, 'w' + wrong)
+            self.assertEqual(s['verdict'], 'FAIL', wrong)
+            self.assertNotEqual(code, 0)
+            self.assertTrue(all(v is not None for v in self.measured(s).values()), (wrong, self.measured(s)))
+            self.assertIn('stream extent', ' '.join(s['verdict_reasons']))
+
+    def test_background_not_separable_is_unverified(self):
+        d = self.capture(repaint=[(self.BLACK, self.BG_L)])
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+        self.assertTrue(all(v is None for v in self.measured(s).values()))
+        self.assertNotEqual(code, 0)
+
+    def test_extent_touching_the_crop_is_unverified(self):
+        d = self.capture(['--render', '912x728', '--fov-scale', '1.2', '--phys', '1216x1184'])
+        code, s = self.run_drawable(d, '1.2')
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+
+    def test_linear_capture_is_srgb_encoded_before_measuring(self):
+        dim = [(self.BG_L, bytes([2, 2, 4, 255]))]       # a dim chart background as a linear-light capture holds it
+        for enc in (None, 'linear'):
+            d = self.capture(repaint=dim, encoding=enc)
+            code, s = self.run_drawable(d)
+            self.assertEqual(s['verdict'], 'PASS', (enc, s['verdict_reasons']))
+            self.assertTrue(all(v is not None for v in self.measured(s).values()), enc)
+            self.assertEqual(s['params']['encoding'], 'linear')
+        d = self.capture(repaint=dim, encoding='srgb')   # the same counts declared sRGB are used as is: 4 counts, no separation
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+        self.assertEqual(s['params']['encoding'], 'srgb')
+
+    def test_srgb_capture_round_trip(self):
+        d = self.capture(self.EXTRA + ['--encoding', 'srgb'])
+        self.assertEqual(json.loads((d / 'capture.json').read_text())['encoding'], 'srgb')
+        code, s = self.run_drawable(d)
+        self.assertEqual(s['verdict'], 'PASS', s['verdict_reasons'])
+        self.assertTrue(all(v is not None for v in self.measured(s).values()))
+
+    def test_bad_encoding_exits_2(self):
+        d = self.capture(encoding='gamma')
+        self.assertEqual(self.run_main(['drawable', '--capture-dir', d, '--render', '912x728', '--fov-scale', '0.65']), 2)
+
+
+class ZoneStats(Base):
+    """W16 defects A and B: one line set for measured and predicted; drawable resolvability in stream px; no mixed quantities."""
+    EDGE = ['--render', '912x728', '--fov-scale', '0.6', '--phys', '2432x2368', '--foveation', '0.5,0.45,5,5,0,0']
+
+    @staticmethod
+    def line(resolvable, predicted):
+        return {'resolvable': resolvable, 'psf_deg': 0.01 if resolvable else None, 'fwhm_deg': 0.1, 'nominal_width_deg': 0.08,
+                'sharpness_px_per_deg': predicted * 0.9 if resolvable else None, 'measured_px': 1.0,
+                'predicted_px_per_deg': predicted, 'local_px_per_deg': predicted * 2}
+
+    def test_measured_and_predicted_share_the_line_set(self):
+        z = fo.zone_stats([self.line(True, 10), self.line(True, 12), self.line(False, 100)])
+        self.assertEqual(z['predicted_px_per_deg'], 11)            # the resolvable lines only; over all three it is 12
+        self.assertAlmostEqual(z['sharpness_px_per_deg'], 9.9)
+        self.assertEqual(z['predicted_px_per_deg_all'], 12)
+        none = fo.zone_stats([self.line(False, 10), self.line(False, 12)])
+        self.assertIsNone(none['predicted_px_per_deg'])
+        self.assertIsNone(none['sharpness_px_per_deg'])
+
+    def drawable(self):
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + self.EDGE), 0)
+        out = self.dir / 'd.json'
+        self.run_main(['drawable', '--capture-dir', d, '--out-json', out] + self.EDGE)
+        return json.loads(out.read_text())
+
+    def test_drawable_resolvability_is_judged_in_stream_pixels(self):
+        lines = self.drawable()['lines']
+        wide_in_drawable = [l for l in lines if l['fwhm_px'] is not None and l['nominal_width_px'] >= fo.MIN_RESOLVABLE_PX
+                            and l['nominal_width_deg'] * l['predicted_px_per_deg'] < fo.MIN_RESOLVABLE_PX]
+        self.assertTrue(wide_in_drawable)                          # lines the old drawable-pixel rule admitted
+        self.assertTrue(all(not l['resolvable'] for l in wide_in_drawable))
+        resolvable = [l for l in lines if l['resolvable']]
+        self.assertTrue(resolvable)
+        for l in resolvable:
+            self.assertGreaterEqual(l['nominal_width_deg'] * l['predicted_px_per_deg'], fo.MIN_RESOLVABLE_PX)
+        self.assertIn('nominal_width_stream_px', lines[0])
+
+    def test_drawable_px_per_deg_is_labelled_and_kept_apart(self):
+        j = self.drawable()
+        for zone, z in j['summary']['zones'].items():
+            if not z['n_predicted']:
+                continue
+            vals = sorted(l['local_px_per_deg'] for l in j['lines'] if l['zone'] == zone)
+            self.assertAlmostEqual(z['drawable_px_per_deg'], (vals[(len(vals) - 1) // 2] + vals[len(vals) // 2]) / 2, places=6)
+        png = self.dir / 'r.png'
+        self.assertEqual(self.run_main(['synth', '--kind', 'render', '--render', '912x728', '--out-png', png]), 0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_main(['render', '--image', png, '--render', '912x728', '--out-json', self.dir / 'r.json'])
+        self.assertNotIn('drawable px/deg', buf.getvalue())
+        self.assertIsNone(json.loads((self.dir / 'r.json').read_text())['summary']['zones']['band']['drawable_px_per_deg'])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_main(['drawable', '--capture-dir', self.dir / 'cap', '--out-json', self.dir / 'd2.json'] + self.EDGE)
+        self.assertIn('drawable px/deg', buf.getvalue())
+        self.assertIn('stream px/deg', buf.getvalue())
+
+
+class PoseDelta(Base):
+    """capture.json pose.delta_deg (display minus render, right-handed, yaw +Y, pitch +X, roll +Z, intrinsic Y-X-Z)."""
+    EXTRA = ['--render', '912x728', '--fov-scale', '0.65', '--phys', '1216x1184']
+
+    def test_conventions(self):
+        yaw = fo.Pose(10, 0, 0)
+        self.assertAlmostEqual(yaw.warp('x', 0.0), math.tan(math.radians(10)), places=9)     # straight ahead shows to the right
+        self.assertAlmostEqual(yaw.warp('x', math.tan(math.radians(20))), math.tan(math.radians(30)), places=9)
+        pitch = fo.Pose(0, 10, 0)
+        self.assertAlmostEqual(pitch.warp('y', 0.0), math.tan(math.radians(10)), places=9)   # display pitched up: ahead shows lower
+        for p in (fo.Pose(3, -2, 1), fo.Pose(0.4, 0.2, 0.3)):
+            for axis in 'xy':
+                for tau in (-1.2, -0.3, 0.0, 0.7):
+                    self.assertAlmostEqual(p.warp(axis, p.warp(axis, tau), inverse=True), tau, places=9)
+        m = fo.Pose(90, 90, 0).matrix                      # intrinsic Y-X-Z: Ry(90) Rx(90) applied to forward (0, 0, -1)
+        v = [sum(m[i][j] * (0, 0, -1)[j] for j in range(3)) for i in range(3)]
+        self.assertEqual([round(c, 9) for c in v], [0.0, 1.0, 0.0])
+
+    def synth(self, pose, drop=False):
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d, '--pose-delta', pose] + self.EXTRA), 0)
+        cap = json.loads((d / 'capture.json').read_text())
+        if drop:
+            del cap['pose']
+            (d / 'capture.json').write_text(json.dumps(cap))
+        return d
+
+    def measure(self, d, name='p'):
+        out = self.dir / (name + '.json')
+        code = self.run_main(['drawable', '--capture-dir', d, '--out-json', out, '--render', '912x728', '--fov-scale', '0.65'])
+        return code, json.loads(out.read_text())['summary']
+
+    def test_pose_in_capture_json_is_compensated(self):
+        d = self.synth('0.4,0.25,0.3')
+        self.assertEqual(json.loads((d / 'capture.json').read_text())['pose']['delta_deg'], {'yaw': 0.4, 'pitch': 0.25, 'roll': 0.3})
+        code, s = self.measure(d)
+        self.assertEqual(s['verdict'], 'PASS', s['verdict_reasons'])
+        self.assertEqual(code, 0)
+        self.assertLessEqual(s['median_abs_residual_deg'], 0.05)
+        self.assertEqual(s['params']['pose']['source'], 'capture.json')
+        self.assertIsNone(s.get('fitted_yaw_deg'))
+
+    def test_wrong_pose_fails(self):
+        d = self.synth('0.4,0,0')
+        cap = json.loads((d / 'capture.json').read_text())
+        cap['pose']['delta_deg']['yaw'] = 0.0                  # the capture claims no pose difference but the image carries 0.4 deg
+        (d / 'capture.json').write_text(json.dumps(cap))
+        code, s = self.measure(d)
+        self.assertEqual(s['verdict'], 'FAIL')
+        self.assertIn('x median residual', ' '.join(s['verdict_reasons']))
+        self.assertNotEqual(code, 0)
+
+    def test_no_pose_falls_back_to_fitted_yaw_and_says_so(self):
+        d = self.synth('0.4,0,0', drop=True)
+        code, s = self.measure(d)
+        self.assertEqual(s['verdict'], 'PASS-after-fitted-yaw', s['verdict_reasons'])
+        self.assertEqual(code, 0)
+        self.assertAlmostEqual(s['fitted_yaw_deg'], 0.4, delta=0.05)
+        self.assertEqual(s['params']['pose']['source'], 'fitted-yaw')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_main(['drawable', '--capture-dir', d, '--render', '912x728', '--fov-scale', '0.65'])
+        self.assertIn('PASS-after-fitted-yaw', buf.getvalue())
+        self.assertRegex(buf.getvalue(), r'fitted yaw 0\.[34]\d* deg')
+
+    def test_fitted_yaw_does_not_hide_a_wrong_s(self):
+        d = self.synth('0.4,0,0', drop=True)
+        out = self.dir / 'w.json'
+        code = self.run_main(['drawable', '--capture-dir', d, '--out-json', out, '--render', '912x728', '--fov-scale', '0.6'])
+        self.assertEqual(json.loads(out.read_text())['summary']['verdict'], 'FAIL')
+        self.assertNotEqual(code, 0)
+
+    def test_bad_pose_exits_2(self):
+        d = self.synth('0,0,0')
+        cap = json.loads((d / 'capture.json').read_text())
+        cap['pose'] = {'delta_deg': {'yaw': 'left', 'pitch': 0, 'roll': 0}}
+        (d / 'capture.json').write_text(json.dumps(cap))
+        self.assertEqual(self.run_main(['drawable', '--capture-dir', d, '--render', '912x728', '--fov-scale', '0.65']), 2)
 
 
 REAL = Path('/Users/noel/Projects/Management/goals/rdr2-vr/evidence/chart-matrix-20261022/m1/f100-asrun/dump')
@@ -530,6 +737,34 @@ class RealSample(Base):
 
     def test_oneone(self):
         self.check('oneone')
+
+
+M5 = REAL.parents[2] / 'm5' / 'f100-asrun'
+
+
+@unittest.skipUnless((M5 / 'dump' / 'meta.json').exists() and (M5 / 'capture' / 'capture.json').exists(), 'm5 sample not present')
+class RealM5(Base):
+    """W16 on the simulator proof data (read only): the encoder edge zone matches its prediction, the drawable extents are
+    measured or unverified, never a chart line mistaken for the border."""
+
+    def test_encoder_edge_zone_ratio(self):
+        for eye in 'LR':
+            code, j = self.measure('encoded', M5 / 'dump' / 'encoder-input.png', ['--meta', M5 / 'dump' / 'meta.json', '--eye', eye], eye)
+            edge = j['summary']['zones']['edge']
+            self.assertTrue(edge['n_resolvable'], eye)
+            self.assertAlmostEqual(edge['sharpness_px_per_deg'] / edge['predicted_px_per_deg'], 1.0, delta=0.1, msg=eye)
+
+    def test_drawable_extent_is_measured_or_unverified(self):
+        out = self.dir / 'd.json'
+        args = ['drawable', '--capture-dir', M5 / 'capture', '--fov-scale', '1.0', '--render', '3648x2912', '--foveation', '0.5,0.449999988,3,3,0,0',
+                '--out-json', out]
+        self.run_main(args)
+        s = json.loads(out.read_text())['summary']
+        for side, e in s['stream_extent_deg'].items():
+            self.assertTrue(e['measured_deg'] is None or abs(e['error_deg']) <= 0.5, (side, e))
+        if any(e['measured_deg'] is None for e in s['stream_extent_deg'].values()):
+            self.assertIn('stream extent unverified', ' '.join(s['verdict_reasons']))
+        self.assertAlmostEqual(s['fitted_yaw_deg'], -0.385, delta=0.05)
 
 
 class Spec(unittest.TestCase):

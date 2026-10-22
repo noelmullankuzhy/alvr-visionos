@@ -207,6 +207,7 @@ run_point() {
   CLIENT_JSON=$($FM client "$POINTS" "$NAME") || { fail_hard "client: cannot map point"; return 1; }
   OVL_ARGS=$($FM overlay-args "$POINTS" "$NAME") || { fail_hard "overlay-args: cannot map point"; return 1; }
   FOV_ARG=$(echo "$OVL_ARGS" | cut -d' ' -f1-2)
+  NOSCALE_ARGS=$(echo "$OVL_ARGS" | cut -d' ' -f3-)   # --render/--foveation without --fov-scale (meta tangents already include s)
 
   # 1. stop everything from the last point
   stop_all; [ "$DRY" = 1 ] || sleep 6
@@ -322,14 +323,20 @@ run_point() {
       overlay drawable "$PD/overlay/drawable" --capture-dir "$PD/capture" $FOV_ARG
     fi
     if [ "$DRY" = 1 ]; then
-      plan "+ for each PNG in $PD/dump classified by fovmatrix.py dump-files: overlay render|encoded --image <png> --eye L|R $OVL_ARGS"
-      overlay render "$PD/overlay/render-L" --image "$PD/dump/<render-L>.png" --eye L $OVL_ARGS
-      overlay encoded "$PD/overlay/encoded-L" --image "$PD/dump/<encoded-L>.png" --eye L $OVL_ARGS
+      plan "+ for each PNG in $PD/dump classified by fovmatrix.py dump-files: overlay render|encoded --image <png> --eye L|R --meta $PD/dump/meta.json $NOSCALE_ARGS"
+      overlay render "$PD/overlay/render-L" --image "$PD/dump/<render-L>.png" --eye L --meta "$PD/dump/meta.json" $NOSCALE_ARGS
+      overlay encoded "$PD/overlay/encoded-L" --image "$PD/dump/<encoded-L>.png" --eye L --meta "$PD/dump/meta.json" $NOSCALE_ARGS
     elif [ -n "$DUMP" ]; then
       $FM dump-files "$DUMP" > "$PD/dump-files.txt"
       [ -s "$PD/dump-files.txt" ] || fail_soft "dump: no recognisable eye PNGs in $DUMP: $(ls "$DUMP" | tr '\n' ' ')"
+      # the dump's meta.json holds the tangents the server really rendered (W14: device tangents misplaced every line)
+      if [ -f "$DUMP/meta.json" ]; then META_ARGS="--meta $DUMP/meta.json $NOSCALE_ARGS"
+      else
+        META_ARGS=$OVL_ARGS
+        log "[$NAME] no meta.json in the dump: render/encoded overlays use the device tangents x --fov-scale"
+      fi
       while read -r dm de dn; do
-        overlay "$dm" "$PD/overlay/$dm-$de" --image "$DUMP/$dn" --eye "$de" $OVL_ARGS
+        overlay "$dm" "$PD/overlay/$dm-$de" --image "$DUMP/$dn" --eye "$de" $META_ARGS
       done < "$PD/dump-files.txt"
     fi
   fi
