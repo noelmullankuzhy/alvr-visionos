@@ -658,9 +658,17 @@ input during dots measurement; its state remains alive so auto-enter stays consu
 3. Look at a reachable dot until the system highlights it, then quick-pinch with
    the **right hand** to select the ray and cursor dot. A **yellow 1.6° ring**
    stays on the cursor independently of gaze. Wherever you look (including empty
-   black space), a **left-hand quick pinch (< 0.5 s)** steps one dot **outward**;
-   a **left-hand hold (>= 0.5 s)** steps one dot **inward**. Steps stop at 10° and
-   70°. Actions occur on release, once per pinch; a cancelled pinch does nothing.
+   black space), **pinch and hold with the left hand and drag** to move the cursor
+   along its ray: hand motion along the ray's direction in the head-locked field
+   (right/left for 0°/180°, up/down for 90°/270°, the projection for diagonals)
+   moves it outward/inward, **1 cm per dot step**, snapping to dots as you go;
+   motion across the ray and towards/away from you is ignored. Each drag is
+   relative to the dot the cursor was on when the pinch began, so dragging back
+   returns exactly; release leaves the cursor on the dot shown. The cursor stops
+   at 10° and 70°. A cancelled drag returns the cursor to its starting dot; a quick
+   left pinch without movement does nothing (reserved). The pinch point comes
+   from the spatial event's `inputDevicePose`. A drag that ends on a different
+   dot logs one `dots` line (`action=step_out`/`step_in`, `via=step`) at release.
 4. When the cursor reaches the outermost dot you can see, **hold the right-hand
    pinch for >= 0.5 s and release**, wherever you look, to confirm it white.
    Each ray has one boundary per eye; confirming again replaces that ray's old
@@ -669,7 +677,7 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    The dim centre status shows eye, cursor ray/eccentricity and rays done.
    Use the centre cross between observations. The field follows your head;
    turning your head cannot bring an edge dot towards the centre. Gaze only
-   needs to reach the starting dot on each ray; stepping and confirmation do
+   needs to reach the starting dot on each ray; dragging and confirmation do
    not need an edge dot to highlight. If no starting dot on a ray can be
    highlighted, note a **tracker limit** separately and leave that ray unmarked.
    Quick right-pinch **Done** or leave with system controls to write all three

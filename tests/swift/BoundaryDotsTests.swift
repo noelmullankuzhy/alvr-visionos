@@ -113,6 +113,110 @@ enum BoundaryDotsTests {
         _ = pinches.update(id: 5, hand: nil, phase: .active, timestamp: 1, target: nil)
         expectEqual(pinches.update(id: 5, hand: nil, phase: .ended, timestamp: 2, target: nil), nil, "unknown hand ignored")
 
+        // Left-hand drag mapping: head-frame displacement (x right, y up) projected on the ray, 1 cm per dot step.
+        near(BoundaryDotsDragMap.metresPerStep, 0.01, "gain: 1 cm per dot step")
+        for ray in 0..<24 {
+            let rayDeg = Double(ray * 15)
+            let start = BoundaryDot(rayDeg: rayDeg, eccDeg: 40)
+            let out = BoundaryDotsDragMap.outward(rayDeg: rayDeg)
+            near(simd_length(out), 1, "unit outward ray \(ray)")
+            near(atan2(out.y, out.x) * 180 / .pi + (ray > 12 ? 360 : 0), rayDeg, "outward matches ray \(ray)")
+            let along = SIMD3<Double>(out.x, out.y, 0), across = SIMD3<Double>(-out.y, out.x, 0)
+            expectEqual(BoundaryDotsDragMap.target(from: start, displacement: along * 0.03),
+                        BoundaryDot(rayDeg: rayDeg, eccDeg: 47.5), "outward 3 steps ray \(ray)")
+            expectEqual(BoundaryDotsDragMap.target(from: start, displacement: along * -0.03),
+                        BoundaryDot(rayDeg: rayDeg, eccDeg: 32.5), "inward 3 steps ray \(ray)")
+            expectEqual(BoundaryDotsDragMap.target(from: start, displacement: across * 0.05), start, "across ray \(ray) ignored")
+            expectEqual(BoundaryDotsDragMap.target(from: start, displacement: [0, 0, -0.05]), start, "depth ignored ray \(ray)")
+            expectEqual(BoundaryDotsDragMap.target(from: start, displacement: along * 0.02 + across * 0.04 + [0, 0, 0.03]),
+                        BoundaryDot(rayDeg: rayDeg, eccDeg: 45), "only the ray component counts ray \(ray)")
+        }
+        let horizontal = BoundaryDot(rayDeg: 180, eccDeg: 30)
+        expectEqual(BoundaryDotsDragMap.target(from: horizontal, displacement: [-0.02, 0, 0]).eccDeg, 35, "hand left moves 180 deg ray outward")
+        expectEqual(BoundaryDotsDragMap.target(from: horizontal, displacement: [0.02, 0, 0]).eccDeg, 25, "hand right moves 180 deg ray inward")
+        expectEqual(BoundaryDotsDragMap.target(from: BoundaryDot(rayDeg: 90, eccDeg: 30), displacement: [0, 0.02, 0]).eccDeg, 35, "up moves 90 deg ray outward")
+        expectEqual(BoundaryDotsDragMap.target(from: BoundaryDot(rayDeg: 270, eccDeg: 30), displacement: [0, 0.02, 0]).eccDeg, 25, "up moves 270 deg ray inward")
+        let diagonalStart = BoundaryDot(rayDeg: 45, eccDeg: 30)
+        expectEqual(BoundaryDotsDragMap.target(from: diagonalStart, displacement: [0.02, 0, 0]).eccDeg, 32.5,
+                    "2 cm right is 1.41 cm along the 45 deg ray")
+        for (metres, steps) in [(0.0049, 0), (0.0051, 1), (0.0149, 1), (0.0151, 2), (-0.0049, 0), (-0.0051, -1), (-0.0151, -2)] {
+            expectEqual(BoundaryDotsDragMap.target(from: horizontal, displacement: [-metres, 0, 0]).eccDeg, 30 + 2.5 * Double(steps),
+                        "snap \(metres) m to \(steps) steps")
+        }
+        expectEqual(BoundaryDotsDragMap.target(from: BoundaryDot(rayDeg: 0, eccDeg: 65), displacement: [0.2, 0, 0]).eccDeg, 70, "clamp at 70")
+        expectEqual(BoundaryDotsDragMap.target(from: BoundaryDot(rayDeg: 0, eccDeg: 15), displacement: [-0.2, 0, 0]).eccDeg, 10, "clamp at 10")
+        expectEqual(BoundaryDotsDragMap.target(from: horizontal, displacement: [.nan, 0, 0]), horizontal, "non-finite displacement ignored")
+
+        // Drag tracker: world hand positions, head rotation, cursor re-anchoring and release.
+        let level = simd_quatd(ix: 0, iy: 0, iz: 0, r: 1)
+        var drag = BoundaryDotsDrag<Int>()
+        let start = BoundaryDot(rayDeg: 0, eccDeg: 40)
+        let origin = SIMD3<Double>(0.2, 1.1, -0.4)
+        expectEqual(drag.update(id: 1, hand: .left, phase: .active, position: origin, headRotation: level, cursor: nil), nil, "no cursor, no drag")
+        expectEqual(drag.update(id: 1, hand: .left, phase: .active, position: origin + [0.03, 0, 0], headRotation: level, cursor: nil), nil)
+        expectEqual(drag.update(id: 1, hand: .left, phase: .ended, position: origin, headRotation: level, cursor: nil), nil)
+        // A quick left pinch without movement does nothing.
+        expectEqual(drag.update(id: 2, hand: .left, phase: .active, position: origin, headRotation: level, cursor: start), nil)
+        expectEqual(drag.update(id: 2, hand: .left, phase: .active, position: origin + [0.001, 0.002, 0.004], headRotation: level, cursor: start), nil)
+        expectEqual(drag.update(id: 2, hand: .left, phase: .ended, position: origin, headRotation: level, cursor: start), nil, "quick left pinch reserved")
+        expectEqual(drag.update(id: 3, hand: .right, phase: .active, position: origin, headRotation: level, cursor: start), nil)
+        expectEqual(drag.update(id: 3, hand: .right, phase: .active, position: origin + [0.05, 0, 0], headRotation: level, cursor: start), nil, "right hand never drags")
+        expectEqual(drag.update(id: 3, hand: .right, phase: .ended, position: origin, headRotation: level, cursor: start), nil)
+        // No drift: back and forth in many small moves returns exactly to the starting dot.
+        var cursor = start
+        func feed(_ id: Int, _ position: SIMD3<Double>, _ phase: BoundaryDotsPinchPhase = .active,
+                  hand: BoundaryDotsHand? = .left, head: simd_quatd = level) -> BoundaryDotsDragUpdate? {
+            let result = drag.update(id: id, hand: hand, phase: phase, position: position, headRotation: head, cursor: cursor)
+            if case .move(let dot)? = result { cursor = dot }
+            return result
+        }
+        expectEqual(feed(4, origin), nil)
+        for i in 1...40 { _ = feed(4, origin + [0.001 * Double(i), 0.0003 * Double(i % 3), 0]) }
+        expectEqual(cursor, BoundaryDot(rayDeg: 0, eccDeg: 50), "4 cm out is 4 steps")
+        for i in stride(from: 39, through: 0, by: -1) { _ = feed(4, origin + [0.001 * Double(i), 0, 0]) }
+        expectEqual(cursor, start, "dragging back returns exactly")
+        expectEqual(feed(4, origin + [0.021, 0, 0]), .move(BoundaryDot(rayDeg: 0, eccDeg: 45)))
+        expectEqual(feed(4, origin + [0.022, 0, 0]), nil, "same dot is not re-sent")
+        expectEqual(feed(4, origin + [0.022, 0, 0], .ended), .release(from: start, to: cursor), "release leaves the snapped dot")
+        expectEqual(feed(4, origin + [0.022, 0, 0], .ended), nil, "no double release")
+        // The next drag is relative to the new hand position and the dot the cursor is on.
+        expectEqual(feed(5, origin + [0.1, 0, 0]), nil)
+        expectEqual(feed(5, origin + [0.09, 0, 0]), .move(BoundaryDot(rayDeg: 0, eccDeg: 42.5)), "relative to new grab")
+        expectEqual(feed(5, origin + [0.1, 0, 0], .ended), .move(BoundaryDot(rayDeg: 0, eccDeg: 45)),
+                    "released back at the grab: cursor returns, no release action")
+        // Head rotation: displacement is taken in the current head frame.
+        let yawLeft = simd_quatd(angle: .pi / 2, axis: [0, 1, 0])
+        cursor = BoundaryDot(rayDeg: 0, eccDeg: 40)
+        expectEqual(feed(6, origin, head: yawLeft), nil)
+        expectEqual(feed(6, origin + [0, 0, -0.03], head: yawLeft), .move(BoundaryDot(rayDeg: 0, eccDeg: 47.5)),
+                    "world -Z is head right after a 90 deg left yaw")
+        expectEqual(feed(6, origin + [0, 0, -0.03], .cancelled, head: yawLeft), .move(BoundaryDot(rayDeg: 0, eccDeg: 40)), "cancel restores")
+        expectEqual(feed(6, origin, .ended, head: yawLeft), nil)
+        // A right-hand select (or eye switch) moving the cursor mid-drag re-anchors the drag.
+        expectEqual(feed(7, origin), nil)
+        expectEqual(feed(7, origin + [0.01, 0, 0]), .move(BoundaryDot(rayDeg: 0, eccDeg: 42.5)))
+        cursor = BoundaryDot(rayDeg: 90, eccDeg: 20)
+        expectEqual(feed(7, origin + [0.03, 0, 0]), nil, "re-anchor at the new cursor")
+        expectEqual(feed(7, origin + [0.03, 0.02, 0]), .move(BoundaryDot(rayDeg: 90, eccDeg: 25)))
+        cursor = BoundaryDot(rayDeg: 90, eccDeg: 20)
+        expectEqual(feed(7, origin + [0.03, 0.02, 0], .ended), nil, "cursor moved elsewhere: nothing to release")
+        // Only one drag at a time; a concurrent second left pinch is ignored.
+        expectEqual(feed(8, origin), nil)
+        expectEqual(feed(9, origin), nil)
+        expectEqual(feed(9, origin + [0, 0.05, 0]), nil, "second pinch ignored")
+        expectEqual(feed(9, origin, .ended), nil)
+        expectEqual(feed(8, origin + [0, 0.01, 0], hand: nil), .move(BoundaryDot(rayDeg: 90, eccDeg: 22.5)), "id keeps the drag")
+        expectEqual(feed(8, origin + [0, 0.01, 0], .ended, hand: nil), .release(from: BoundaryDot(rayDeg: 90, eccDeg: 20), to: cursor))
+
+        var placing = BoundaryDotsSession()
+        expect(!placing.place(BoundaryDot(rayDeg: 0, eccDeg: 30)), "place needs a cursor")
+        _ = placing.select(BoundaryDot(rayDeg: 0, eccDeg: 30))
+        expect(placing.place(BoundaryDot(rayDeg: 0, eccDeg: 45)), "place on the cursor ray")
+        expectEqual(placing.cursor, BoundaryDot(rayDeg: 0, eccDeg: 45))
+        expect(!placing.place(BoundaryDot(rayDeg: 15, eccDeg: 45)), "place never changes ray")
+        expect(!placing.place(BoundaryDot(rayDeg: 0, eccDeg: 71)), "place stays on the layout")
+        expectEqual(placing.cursor, BoundaryDot(rayDeg: 0, eccDeg: 45))
+
         for diagnostics in [false, true] {
             for connected in [false, true] {
                 for streaming in [false, true] {
