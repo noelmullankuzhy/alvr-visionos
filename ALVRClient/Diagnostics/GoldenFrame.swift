@@ -8,6 +8,7 @@
 //
 
 import CryptoKit
+import CoreVideo
 import Foundation
 import simd
 
@@ -284,6 +285,33 @@ enum GoldenNV12 {
             }
         }
         return Frame(width: w, height: h, luma: luma, chroma: chroma)
+    }
+
+    // The live decoder output's colour tags (VideoHandler.swift:383-385), so the YCbCr sampler, which reads matrix and range
+    // from the buffer, converts the golden pair as it converts the stream.
+    static let colourTags: [(key: CFString, value: CFString)] = [
+        (kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2),
+        (kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2),
+        (kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_sRGB),
+    ]
+
+    // kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, IOSurface-backed and Metal-compatible (CVMetalTextureCache binds it).
+    static func pixelBuffer(_ f: Frame) -> CVPixelBuffer? {
+        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary, kCVPixelBufferMetalCompatibilityKey: true]
+        var out: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, f.width, f.height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                                  attributes as CFDictionary, &out) == kCVReturnSuccess, let buffer = out else { return nil }
+        for tag in colourTags { CVBufferSetAttachment(buffer, tag.key, tag.value, .shouldPropagate) }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        for (plane, bytes) in [f.luma, f.chroma].enumerated() {
+            guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) else { return nil }
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane), rows = CVPixelBufferGetHeightOfPlane(buffer, plane)
+            bytes.withUnsafeBytes { src in
+                for row in 0..<rows { memcpy(base + row * stride, src.baseAddress! + row * f.width, f.width) }
+            }
+        }
+        return buffer
     }
 }
 

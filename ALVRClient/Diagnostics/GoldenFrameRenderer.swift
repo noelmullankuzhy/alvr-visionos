@@ -139,7 +139,7 @@ final class GoldenFrameRenderer {
             let right = try Self.image(directory.appendingPathComponent(meta.serverPNG[.right]!), name: meta.serverPNG[.right]!)
             guard let nv12 = GoldenNV12.frame(left: left, right: right) else { throw GoldenMetaError.badImage("server.png sizes") }
             guard [nv12.width / 2, nv12.height] == meta.serverSize else { throw GoldenMetaError.badImage("server.size") }
-            guard let buffer = Self.pixelBuffer(nv12) else { throw GoldenMetaError.badImage("pixel_buffer") }
+            guard let buffer = GoldenNV12.pixelBuffer(nv12) else { throw GoldenMetaError.badImage("pixel_buffer") }
             var override = FoveationOverride<GoldenFoveation>()
             override.begin(meta.foveation)
             let source = try renderer.goldenStreamSource(foveation: override.effective(live: nil)!)
@@ -179,24 +179,6 @@ final class GoldenFrameRenderer {
         guard let base = context.data else { throw GoldenMetaError.badImage(name) }
         let bytes = [UInt8](UnsafeBufferPointer(start: base.assumingMemoryBound(to: UInt8.self), count: cg.width * 4 * cg.height))
         return GoldenNV12.Image(width: cg.width, height: cg.height, channels: 4, bytesPerRow: cg.width * 4, pixels: bytes)
-    }
-
-    // kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, IOSurface-backed and Metal-compatible (CVMetalTextureCache binds it).
-    private static func pixelBuffer(_ f: GoldenNV12.Frame) -> CVPixelBuffer? {
-        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary, kCVPixelBufferMetalCompatibilityKey: true]
-        var out: CVPixelBuffer?
-        guard CVPixelBufferCreate(kCFAllocatorDefault, f.width, f.height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-                                  attributes as CFDictionary, &out) == kCVReturnSuccess, let buffer = out else { return nil }
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        for (plane, bytes) in [f.luma, f.chroma].enumerated() {
-            guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) else { return nil }
-            let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane), rows = CVPixelBufferGetHeightOfPlane(buffer, plane)
-            bytes.withUnsafeBytes { src in
-                for row in 0..<rows { memcpy(base + row * stride, src.baseAddress! + row * f.width, f.width) }
-            }
-        }
-        return buffer
     }
 
     // Input thread: one control action; changes needing the head pose or the layer wait for the next frame.
