@@ -368,6 +368,18 @@ private func testSession() {
     expectEqual(setting, "DIAG golden t_ms=9 step=setting set=chart80 key=rq value=0.500", "setting line")
 }
 
+// MetalClientSystem's spatial event routing: while golden is shown its controls consume the pinches (the game never sees
+// them, it can be streaming underneath); otherwise forwarding is as before (online: every event, offline: none).
+private func testEventRouting() {
+    func forwarded(_ events: Int, goldenActive: Bool, offline: Bool) -> Int {
+        (0..<events).filter { _ in GoldenFrame.forwardToGame(goldenActive: goldenActive, offlineDiagnostics: offline) }.count
+    }
+    expectEqual(forwarded(5, goldenActive: true, offline: false), 0, "golden active: nothing reaches the game")
+    expectEqual(forwarded(5, goldenActive: false, offline: false), 5, "golden inactive: every event, as before")
+    expectEqual(forwarded(5, goldenActive: false, offline: true), 0, "offline diagnostics: none, as before")
+    expectEqual(forwarded(5, goldenActive: true, offline: true), 0, "offline and golden: none")
+}
+
 private func testQualitySettle() {
     // W33 rule: settled when the rate map's screen size is within 1 % of reference x (0.5 + 0.5 q) / (0.5 + 0.5 q_ref)
     // for 30 consecutive frames; unconfirmed after 600.
@@ -429,6 +441,7 @@ enum GoldenFrameTests {
         testPosePinning()
         testNV12()
         testSession()
+        testEventRouting()
         testQualitySettle()
         testCapture()
         try? FileManager.default.removeItem(at: testRoot)
