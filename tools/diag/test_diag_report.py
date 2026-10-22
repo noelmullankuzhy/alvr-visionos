@@ -720,6 +720,79 @@ class ChartCaptureCounterTests(unittest.TestCase):
         self.assertIn('| L | 1.000 | on | temporal20 | V | 8 | 12 | 12 | 0 | 0 | 5.00 | correct | no | 6.0 |', out)
 
 
+class GoldenFrameTests(unittest.TestCase):
+    """W35b golden frame mode: DIAG golden lines and golden captures (capture.json golden_set + golden settings) in the
+    Golden frame section, with golden-frame.py measure's finest correct cpd (it and every coarser patch correct)."""
+    LOG = ('DIAG golden t_ms=100 step=show set=chart80 eye_px=2784x2112 density=80 rq=0.750 world_locked=true overlays=111 sha_ok=true\n'
+           'DIAG golden t_ms=200 step=setting set=chart80 key=world_locked value=false\n'
+           'DIAG golden t_ms=300 step=settled set=chart80 rq_set=1.000 rq=1.000 frames=40 settle=rate_map screen=6261x5023\n'
+           'DIAG chartcap t_ms=500 eye=L rq=1.000 rq_set=1.000 confirmed=yes fov=on dir=golden-chart80-20261022T100000Z-rq1.00 '
+           'slice=0 physical=2432x2368 patches=24 source=golden set=chart80\n'
+           'DIAG golden t_ms=900 step=hide set=chart80 eye_px=2784x2112 density=80 rq=0.750 world_locked=true overlays=111 sha_ok=true\n')
+
+    def golden_dir(self, root):
+        ChartCaptureCounterTests.capture_dir(root)
+        chart = next(root.rglob('capture.json')).parent
+        capture = chart.with_name('golden-chart80-20261022T100000Z-rq1.00')
+        chart.rename(capture)
+        meta = json.loads((capture / 'capture.json').read_text())
+        meta['chart_capture'].update(source='golden', set='chart80')
+        meta['golden_set'] = 'chart80'
+        meta['golden'] = dict(set='chart80', eye_px=[2784, 2112], density_px_per_deg=80.0, render_size=[4176, 3333], rq_set='1.000',
+                              rq='1.000', world_locked=False, overlays='000', content='chart',
+                              foveation=dict(enabled=True, center_size=[0.5, 0.449], center_shift=[0.537, -0.157], edge_ratio=[3.0, 3.0]),
+                              colour='nv12 420f bt709 full range, sRGB transfer, encoding gamma 1')
+        (capture / 'capture.json').write_text(json.dumps(meta))
+        (root / 'diag-a.log').write_text(self.LOG)
+        return capture
+
+    def test_golden_table_and_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.golden_dir(root)
+            rows = report.golden_rows(root)
+            out = report.generate(root)
+            golden_spec = importlib.util.spec_from_file_location('golden_frame', SCRIPT.parent.parent / 'golden' / 'golden-frame.py')
+            golden = importlib.util.module_from_spec(golden_spec)
+            golden_spec.loader.exec_module(golden)
+            measured = golden.measure_rows(root, 80, cm=report)
+        key = {(r['pos'], r['orient']): r for r in rows}
+        # axis V: 8 correct, 12 missing -> 8; axis H: 20 aliased -> none; temporal20 V 8 correct -> 8 (measure's rule).
+        self.assertEqual(key[('axis', 'V')]['finest_correct_cpd'], 8)
+        self.assertIsNone(key[('axis', 'H')]['finest_correct_cpd'])
+        self.assertEqual(key[('temporal20', 'V')]['finest_correct_cpd'], 8)
+        self.assertEqual(key[('axis', 'V')]['classes'], '8:correct,12:missing')
+        row = key[('axis', 'V')]
+        self.assertEqual((row['set'], row['eye'], row['rq'], row['rq_set'], row['world_locked'], row['overlays']),
+                         ('chart80', 'L', '1.000', '1.000', 'false', '000'))
+        self.assertEqual((row['eye_px'], row['density'], row['fov']), ('2784x2112', '80', 'on'))
+        # Same finest values as golden-frame.py measure on the same capture.
+        self.assertEqual({(m['pos'], m['orient']): m['finest_correct_cpd'] for m in measured},
+                         {k: r['finest_correct_cpd'] for k, r in key.items()})
+        self.assertIn('## Golden frame', out)
+        self.assertIn('| chart80 | L | 1.000 | 1.000 | on | axis | V | 8 | 8:correct,12:missing | false | 000 | 2784x2112 | 80 | '
+                      'golden-chart80-20261022T100000Z-rq1.00 |', out)
+        golden_section = out.split('## Golden frame')[1].split('\n## ')[0]
+        for value in ('diag-a.log:1', 'diag-a.log:2', 'diag-a.log:3', 'diag-a.log:5', '| setting |', 'world_locked', 'settled', 'hide'):
+            self.assertIn(value, golden_section)
+        health = out.split('## Eye badges and Diag file health')[1].split('\n## ')[0]
+        self.assertNotIn('diag-a.log:1', health)   # golden is a known topic
+        # A W33 chart capture (no golden_set) is not a golden row.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ChartCaptureCounterTests.capture_dir(root)
+            self.assertEqual(report.golden_rows(root), [])
+
+    def test_golden_error_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'diag-a.log').write_text('DIAG golden t_ms=5 step=error why=sha_mismatch key=R.server.png set=chart80 sha_ok=false\n')
+            out = report.generate(root)
+        golden_section = out.split('## Golden frame')[1].split('\n## ')[0]
+        self.assertIn('sha_mismatch', golden_section)
+        self.assertIn('R.server.png', golden_section)
+
+
 class ResolutionTablesRegressionTests(unittest.TestCase):
     """W30-era rrm and grating tables: a fixed input and the exact expected rows, so a report change cannot alter them
     silently."""
