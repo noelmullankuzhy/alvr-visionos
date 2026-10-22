@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import math
 from pathlib import Path
@@ -567,6 +569,65 @@ class DrawableExtent(Base):
     def test_bad_encoding_exits_2(self):
         d = self.capture(encoding='gamma')
         self.assertEqual(self.run_main(['drawable', '--capture-dir', d, '--render', '912x728', '--fov-scale', '0.65']), 2)
+
+
+class ZoneStats(Base):
+    """W16 defects A and B: one line set for measured and predicted; drawable resolvability in stream px; no mixed quantities."""
+    EDGE = ['--render', '912x728', '--fov-scale', '0.6', '--phys', '2432x2368', '--foveation', '0.5,0.45,5,5,0,0']
+
+    @staticmethod
+    def line(resolvable, predicted):
+        return {'resolvable': resolvable, 'psf_deg': 0.01 if resolvable else None, 'fwhm_deg': 0.1, 'nominal_width_deg': 0.08,
+                'sharpness_px_per_deg': predicted * 0.9 if resolvable else None, 'measured_px': 1.0,
+                'predicted_px_per_deg': predicted, 'local_px_per_deg': predicted * 2}
+
+    def test_measured_and_predicted_share_the_line_set(self):
+        z = fo.zone_stats([self.line(True, 10), self.line(True, 12), self.line(False, 100)])
+        self.assertEqual(z['predicted_px_per_deg'], 11)            # the resolvable lines only; over all three it is 12
+        self.assertAlmostEqual(z['sharpness_px_per_deg'], 9.9)
+        self.assertEqual(z['predicted_px_per_deg_all'], 12)
+        none = fo.zone_stats([self.line(False, 10), self.line(False, 12)])
+        self.assertIsNone(none['predicted_px_per_deg'])
+        self.assertIsNone(none['sharpness_px_per_deg'])
+
+    def drawable(self):
+        d = self.dir / 'cap'
+        self.assertEqual(self.run_main(['synth', '--kind', 'drawable', '--out-dir', d] + self.EDGE), 0)
+        out = self.dir / 'd.json'
+        self.run_main(['drawable', '--capture-dir', d, '--out-json', out] + self.EDGE)
+        return json.loads(out.read_text())
+
+    def test_drawable_resolvability_is_judged_in_stream_pixels(self):
+        lines = self.drawable()['lines']
+        wide_in_drawable = [l for l in lines if l['fwhm_px'] is not None and l['nominal_width_px'] >= fo.MIN_RESOLVABLE_PX
+                            and l['nominal_width_deg'] * l['predicted_px_per_deg'] < fo.MIN_RESOLVABLE_PX]
+        self.assertTrue(wide_in_drawable)                          # lines the old drawable-pixel rule admitted
+        self.assertTrue(all(not l['resolvable'] for l in wide_in_drawable))
+        resolvable = [l for l in lines if l['resolvable']]
+        self.assertTrue(resolvable)
+        for l in resolvable:
+            self.assertGreaterEqual(l['nominal_width_deg'] * l['predicted_px_per_deg'], fo.MIN_RESOLVABLE_PX)
+        self.assertIn('nominal_width_stream_px', lines[0])
+
+    def test_drawable_px_per_deg_is_labelled_and_kept_apart(self):
+        j = self.drawable()
+        for zone, z in j['summary']['zones'].items():
+            if not z['n_predicted']:
+                continue
+            vals = sorted(l['local_px_per_deg'] for l in j['lines'] if l['zone'] == zone)
+            self.assertAlmostEqual(z['drawable_px_per_deg'], (vals[(len(vals) - 1) // 2] + vals[len(vals) // 2]) / 2, places=6)
+        png = self.dir / 'r.png'
+        self.assertEqual(self.run_main(['synth', '--kind', 'render', '--render', '912x728', '--out-png', png]), 0)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_main(['render', '--image', png, '--render', '912x728', '--out-json', self.dir / 'r.json'])
+        self.assertNotIn('drawable px/deg', buf.getvalue())
+        self.assertIsNone(json.loads((self.dir / 'r.json').read_text())['summary']['zones']['band']['drawable_px_per_deg'])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_main(['drawable', '--capture-dir', self.dir / 'cap', '--out-json', self.dir / 'd2.json'] + self.EDGE)
+        self.assertIn('drawable px/deg', buf.getvalue())
+        self.assertIn('stream px/deg', buf.getvalue())
 
 
 REAL = Path('/Users/noel/Projects/Management/goals/rdr2-vr/evidence/chart-matrix-20261022/m1/f100-asrun/dump')
