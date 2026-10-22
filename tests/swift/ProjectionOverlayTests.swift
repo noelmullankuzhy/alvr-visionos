@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/ProjectionOverlay.swift
+// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/BoundaryDotsLensModel.swift ALVRClient/Diagnostics/ProjectionOverlay.swift
 import Foundation
 import simd
 
@@ -111,13 +111,19 @@ enum ProjectionOverlayTests {
                     continue
                 }
                 let frustum = BoundaryDotsFrustum(left: t[0], right: t[1], bottom: t[2], top: t[3])
-                let outline = item["shape"] as? String == "lens"
-                    ? BoundaryDotsLensReference.outline(eye, offsetDeg: item["offset_deg"] as? Double ?? .nan) ?? []
-                    : frustum.outline(insetDeg: item["inset_deg"] as? Double ?? .nan)
+                let box: ProjectionBox?
+                switch item["shape"] as? String {
+                case "lens":
+                    // The model lens's bbox is its inset rectangle.
+                    box = BoundaryDotsLensModel.insetRect(eye, frustum: frustum, insetDeg: item["inset_deg"] as? Double ?? .nan)?.box(eye)
+                case "measured":
+                    box = ProjectionOverlay.bbox(BoundaryDotsLensReference.outline(eye, offsetDeg: item["offset_deg"] as? Double ?? .nan) ?? [])
+                default:
+                    box = ProjectionOverlay.bbox(frustum.outline(insetDeg: item["inset_deg"] as? Double ?? .nan))
+                }
                 let foveation = ProjectionFoveation(name: "fixture", renderScale: 1, centerSize: [fv[0], fv[1]],
                                                     shift: [fv[4], fv[5]], edgeRatio: [fv[2], fv[3]])
                 let render = ProjectionRender(width: px[0], height: px[1])
-                let box = ProjectionOverlay.bbox(outline)
                 nearBox(box, want["bbox_tan"] as? [Double] ?? [], "fixture \(name) bbox", tolerance: 1e-3)
                 nearBox(ProjectionOverlay.foveationRect(eye: eye, frustum: frustum, foveation: foveation, render: render),
                         want["fov_rect_tan"] as? [Double] ?? [], "fixture \(name) fov rect", tolerance: 1e-3)
@@ -226,6 +232,31 @@ enum ProjectionOverlayTests {
         expectEqual(offReadout.fovRectDeg, "off")
         expectEqual(offReadout.lines[1], "L fov (live)  rect off  3648x2912")
 
+        // Model lens (style lens): the bbox is the inset rectangle itself, and the readout's px/deg uses it.
+        // L inset 15 on the device frustum: 45.001/30/30/35.001 deg; a100-axis-C 4176x3333, by hand:
+        //   h 4176 / (1.000025 + 0.577350) = 2647.43 px/tan = 46.206 px/deg, v 3333 / (0.577350 + 0.700236) = 2608.80 = 45.533 -> 45.533
+        let rectL = BoundaryDotsLensModel.insetRect(.left, frustum: left, insetDeg: 15)!
+        let lensOutline = BoundaryDotsLensModel.outline(.left, frustum: left, insetDeg: 15)!
+        let lensReadout = ProjectionReadout(eye: .left, frustum: left, outline: lensOutline, stream: stream, bbox: rectL.box(.left))!
+        expectEqual(lensReadout.bbox, rectL.box(.left), "lens bbox = inset rect")
+        near(lensReadout.pxdegBbox, 3333 / (tand(30) + rectL.bD) * .pi / 180, "lens bbox px/deg formula", tolerance: 1e-9)
+        near(lensReadout.pxdegBbox, 45.533, "lens bbox px/deg a100-axis-C", tolerance: 1e-3)
+        expectEqual(lensReadout.lines[0], "L bbox L 45.0 R 30.0 U 30.0 D 35.0 deg  tan 1.000/0.577/0.577/0.700", "lens readout line")
+        // One rectangle for the lens (the inset rect, solid), plus the axes; no dashed bbox on top of it.
+        expectEqual(ProjectionOverlay.layers(.lens), [.frustum, .outline, .rect, .axes, .foveation, .circle], "lens layers")
+        expectEqual(ProjectionOverlay.layers(.rect), [.frustum, .outline, .bbox, .foveation, .circle], "rect layers (W36)")
+        expectEqual(ProjectionOverlay.layers(.measured), [.frustum, .outline, .bbox, .foveation, .circle], "measured layers (W36)")
+        // The axes: through the eye axis, spanning the rectangle (horizontal left..right at y 0, vertical up..down at x 0).
+        let axes = ProjectionOverlay.axes(rectL.box(.left)!, step: 0.05)
+        expectEqual(axes.count, 2, "two axes")
+        expectEqual(axes.first?.first, SIMD2(-rectL.aT, 0), "horizontal from the L temporal (left) edge")
+        expectEqual(axes.first?.last, SIMD2(rectL.aN, 0), "to the nasal (right) edge")
+        expectEqual(axes.last?.first, SIMD2(0, rectL.bU), "vertical from the top edge")
+        expectEqual(axes.last?.last, SIMD2(0, -rectL.bD), "to the bottom edge")
+        expect(axes[0].allSatisfy { $0.y == 0 } && axes[1].allSatisfy { $0.x == 0 }, "axes through the eye axis")
+        expect(axes.allSatisfy { zip($0, $0.dropFirst()).allSatisfy { simd_distance($0, $1) <= 0.05 + 1e-12 } }, "axes split <= 0.05 tan")
+        expect(ProjectionOverlay.width.rect < ProjectionOverlay.width.lens, "the rectangle thinner than the lens line")
+
         // Session: the selected points row cycles; the dots_outline line carries the projection fields.
         var session = BoundaryDotsSession()
         expectEqual(session.foveationPoint, "a100-axis-C", "default row")
@@ -234,6 +265,11 @@ enum ProjectionOverlayTests {
         for _ in 0..<5 { session.nextFoveationPoint() }
         expectEqual(session.foveationPoint, "a100-axis-C", "cycles through the six rows")
         session.eye = .left
+        let lensLine = Diag.line(topic: "dots_outline", tMs: 1, fields: session.outlineFields(frustum: left, source: "device_default")!)
+        expect(lensLine.hasSuffix(" bbox_deg=45.001,30.000,30.000,35.001 bbox_tan=1.0000,0.5774,0.5774,0.7002 fov_source=a100-axis-C"
+                                  + " fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=45.533"),
+               "lens projection fields on dots_outline: \(lensLine)")
+        session.shape = .measured
         let line = Diag.line(topic: "dots_outline", tMs: 1, fields: session.outlineFields(frustum: left, source: "device_default")!)
         expect(line.hasSuffix(" bbox_deg=41.512,37.500,31.607,32.500 bbox_tan=0.8851,0.7673,0.6154,0.6371 fov_source=a100-axis-C"
                               + " fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=44.108"),

@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/ProjectionOverlay.swift
+// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/BoundaryDotsLensModel.swift ALVRClient/Diagnostics/ProjectionOverlay.swift
 import Foundation
 import simd
 
@@ -96,11 +96,13 @@ enum BoundaryOutlineTests {
         expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [0.5, 0, 0]), 30, "clamp at 30")
         expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [-0.5, 0, 0]), 0, "clamp at 0")
         expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [.nan, 0, 0]), 15, "non-finite ignored")
-        // Hand right = outline outward in both styles: lens offset up (sign +1), rect inset down (sign -1).
+        // Hand right = outline outward in every style: lens and rect inset down (sign -1), measured offset up (sign +1).
         var styles = BoundaryDotsSession()
-        expectEqual(styles.sliderSign, 1, "lens: hand right raises the offset")
+        expectEqual(styles.sliderSign, -1, "lens: hand right lowers the inset")
         styles.shape = .rect
         expectEqual(styles.sliderSign, -1, "rect: hand right lowers the inset")
+        styles.shape = .measured
+        expectEqual(styles.sliderSign, 1, "measured: hand right raises the offset")
         expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [0.03, 0, 0], sign: -1), 12, "rect 3 cm right is inset -3 (outward)")
         expectEqual(BoundaryDotsSliderMap.inset(from: 15, displacement: [-0.03, 0, 0], sign: -1), 18, "rect 3 cm left is inset +3 (inward)")
         expectEqual(BoundaryDotsSliderMap.inset(from: 0, displacement: [0.03, 0, 0], range: BoundaryDotsOutline.offsetRange,
@@ -227,7 +229,7 @@ enum BoundaryOutlineTests {
         session.eye = .both
         expect(session.outlineFields(frustum: left, source: "device_default") == nil, "no outline line for Both")
 
-        // Lens style: the 21 Oct seal-on visible field (diag-20261021T152509Z.log; L rays where measured, else Both),
+        // Measured style (W34's lens, now `.measured`): the 21 Oct seal-on visible field (diag-20261021T152509Z.log; L rays where measured, else Both),
         // moved radially by offset_deg (positive = outward), -10...+20, default 0, snapped 0.5.
         let reference = BoundaryDotsLensReference.self
         expectEqual(reference.date, "2026-10-21")
@@ -302,11 +304,12 @@ enum BoundaryOutlineTests {
         expectEqual(rectSlider.update(id: 1, hand: .left, phase: .ended, position: origin + [0.04, 0, 0], headRotation: level,
                                       inset: 11, enabled: true, sign: -1), .release(from: 15, to: 11))
 
-        // Session: per-eye offsets, the slider value follows the style, toggling keeps both values.
+        // Session: per-eye offsets, the slider value follows the style, cycling keeps every value.
         var lens = BoundaryDotsSession()
         lens.eye = .left
+        lens.shape = .measured
         expectEqual(lens.offset, 0, "default offset")
-        expectEqual(lens.sliderValue, 0, "lens slider drives the offset")
+        expectEqual(lens.sliderValue, 0, "measured slider drives the offset")
         expectEqual(lens.sliderRange, BoundaryDotsOutline.offsetRange)
         lens.sliderValue = 5.2
         expectEqual(lens.offset, 5, "snapped")
@@ -315,23 +318,29 @@ enum BoundaryOutlineTests {
         lens.eye = .right
         expectEqual(lens.offset, 0, "offsets are per eye")
         lens.eye = .left
-        lens.toggleShape()
-        expectEqual(lens.shape, .rect)
+        lens.cycleShape()
+        expectEqual(lens.shape, .lens, "measured -> lens")
+        expectEqual(lens.sliderValue, 15, "lens slider drives the model inset")
+        expectEqual(lens.sliderRange, BoundaryDotsOutline.insetRange)
+        lens.cycleShape()
+        expectEqual(lens.shape, .rect, "lens -> rect")
         expectEqual(lens.sliderValue, 15, "rect slider drives the inset")
         expectEqual(lens.sliderRange, BoundaryDotsOutline.insetRange)
-        lens.toggleShape()
-        expectEqual(lens.sliderValue, 5, "offset kept across toggles")
+        lens.cycleShape()
+        expectEqual(lens.shape, .measured, "rect -> measured")
+        expectEqual(lens.sliderValue, 5, "offset kept across the cycle")
         expectEqual(Diag.line(topic: "dots_outline", tMs: 3, fields: lens.outlineFields(frustum: left, source: "device_default")!),
-                    "DIAG dots_outline t_ms=3 eye=L shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:42.5,15:40,30:40,45:40,60:35,75:35,90:35,105:37.5,120:37.5,135:40,150:42.5,165:42.5,180:45,195:47.5,210:45,225:45,240:35,255:37.5,270:37.5,285:35,300:37.5,315:37.5,330:37.5,345:42.5 bbox_deg=46.509,42.500,36.545,37.500 bbox_tan=1.0541,0.9163,0.7412,0.7673 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=36.989")
+                    "DIAG dots_outline t_ms=3 eye=L shape=measured offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:42.5,15:40,30:40,45:40,60:35,75:35,90:35,105:37.5,120:37.5,135:40,150:42.5,165:42.5,180:45,195:47.5,210:45,225:45,240:35,255:37.5,270:37.5,285:35,300:37.5,315:37.5,330:37.5,345:42.5 bbox_deg=46.509,42.500,36.545,37.500 bbox_tan=1.0541,0.9163,0.7412,0.7673 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=36.989")
         lens.eye = .right
         lens.offset = 5
         expectEqual(Diag.line(topic: "dots_outline", tMs: 4, fields: lens.outlineFields(frustum: right, source: "m5_view")!),
-                    "DIAG dots_outline t_ms=4 eye=R shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:45,15:42.5,30:42.5,45:40,60:37.5,75:37.5,90:35,105:35,120:35,135:40,150:40,165:40,180:42.5,195:42.5,210:37.5,225:37.5,240:37.5,255:35,270:37.5,285:37.5,300:35,315:45,330:45,345:47.5 bbox_deg=42.500,46.509,36.545,37.500 bbox_tan=0.9163,1.0541,0.7412,0.7673 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.372,34.296,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=36.989")
+                    "DIAG dots_outline t_ms=4 eye=R shape=measured offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:45,15:42.5,30:42.5,45:40,60:37.5,75:37.5,90:35,105:35,120:35,135:40,150:40,165:40,180:42.5,195:42.5,210:37.5,225:37.5,240:37.5,255:35,270:37.5,285:37.5,300:35,315:45,330:45,345:47.5 bbox_deg=42.500,46.509,36.545,37.500 bbox_tan=0.9163,1.0541,0.7412,0.7673 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.372,34.296,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=36.989")
 
         // Slider logging: one dots_outline line per snapped value change during a slide (not per frame)
         // and one more at release with the settled value; a slide within one 0.5 deg step logs nothing.
         var logged = BoundaryDotsSession()
         logged.eye = .left
+        logged.shape = .measured
         var logSlider = BoundaryDotsSlider<Int>()
         var sliderLog = BoundaryDotsSliderLog()
         var lines: [String] = []
@@ -353,13 +362,13 @@ enum BoundaryOutlineTests {
         expectEqual(lines.count, 4, "three snap steps and a release: four lines")
         expectEqual(lines.map { $0.components(separatedBy: " ").first { $0.hasPrefix("offset_deg=") } ?? "" },
                     ["offset_deg=0.500", "offset_deg=1.000", "offset_deg=1.500", "offset_deg=1.500"], "offsets per step, settled at release")
-        expectEqual(lines.last, "DIAG dots_outline t_ms=13 eye=L shape=lens offset_deg=1.500 nasal_deg=39.000 temporal_deg=41.500 up_deg=31.500 down_deg=34.000 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:39,15:36.5,30:36.5,45:36.5,60:31.5,75:31.5,90:31.5,105:34,120:34,135:36.5,150:39,165:39,180:41.5,195:44,210:41.5,225:41.5,240:31.5,255:34,270:34,285:31.5,300:34,315:34,330:34,345:39 bbox_deg=43.008,39.000,33.085,34.000 bbox_tan=0.9328,0.8098,0.6515,0.6745 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=41.826")
+        expectEqual(lines.last, "DIAG dots_outline t_ms=13 eye=L shape=measured offset_deg=1.500 nasal_deg=39.000 temporal_deg=41.500 up_deg=31.500 down_deg=34.000 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:39,15:36.5,30:36.5,45:36.5,60:31.5,75:31.5,90:31.5,105:34,120:34,135:36.5,150:39,165:39,180:41.5,195:44,210:41.5,225:41.5,240:31.5,255:34,270:34,285:31.5,300:34,315:34,330:34,345:39 bbox_deg=43.008,39.000,33.085,34.000 bbox_tan=0.9328,0.8098,0.6515,0.6745 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=41.826")
         lines = []
         for dx in [0.0, 0.002, -0.002, 0.0024, 0.0] { slide(2, dx) }
         slide(2, 0.001, .ended)
         expectEqual(lines, [], "a slide within one step logs nothing")
         // Rect: hand right lowers the inset; a cancel restores and logs.
-        logged.toggleShape()
+        logged.shape = .rect
         for dx in [0.0, 0.006] { slide(3, dx) }
         expectEqual(logged.inset, 14.5, "rect hand right lowers the inset")
         slide(3, 0.006, .cancelled)
@@ -383,6 +392,200 @@ enum BoundaryOutlineTests {
         for dx in [0.0, 0.006] { slide(6, dx) }
         expectEqual(lines.count, 2, "R 14.0 in both slides: each logs")
         expect(lines.allSatisfy { $0.contains("eye=R") && $0.contains("inset_deg=14.000") }, "R inset 14 twice")
+
+        // Model lens (style lens, the default): the Frustum Pixel Map diagram's construction (vBoundary). Each frustum edge
+        // angle moves inwards by the inset (at least 1 deg left); a per-quadrant superellipse is inscribed in that rectangle.
+        let model = BoundaryDotsLensModel.self
+        func tand(_ d: Double) -> Double { tan(d * .pi / 180) }
+        func nearPoint(_ got: SIMD2<Double>?, _ want: SIMD2<Double>, _ message: String, tolerance: Double = 1e-9) {
+            guard let got else { return expect(false, "\(message): no point") }
+            near(got.x, want.x, "\(message) x", tolerance: tolerance)
+            near(got.y, want.y, "\(message) y", tolerance: tolerance)
+        }
+        func nearBox(_ box: ProjectionBox?, _ want: ProjectionBox?, _ message: String, tolerance: Double = 1e-9) {
+            guard let box, let want else { return expect(false, "\(message): no box") }
+            for (side, (got, value)) in zip(["left", "right", "up", "down"], zip(box.tangents, want.tangents)) {
+                near(got, value, "\(message) \(side)", tolerance: tolerance)
+            }
+        }
+        expectEqual(model.tag, "superellipse(2,3,1.5,4)", "model tag")
+        expectEqual(model.pointCount, 480, "480 points around")
+        expectEqual(BoundaryDotsOutline.defaultInsetDeg, 15, "default inset 15")
+        // On the exact 60/45/45/50 frustum (temporal/nasal/up/down), inset 15 is 45/30/30/35.
+        let exact = BoundaryDotsFrustum(left: tand(60), right: 1, bottom: tand(50), top: 1)
+        let exactRect = model.insetRect(.left, frustum: exact, insetDeg: 15)
+        expectEqual(exactRect.map { [$0.temporal, $0.nasal, $0.up, $0.down].map { ($0 * 1e9).rounded() / 1e9 } }, [45, 30, 30, 35],
+                    "inset 15 on 60/45/45/50 = 45/30/30/35")
+        near(exactRect?.aT ?? -1, 1, "a_T = tan 45")
+        near(exactRect?.aN ?? -1, tand(30), "a_N = tan 30")
+        near(exactRect?.bU ?? -1, tand(30), "b_U = tan 30")
+        near(exactRect?.bD ?? -1, tand(35), "b_D = tan 35")
+        // The device frustum (tan 60.0007, 45, 45, 50.0011): 45.0007/30/30/35.0011; R mirrors L (the same eye-frame rect).
+        guard let rectL = model.insetRect(.left, frustum: left, insetDeg: 15),
+              let rectR = model.insetRect(.right, frustum: right, insetDeg: 15) else {
+            expect(false, "inset rect for L and R")
+            finishTests("BoundaryOutlineTests")
+        }
+        for (got, want) in zip([rectL.temporal, rectL.nasal, rectL.up, rectL.down], [45.0, 30, 30, 35]) {
+            near(got, want, "L device inset 15", tolerance: 2e-3)
+        }
+        near(rectL.temporal, atan(1.7321) * 180 / .pi - 15, "temporal = frustum edge - inset")
+        expectEqual(rectR, rectL, "R mirrored")
+        expectEqual(model.insetRect(.left, insetDeg: 15), rectL, "default frustum: the device's")
+        expect(model.insetRect(.both, frustum: left, insetDeg: 15) == nil, "Both has no rect")
+        expectEqual(rectL.limits, BoundaryDotsLimits(nasal: rectL.nasal, temporal: rectL.temporal, up: rectL.up, down: rectL.down), "limits")
+        // Head frame (x right): L's temporal side is its left, R's its right.
+        expectEqual(rectL.box(.left), ProjectionBox(left: rectL.aT, right: rectL.aN, up: rectL.bU, down: rectL.bD), "L box")
+        expectEqual(rectR.box(.right), ProjectionBox(left: rectR.aN, right: rectR.aT, up: rectR.bU, down: rectR.bD), "R box")
+        // Every edge keeps at least 1 deg.
+        let deep = model.insetRect(.left, frustum: exact, insetDeg: 50)
+        expectEqual(deep.map { [$0.temporal, $0.nasal, $0.up, $0.down].map { ($0 * 1e9).rounded() / 1e9 } }, [10, 1, 1, 1], "clamped to >= 1 deg")
+        // Axis crossings (eye frame: temporal +, up +): phi 0 = (tan 45, 0), 90 = (0, tan 30), 180 = (-tan 30, 0), 270 = (0, -tan 35).
+        let exactPoints = model.lensPoints(.left, frustum: exact, insetDeg: 15) ?? []
+        expectEqual(exactPoints.count, 480, "480 points")
+        nearPoint(exactPoints.first, [1, 0], "phi 0")
+        nearPoint(exactPoints.count == 480 ? exactPoints[120] : nil, [0, tand(30)], "phi 90")
+        nearPoint(exactPoints.count == 480 ? exactPoints[240] : nil, [-tand(30), 0], "phi 180")
+        nearPoint(exactPoints.count == 480 ? exactPoints[360] : nil, [0, -tand(35)], "phi 270")
+        // Quadrant exponents: upper-nasal 2, upper-temporal 3, lower-nasal 1.5, lower-temporal 4.
+        expectEqual([model.exponent(c: -0.6, s: 0.8), model.exponent(c: 0.6, s: 0.8), model.exponent(c: -0.6, s: -0.8),
+                     model.exponent(c: 0.6, s: -0.8)], [2, 3, 1.5, 4], "exponents by quadrant")
+        // Phi 45 (upper temporal, n = 3), by hand: rho = 1 / (c^3 + (s / tan 30)^3)^(1/3), c = s = 1/sqrt 2:
+        // (0.353553 + 0.353553 x 5.196152)^(1/3) = 2.190671^(1/3) = 1.298750, rho = 0.769971, point 0.544452 each way.
+        // Inside the rectangle (0.544 < tan 45 and < tan 30 = 0.577), outside the inscribed ellipse (n = 2):
+        // (0.544452 / 1)^2 + (0.544452 / 0.577350)^2 = 0.296428 + 0.889283 = 1.185710 > 1.
+        let p45 = exactPoints.count == 480 ? exactPoints[60] : SIMD2<Double>(.nan, .nan)
+        let c45 = cos(Double.pi / 4)
+        let rho45 = 1 / pow(pow(c45, 3) + pow(c45 / tand(30), 3), 1.0 / 3)
+        nearPoint(p45, [rho45 * c45, rho45 * c45], "phi 45 formula", tolerance: 1e-12)
+        nearPoint(p45, [0.544452, 0.544452], "phi 45 by hand", tolerance: 1e-6)
+        expect(p45.x < 1 && p45.y < tand(30), "phi 45 inside the rectangle")
+        expect(pow(p45.x / 1, 2) + pow(p45.y / tand(30), 2) > 1, "phi 45 outside the inscribed ellipse")
+        // Every point inside or on the rectangle; the bbox of the drawn lens is the rectangle (within 1e-9).
+        for p in model.lensPoints(.left, frustum: left, insetDeg: 15) ?? [] {
+            expect(p.x <= rectL.aT + 1e-12 && -p.x <= rectL.aN + 1e-12 && p.y <= rectL.bU + 1e-12 && -p.y <= rectL.bD + 1e-12,
+                   "point \(p) inside the rect")
+        }
+        let lensL = model.outline(.left, frustum: left, insetDeg: 15) ?? []
+        expectEqual(lensL.count, 480, "drawn outline: 480 dots")
+        nearBox(ProjectionOverlay.bbox(lensL), rectL.box(.left), "bbox(lens L) == inset rect")
+        nearBox(ProjectionOverlay.bbox(model.outline(.right, frustum: right, insetDeg: 15) ?? []), rectR.box(.right), "bbox(lens R) == inset rect")
+        nearBox(ProjectionOverlay.bbox(model.outline(.left, frustum: left, insetDeg: 7.5) ?? []),
+                model.insetRect(.left, frustum: left, insetDeg: 7.5)?.box(.left), "bbox follows the inset")
+        expect(model.outline(.both, frustum: left, insetDeg: 15) == nil, "no lens for Both")
+        // Head frame: the L lens's temporal crossing is on its left (ray 180), R's on its right (ray 0).
+        near(lensL.first?.rayDeg ?? -1, 180, "L phi 0 is head ray 180", tolerance: 1e-9)
+        near(lensL.first?.eccDeg ?? -1, rectL.temporal, "L phi 0 at the temporal edge", tolerance: 1e-9)
+        near(model.outline(.right, frustum: right, insetDeg: 15)?.first?.rayDeg ?? -1, 0, "R phi 0 is head ray 0", tolerance: 1e-9)
+        // Area: the 480-point polygon over the frustum (tangent space); less than the rectangle's, more inset less area.
+        let lensArea15 = model.areaFraction(.left, frustum: left, insetDeg: 15) ?? -1
+        near(lensArea15, left.areaFraction(of: lensL), "one area routine")
+        expect(lensArea15 < (rectL.aT + rectL.aN) * (rectL.bU + rectL.bD) / (2.7321 * 2.1918), "lens inside its rectangle: \(lensArea15)")
+        expect((model.areaFraction(.left, frustum: left, insetDeg: 20) ?? 1) < lensArea15, "more inset, less area")
+
+        // Session: style lens by default, its slider sets the model inset (0...30, default 15, 0.5 steps, per eye).
+        var modelSession = BoundaryDotsSession()
+        modelSession.eye = .left
+        expectEqual(modelSession.shape, .lens, "lens is the default style")
+        expectEqual(modelSession.lensInset, 15, "default model inset")
+        expectEqual(modelSession.sliderValue, 15, "lens slider drives the model inset")
+        expectEqual(modelSession.sliderRange, BoundaryDotsOutline.insetRange, "0...30")
+        modelSession.sliderValue = 20.26
+        expectEqual(modelSession.lensInset, 20.5, "snapped 0.5")
+        modelSession.lensInset = .nan
+        expectEqual(modelSession.lensInset, 20.5, "non-finite ignored")
+        modelSession.lensInset = 42
+        expectEqual(modelSession.lensInset, 30, "clamped at 30")
+        modelSession.eye = .right
+        expectEqual(modelSession.lensInset, 15, "per eye")
+        expectEqual(modelSession.inset, 15, "rect inset separate")
+        modelSession.eye = .left
+        modelSession.lensInset = 15
+        expectEqual(modelSession.outline(.left, frustum: left), lensL, "session draws the model")
+        expectEqual(modelSession.projection(.left, frustum: left)?.bbox, rectL.box(.left), "projection bbox = inset rect")
+        expectEqual(modelSession.limits(.left, frustum: left), rectL.limits, "limits = inset rect")
+        expectEqual(Diag.line(topic: "dots_outline", tMs: 20, fields: modelSession.outlineFields(frustum: left, source: "device_default")!),
+                    "DIAG dots_outline t_ms=20 eye=L shape=lens inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 model=superellipse(2,3,1.5,4) bbox_deg=45.001,30.000,30.000,35.001 bbox_tan=1.0000,0.5774,0.5774,0.7002 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=45.533")
+        modelSession.eye = .right
+        modelSession.lensInset = 10
+        expectEqual(Diag.line(topic: "dots_outline", tMs: 21, fields: modelSession.outlineFields(frustum: right, source: "m5_view")!),
+                    "DIAG dots_outline t_ms=21 eye=R shape=lens inset_deg=10.000 nasal_deg=35.000 temporal_deg=50.001 up_deg=35.000 down_deg=40.001 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 model=superellipse(2,3,1.5,4) bbox_deg=35.000,50.001,35.000,40.001 bbox_tan=0.7002,1.1918,0.7002,0.8391 fov_source=a100-axis-C fov_live=no foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.372,34.296,26.152,26.263 render_px=4176,3333 pxdeg_frustum=26.541 pxdeg_bbox=37.790")
+        // Cycle: lens -> rect -> measured -> lens.
+        var cycle = BoundaryDotsSession()
+        var seen: [BoundaryDotsOutlineShape] = []
+        for _ in 0..<4 { cycle.cycleShape(); seen.append(cycle.shape) }
+        expectEqual(seen, [.rect, .measured, .lens, .rect], "quick right pinch cycles lens -> rect -> measured -> lens")
+
+        // Lens slider: one 0.5 deg step per 0.5 cm (hand right = inset down, outline out), each step logs a line.
+        var lensLog = BoundaryDotsSession()
+        lensLog.eye = .left
+        var lensLogSlider = BoundaryDotsSlider<Int>()
+        var lensSliderLog = BoundaryDotsSliderLog()
+        var lensLines: [String] = []
+        func lensSlide(_ id: Int, _ dx: Double, _ phase: BoundaryDotsPinchPhase = .active) {
+            if !lensLogSlider.active { lensSliderLog.reset() }
+            let update = lensLogSlider.update(id: id, hand: .left, phase: phase, position: origin + [dx, 0, 0], headRotation: level,
+                                              inset: lensLog.sliderValue, enabled: true, range: lensLog.sliderRange,
+                                              sign: lensLog.sliderSign)
+            switch update {
+            case .move(let value)?, .release(_, let value)?: lensLog.sliderValue = value
+            case nil: break
+            }
+            if lensSliderLog.logs(update, session: lensLog), let fields = lensLog.outlineFields(frustum: left, source: "device_default") {
+                lensLines.append(Diag.line(topic: "dots_outline", tMs: 30 + lensLines.count, fields: fields))
+            }
+        }
+        lensSlide(1, 0)
+        lensSlide(1, 0.006)
+        expectEqual(lensLog.lensInset, 14.5, "one step right: inset 15 -> 14.5")
+        lensSlide(1, -0.006)
+        expectEqual(lensLog.lensInset, 15.5, "back past the grab: 15.5")
+        lensSlide(1, -0.006, .ended)
+        expectEqual(lensLines.map { $0.components(separatedBy: " ").first { $0.hasPrefix("inset_deg=") } ?? "" },
+                    ["inset_deg=14.500", "inset_deg=15.500", "inset_deg=15.500"], "each step and the release logged")
+        expect(lensLines.allSatisfy { $0.contains("shape=lens") && $0.contains("model=superellipse(2,3,1.5,4)") }, "lens lines carry the model")
+        expect(lensLines.first?.contains("nasal_deg=30.500 temporal_deg=45.501 up_deg=30.500 down_deg=35.501") == true,
+               "the rectangle follows the slider: \(lensLines.first ?? "")")
+
+        // Shared fixture with tools/diag/lens_model.py (test_lens_model.py): the same numbers to 1e-6.
+        let lensFixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../tools/diag/fixtures/lens-model.json").standardized
+        if let data = try? Data(contentsOf: lensFixture),
+           let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let cases = root["cases"] as? [[String: Any]], cases.count == 4 {
+            expectEqual(root["model"] as? String, model.tag, "fixture model tag")
+            expectEqual(root["count"] as? Int, model.pointCount, "fixture count")
+            for item in cases {
+                let name = item["name"] as? String ?? "?"
+                guard let eye = BoundaryDotsEye(rawValue: item["eye"] as? String ?? ""), let inset = item["inset_deg"] as? Double,
+                      let degrees = item["rect_deg"] as? [String: Double], let tangents = item["rect_tan"] as? [String: Double],
+                      let box = item["box_tan_LRUD"] as? [Double], box.count == 4,
+                      let points = item["points"] as? [[String: Any]], points.count == 24,
+                      let area = item["area_fraction"] as? Double,
+                      let frustum = BoundaryDotsFrustum.device(eye),
+                      let rect = model.insetRect(eye, frustum: frustum, insetDeg: inset) else {
+                    expect(false, "lens fixture case \(name) malformed")
+                    continue
+                }
+                for (key, got) in [("temporal", rect.temporal), ("nasal", rect.nasal), ("up", rect.up), ("down", rect.down)] {
+                    near(got, degrees[key] ?? .nan, "fixture \(name) \(key) deg", tolerance: 1e-6)
+                }
+                for (key, got) in [("a_t", rect.aT), ("a_n", rect.aN), ("b_u", rect.bU), ("b_d", rect.bD)] {
+                    near(got, tangents[key] ?? .nan, "fixture \(name) \(key)", tolerance: 1e-6)
+                }
+                nearBox(rect.box(eye), ProjectionBox(left: box[0], right: box[1], up: box[2], down: box[3]), "fixture \(name) box", tolerance: 1e-6)
+                for point in points {
+                    guard let phi = point["phi_deg"] as? Double, let e = point["eye"] as? [Double], let h = point["head"] as? [Double],
+                          e.count == 2, h.count == 2 else { expect(false, "fixture \(name) point malformed"); continue }
+                    let p = model.point(rect, phiDeg: phi)
+                    nearPoint(p, [e[0], e[1]], "fixture \(name) phi \(phi) eye", tolerance: 1e-6)
+                    nearPoint(model.head(eye, p), [h[0], h[1]], "fixture \(name) phi \(phi) head", tolerance: 1e-6)
+                }
+                near(model.areaFraction(eye, frustum: frustum, insetDeg: inset) ?? .nan, area, "fixture \(name) area", tolerance: 1e-6)
+            }
+        } else {
+            expect(false, "fixture \(lensFixture.path) readable with 4 cases")
+        }
 
         // Logged tangents (m5_view, drawable 0: view 0 = L, view 1 = R) replace the device defaults.
         BoundaryDotsTangents.reset()

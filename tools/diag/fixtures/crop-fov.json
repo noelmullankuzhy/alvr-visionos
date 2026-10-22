@@ -1,20 +1,20 @@
 {
- "about": "Crop FOV to outline: one input set, one expected set, checked by tests/swift/CropFovTests.swift (CropFov.swift) and tools/fov-matrix/test_fovmatrix.py (avp-sharpness.py crop) so the Swift and Python formulas agree (tan to 0.0001, shift to 0.001, px/deg to 0.1). Tangents are |tan| left,right,down,up (gimmeTangents slots left,right,bottom,top; avp-field.json frustum_tan_LRDU). The sent box is the bbox of the lens outline (reference rays + offset_deg, R mirrored), each side widened by margin_deg in degrees, clamped to the device frustum. center_shift is ALVR's center_shift_x,y that puts the 1:1 band's centre on the eye axis (tan 0) of the sent box at center_size.",
- "reference_rays": "0:37.5,15:35,30:35,45:35,60:30,75:30,90:30,105:32.5,120:32.5,135:35,150:37.5,165:37.5,180:40,195:42.5,210:40,225:40,240:30,255:32.5,270:32.5,285:30,300:32.5,315:32.5,330:32.5,345:37.5",
+ "about": "Crop FOV to outline: one input set, one expected set, checked by tests/swift/CropFovTests.swift (CropFov.swift) and tools/fov-matrix/test_fovmatrix.py (avp-sharpness.py crop) so the Swift and Python formulas agree (tan to 0.0001, shift to 0.001, px/deg to 0.1). Tangents are |tan| left,right,down,up (gimmeTangents slots left,right,bottom,top; avp-field.json frustum_tan_LRDU). The sent box is the model lens's inset rectangle (BoundaryDotsLensModel / lens_model.py: each device frustum edge angle moved in by inset_deg, >= 1 deg, R mirrored), each side widened by margin_deg in degrees, clamped to the device frustum. center_shift is ALVR's center_shift_x,y that puts the 1:1 band's centre on the eye axis (tan 0) of the sent box at center_size.",
+ "model": "superellipse(2,3,1.5,4)",
  "device_tan_LRDU": {"L": [1.7321, 1.0, 1.1918, 1.0], "R": [1.0, 1.7321, 1.1918, 1.0]},
  "center_size": [0.5, 0.45],
  "cases": [
-  {"name": "L offset 0 margin 0 (the bbox)", "eye": "L", "offset_deg": 0, "margin_deg": 0,
-   "expect": {"sent_tan_LRDU": [0.8851, 0.7673, 0.6371, 0.6154], "center_shift": [0.143, -0.032]}},
-  {"name": "L offset 0 margin 2 (default)", "eye": "L", "offset_deg": 0, "margin_deg": 2,
-   "expect": {"sent_tan_LRDU": [0.9494, 0.8243, 0.6873, 0.6646], "center_shift": [0.141, -0.031],
-              "render_px": [4176, 3334], "pxdeg_centre": 41.09}},
-  {"name": "R offset 0 margin 2 (mirrored)", "eye": "R", "offset_deg": 0, "margin_deg": 2,
-   "expect": {"sent_tan_LRDU": [0.8243, 0.9494, 0.6873, 0.6646], "center_shift": [0.141, -0.031],
-              "render_px": [3648, 2912], "pxdeg_centre": 35.90}},
-  {"name": "L offset +5 margin 2", "eye": "L", "offset_deg": 5, "margin_deg": 2,
-   "expect": {"sent_tan_LRDU": [1.1307, 0.9827, 0.8243, 0.7967], "center_shift": [0.140, -0.031]}},
-  {"name": "L offset +20 margin 2 (clamped to the device frustum)", "eye": "L", "offset_deg": 20, "margin_deg": 2,
+  {"name": "L inset 15 margin 0 (the inset rectangle)", "eye": "L", "inset_deg": 15, "margin_deg": 0,
+   "expect": {"sent_tan_LRDU": [1.0000, 0.5774, 0.7002, 0.5774], "center_shift": [0.536, -0.175]}},
+  {"name": "L inset 15 margin 2 (default)", "eye": "L", "inset_deg": 15, "margin_deg": 2,
+   "expect": {"sent_tan_LRDU": [1.0724, 0.6249, 0.7536, 0.6249], "center_shift": [0.527, -0.170],
+              "render_px": [4176, 3334], "pxdeg_centre": 42.21}},
+  {"name": "R inset 15 margin 2 (mirrored)", "eye": "R", "inset_deg": 15, "margin_deg": 2,
+   "expect": {"sent_tan_LRDU": [0.6249, 1.0724, 0.7536, 0.6249], "center_shift": [0.527, -0.170],
+              "render_px": [3648, 2912], "pxdeg_centre": 36.87}},
+  {"name": "L inset 10 margin 2", "eye": "L", "inset_deg": 10, "margin_deg": 2,
+   "expect": {"sent_tan_LRDU": [1.2800, 0.7536, 0.9004, 0.7536], "center_shift": [0.518, -0.161]}},
+  {"name": "L inset 0 margin 2 (clamped to the device frustum)", "eye": "L", "inset_deg": 0, "margin_deg": 2,
    "expect": {"sent_tan_LRDU": [1.7321, 1.0, 1.1918, 1.0], "center_shift": [0.536, -0.159]}}
  ]
 }

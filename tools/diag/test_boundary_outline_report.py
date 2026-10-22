@@ -97,10 +97,10 @@ DIAG dots_outline t_ms=4 eye=L inset_deg=15 tangents=0,1,1,1'''))
         self.assertNotIn('dots_outline', unknown, 'dots_outline is a known topic')
 
 
-LENS_LOG = LOG + '''DIAG dots_outline t_ms=8 eye=L shape=lens offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:42.5,15:40,30:40,45:40,60:35,75:35,90:35,105:37.5,120:37.5,135:40,150:42.5,165:42.5,180:45,195:47.5,210:45,225:45,240:35,255:37.5,270:37.5,285:35,300:37.5,315:37.5,330:37.5,345:42.5
-DIAG dots_outline t_ms=9 eye=R shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:40,90:30,180:37.5,270:32.5
-DIAG dots_outline t_ms=10 eye=L shape=lens offset_deg=0.000 rays=0:nan
-DIAG dots_outline t_ms=11 eye=L shape=lens offset_deg=0.000
+LENS_LOG = LOG + '''DIAG dots_outline t_ms=8 eye=L shape=measured offset_deg=5.000 nasal_deg=42.500 temporal_deg=45.000 up_deg=35.000 down_deg=37.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:42.5,15:40,30:40,45:40,60:35,75:35,90:35,105:37.5,120:37.5,135:40,150:42.5,165:42.5,180:45,195:47.5,210:45,225:45,240:35,255:37.5,270:37.5,285:35,300:37.5,315:37.5,330:37.5,345:42.5
+DIAG dots_outline t_ms=9 eye=R shape=measured offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 reference=device-20261021 rays=0:40,90:30,180:37.5,270:32.5
+DIAG dots_outline t_ms=10 eye=L shape=measured offset_deg=0.000 rays=0:nan
+DIAG dots_outline t_ms=11 eye=L shape=measured offset_deg=0.000
 '''
 
 
@@ -130,7 +130,7 @@ class LensOutlineReportTests(unittest.TestCase):
     def test_lens_rows_limits_rays_area_and_deviation(self):
         rows = report.dots_outlines(self.records(LENS_LOG))
         self.assertEqual([(r['eye'], r['shape']) for r in rows],
-                         [('L', 'rect'), ('L', 'rect'), ('R', 'rect'), ('L', 'lens'), ('R', 'lens')], 'bad lens lines skipped')
+                         [('L', 'rect'), ('L', 'rect'), ('R', 'rect'), ('L', 'measured'), ('R', 'measured')], 'bad measured lines skipped')
         lens = rows[3]
         self.assertEqual(lens['offset_deg'], 5)
         self.assertIsNone(lens['inset_deg'])
@@ -150,8 +150,61 @@ class LensOutlineReportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, 'diag-outline.log').write_text(LENS_LOG)
             output = report.generate(directory)
-        for text in ['shape', 'offset_deg', 'lens', 'Per-ray outline', 'outline_ecc_deg', '47.5', 'diag-outline.log:8']:
+        for text in ['shape', 'offset_deg', 'measured', 'Per-ray outline', 'outline_ecc_deg', '47.5', 'diag-outline.log:8']:
             self.assertIn(text, output)
+
+
+MODEL_PROJECTION = ('bbox_deg=45.001,30.000,30.000,35.001 bbox_tan=1.0000,0.5774,0.5774,0.7002 fov_source=a100-axis-C fov_live=no '
+                    'foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 '
+                    'pxdeg_frustum=26.541 pxdeg_bbox=45.533')
+MODEL_LOG = LOG + '''DIAG dots_outline t_ms=20 eye=L shape=lens inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 model=superellipse(2,3,1.5,4) {projection}
+DIAG dots_outline t_ms=21 eye=R shape=lens inset_deg=10.000 nasal_deg=35.000 temporal_deg=50.001 up_deg=35.000 down_deg=40.001 tangent_source=m5_view tangents=1.0000,1.7321,1.1918,1.0000 model=superellipse(2,3,1.5,4)
+DIAG dots_outline t_ms=22 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays=0:37.5,90:30,180:40,270:32.5
+DIAG dots_outline t_ms=23 eye=L shape=lens inset_deg=nan model=superellipse(2,3,1.5,4)
+'''.format(projection=MODEL_PROJECTION)
+
+
+class ModelLensReportTests(unittest.TestCase):
+    """shape=lens since the model lens: inset_deg + model (the inset rectangle and its superellipse, lens_model.py);
+    W34's measured outline logs shape=measured, and older shape=lens lines with rays read as measured."""
+    records = staticmethod(BoundaryOutlineReportTests.records)
+
+    def test_model_rows(self):
+        rows = report.dots_outlines(self.records(MODEL_LOG))
+        self.assertEqual([(r['eye'], r['shape']) for r in rows][3:],
+                         [('L', 'lens'), ('R', 'lens'), ('L', 'measured')], 'legacy lens line with rays is measured; bad inset skipped')
+        lens = rows[3]
+        self.assertEqual(lens['inset_deg'], 15)
+        self.assertIsNone(lens['offset_deg'])
+        self.assertEqual(lens['model'], 'superellipse(2,3,1.5,4)')
+        self.assertEqual((lens['nasal_deg'], lens['temporal_deg'], lens['up_deg'], lens['down_deg']), (30, 45.001, 30, 35.001))
+        self.assertAlmostEqual(lens['area_frac'], 0.283492, places=6)
+        self.assertEqual(lens['projection_check'], 'ok', 'bbox = inset rect, px/deg recomputed')
+        deviations = {d['ray_deg']: d for d in lens['deviations']}
+        # The L lens crosses ray 0 (nasal) at 30 deg and ray 180 (temporal) at 45.0007 deg.
+        self.assertAlmostEqual(deviations[0]['outline_ecc_deg'], 30, places=9)
+        self.assertAlmostEqual(deviations[180]['outline_ecc_deg'], 45.000705, places=5)
+        self.assertAlmostEqual(deviations[0]['deviation_deg'], 32.5 - 30, places=9)
+        self.assertEqual(rows[4]['projection_check'], 'not logged')
+        self.assertAlmostEqual(rows[4]['area_frac'], 0.409366, places=6)
+        self.assertEqual(rows[5]['offset_deg'], 0)
+        self.assertEqual(sorted(rows[5]['rays']), [0, 90, 180, 270])
+
+    def test_model_box(self):
+        box = report.lens_model_box('L', 15, (1.7321, 1.0, 1.1918, 1.0))
+        for got, want in zip(box, (1.000025, 0.577350, 0.577350, 0.700236)):
+            self.assertAlmostEqual(got, want, places=6)
+        self.assertEqual(report.lens_model_box('R', 15, (1.0, 1.7321, 1.1918, 1.0)), (box[1], box[0], box[2], box[3]))
+
+    def test_report_shows_inset_and_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'diag-outline.log').write_text(MODEL_LOG)
+            output = report.generate(directory)
+        for text in ['inset_deg', 'model', 'superellipse(2,3,1.5,4)', '45.001,30,30,35.001', 'diag-outline.log:8']:
+            self.assertIn(text, output)
+        lens_rows = [line for line in output.splitlines() if 'diag-outline.log:8 ' in line and line.startswith('|')]
+        self.assertEqual(len(lens_rows), 1)
+        self.assertIn('| lens | 15 |', lens_rows[0])
 
 
 FIXTURE = Path(__file__).with_name('fixtures') / 'projection-overlay.json'
@@ -161,11 +214,11 @@ PROJECTION = ('bbox_deg=41.512,37.500,31.607,32.500 bbox_tan=0.8851,0.7673,0.615
               'foveation=0.5,0.45,3,3,0.536,-0.159 fov_rect_deg=34.296,34.372,26.152,26.263 render_px=4176,3333 '
               'pxdeg_frustum=26.541 pxdeg_bbox=44.108')
 PROJECTION_LOG = '''DIAG dots_session t_ms=1 event=begin radius_m=10.000 pose=device angles=projected_tangent
-DIAG dots_outline t_ms=2 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {projection}
+DIAG dots_outline t_ms=2 eye=L shape=measured offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {projection}
 DIAG dots_outline t_ms=3 eye=L shape=rect inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000
 DIAG dots_session t_ms=4 event=begin radius_m=10.000 pose=device angles=projected_tangent
-DIAG dots_outline t_ms=5 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {projection}
-DIAG dots_outline t_ms=6 eye=L shape=lens offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {wrong}
+DIAG dots_outline t_ms=5 eye=L shape=measured offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {projection}
+DIAG dots_outline t_ms=6 eye=L shape=measured offset_deg=0.000 nasal_deg=37.500 temporal_deg=40.000 up_deg=30.000 down_deg=32.500 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000 reference=device-20261021 rays={rays} {wrong}
 '''.format(rays=L_RAYS, projection=PROJECTION, wrong=PROJECTION.replace('pxdeg_bbox=44.108', 'pxdeg_bbox=45.000'))
 
 
@@ -176,15 +229,16 @@ class ProjectionReportTests(unittest.TestCase):
         """Same inputs and expected numbers as tests/swift/ProjectionOverlayTests.swift (tan 0.001, px/deg 0.1)."""
         import json
         cases = json.loads(FIXTURE.read_text())['cases']
-        self.assertEqual(len(cases), 3)
+        self.assertEqual(len(cases), 4)
         for case in cases:
             tangents, want = tuple(case['tangents']), case['expect']
             if case['shape'] == 'lens':
+                box = report.lens_model_box(case['eye'], case['inset_deg'], tangents)
+            elif case['shape'] == 'measured':
                 rays = report.outline_rays(case['rays'])
-                points = [(r, report.lens_ecc(r, rays)) for r in range(0, 360, 5)]
+                box = report.outline_bbox([(r, report.lens_ecc(r, rays)) for r in range(0, 360, 5)])
             else:
-                points = report.outline_points(case['inset_deg'], tangents)
-            box = report.outline_bbox(points)
+                box = report.outline_bbox(report.outline_points(case['inset_deg'], tangents))
             for got, value in zip(box, want['bbox_tan']):
                 self.assertAlmostEqual(got, value, delta=1e-3, msg=case['name'])
             rect = report.foveation_rect(case['eye'], tangents, case['foveation'], case['render_px'])
