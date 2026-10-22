@@ -12,6 +12,31 @@ enum SettingsError: Error {
 struct SettingsCodables {
     struct VideoConfig: Codable {
         @OptionSwitch var foveated_encoding: FoveationSettings?
+        var encoder_config: EncoderConfig?
+    }
+
+    // video.encoder_config.hdr.reference_white_nits, decoded leniently so an absent or differently shaped value never
+    // fails the rest of the settings (the client then keeps its default reference white).
+    struct EncoderConfig: Codable {
+        var hdr: HdrConfig?
+
+        enum CodingKeys: String, CodingKey { case hdr }
+
+        init(from decoder: Decoder) throws {
+            let container = try? decoder.container(keyedBy: CodingKeys.self)
+            hdr = container.flatMap { try? $0.decode(HdrConfig.self, forKey: .hdr) }
+        }
+    }
+
+    struct HdrConfig: Codable {
+        var reference_white_nits: Double?
+
+        enum CodingKeys: String, CodingKey { case reference_white_nits }
+
+        init(from decoder: Decoder) throws {
+            let container = try? decoder.container(keyedBy: CodingKeys.self)
+            reference_white_nits = container.flatMap { try? $0.decode(Double.self, forKey: .reference_white_nits) }
+        }
     }
     
     //

@@ -44,6 +44,17 @@ enum HDRPipeline {
         defaultsValue >= 1 ? defaultsValue : referenceWhiteNits
     }
 
+    // Reference white for a stream: the local defaults override, else the server's video.encoder_config.hdr.reference_white_nits
+    // when it sent one, else the 203 default. `source` is the HDRDISPLAY log value.
+    static func resolveReferenceWhite(defaultsValue: Double, serverValue: Double?) -> (nits: Double, source: String) {
+        if defaultsValue >= 1 { return (defaultsValue, "override") }
+        if let serverValue, serverValue >= 1 { return (serverValue, "server") }
+        return (referenceWhiteNits, "default")
+    }
+
+    // EDR scale applied to PQ nits / 10000 (SDR white = 1.0).
+    static func edrScale(referenceWhiteNits: Double) -> Float { Float(10000 / referenceWhiteNits) }
+
     // SMPTE ST 2084 constants.
     private static let m1 = 2610.0 / 16384
     private static let m2 = 2523.0 / 4096 * 128
@@ -118,7 +129,7 @@ enum HDRPipeline {
     static func shade(sample: simd_float4, colour: StreamColourState) -> simd_float3 {
         let rgb = colour.yuvToRGB * sample
         if colour.hdrPQ {
-            let scale = Float(10000 / colour.stream.referenceWhiteNits)
+            let scale = edrScale(referenceWhiteNits: colour.stream.referenceWhiteNits)
             func edr(_ e: Float) -> Float { Float(pqEOTF(Double(e)) / 10000) * scale }
             return rollOff(colour.gamutToOutput * simd_float3(edr(rgb.x), edr(rgb.y), edr(rgb.z)), headroom: colour.headroom)
         }
@@ -133,7 +144,7 @@ enum HDRPipeline {
     static func shade(sample: simd_float4, selection: ColourSelection, encodingGamma: Float, headroom: Float, referenceWhiteNits: Double = HDRPipeline.referenceWhiteNits) -> simd_float3 {
         let rgb = selection.yuvToRGB * sample
         if selection.isPQ {
-            let scale = Float(10000 / referenceWhiteNits)
+            let scale = edrScale(referenceWhiteNits: referenceWhiteNits)
             func edr(_ e: Float) -> Float { Float(pqEOTF(Double(e)) / 10000) * scale }
             return rollOff(selection.sourceToOutput * simd_float3(edr(rgb.x), edr(rgb.y), edr(rgb.z)), headroom: headroom)
         }

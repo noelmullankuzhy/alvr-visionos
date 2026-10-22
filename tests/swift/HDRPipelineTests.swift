@@ -172,6 +172,18 @@ enum HDRPipelineTests {
         for value in [0.0, -1, 0.5, 1, 100, 203, 300] {
             expectEqual(HDRPipeline.referenceWhiteNits(defaultsValue: value), value >= 1 ? value : 203, "reference-white override \(value)")
         }
+        let server = HDRPipeline.resolveReferenceWhite(defaultsValue: 0, serverValue: 100)
+        expectEqual(server.nits, 100, "server reference white used")
+        expectEqual(server.source, "server", "server reference white source")
+        let absent = HDRPipeline.resolveReferenceWhite(defaultsValue: 0, serverValue: nil)
+        expectEqual(absent.nits, 203, "absent server value keeps the default")
+        expectEqual(absent.source, "default", "default source")
+        expectEqual(HDRPipeline.resolveReferenceWhite(defaultsValue: 0, serverValue: 0).source, "default", "invalid server value ignored")
+        let overridden = HDRPipeline.resolveReferenceWhite(defaultsValue: 150, serverValue: 100)
+        expectEqual(overridden.nits, 150, "local override wins")
+        expectEqual(overridden.source, "override", "override source")
+        expectEqual(HDRPipeline.edrScale(referenceWhiteNits: server.nits), Float(100), "EDR scale from server white")
+        expectEqual(HDRPipeline.edrScale(referenceWhiteNits: absent.nits), Float(10000.0 / 203), "EDR scale from default white")
         let gate = VideoStreamGate<String>()
         let stream = gate.streamStarted(hdrEnabled: true, output: .srgb, encodingGamma: 1, referenceWhiteNits: 100, payload: "fov")
         expectEqual(stream.referenceWhiteNits, 100, "reference white captured per stream")
