@@ -655,6 +655,24 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    select the eye label. Each eye keeps its own cursor and confirmed boundaries
    when switching back. Close the other eye yourself for L/R; Both labels a
    binocular observation, not two monocular measurements.
+   **Outline slider (about 1 min per eye; do this first).** Select **L** or **R** and
+   close the other eye. A thin (0.3°) bright green line, head-locked like the dots,
+   shows that eye's rendered frustum edge (the latest `m5_view` tangents of this app
+   session, else the device defaults L 1.7321,1,1.1918,1 / R mirrored) moved
+   **inset** degrees inwards along every ray. `inset 15.0 deg  area ..%` and the four
+   side limits (nasal/temporal/up/down, degrees from the head axis) are shown under
+   the centre cross. With no cursor selected (status ends `left drag: outline`),
+   **pinch and hold with the left hand and drag right/left**: horizontal hand travel
+   in the head frame changes the inset, **1 cm = 1°** (right = more inset, smaller
+   outline), snapped to 0.5°, 0–30°, relative to the inset at the grab. Release keeps
+   the value; a cancelled pinch restores it. Drag until the line sits just inside the
+   edge you can see all round, then **hold the right pinch >= 0.5 s** (no cursor) to
+   log it. Inset 0 is the full rendered frustum; the inset is how far inside it the
+   visible field ends (21 Oct, seal on: 12–17° per side). Each eye keeps its own
+   inset; Both shows no outline (it is monocular). When a ray cursor is selected the
+   left drag moves the cursor (step 3) instead (status ends `left drag: cursor`);
+   **quick right pinch the centre cross** to deselect it and get the slider back.
+   The dots stay as a dim 0.5° reference for per-ray checks.
 3. Look at a reachable dot until the system highlights it, then quick-pinch with
    the **right hand** to select the ray and cursor dot. A **yellow 1.6° ring**
    stays on the cursor independently of gaze. Wherever you look (including empty
@@ -665,7 +683,7 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    motion across the ray and towards/away from you is ignored. Each drag is
    relative to the dot the cursor was on when the pinch began, so dragging back
    returns exactly; release leaves the cursor on the dot shown. The cursor stops
-   at 10° and 70°. A cancelled drag returns the cursor to its starting dot; a quick
+   at the ray's first dot (10°, or 20° on intermediate rays) and 70°. A cancelled drag returns the cursor to its starting dot; a quick
    left pinch without movement does nothing (reserved). The pinch point comes
    from the spatial event's `inputDevicePose`. A drag that ends on a different
    dot logs one `dots` line (`action=step_out`/`step_in`, `via=step`) at release.
@@ -673,7 +691,8 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    pinch for >= 0.5 s and release**, wherever you look, to confirm it white.
    Each ray has one boundary per eye; confirming again replaces that ray's old
    boundary. Quick right-pinch a highlighted confirmed dot to clear it. Repeat
-   around all 24 rays (0° right, increasing counter-clockwise in 15° steps).
+   around the 24 main rays (0° right, increasing counter-clockwise in 15° steps);
+   the 24 intermediate rays (7.5°, 22.5°, …) are optional extra checks.
    The dim centre status shows eye, cursor ray/eccentricity and rays done.
    Use the centre cross between observations. The field follows your head;
    turning your head cannot bring an edge dot towards the centre. Gaze only
@@ -684,18 +703,24 @@ input during dots measurement; its state remains alive so auto-enter stays consu
    eye summaries and return to the lobby.
 5. Pull `diag-*.log` and run `diag-report.py` below. The **Boundary dots** section
    contains per-eye boundary tables, source references, and `visible_area_frac`.
-   An area requires all 24 rays and valid tangents; no missing boundary is inferred.
+   An area requires all 24 main rays and valid tangents; no missing boundary is inferred.
+   Its **Outline slider** part has a table per eye: each logged inset, the four
+   limits, `area_frac` (outline polygon area in tangent space / frustum area) and,
+   when the same logs hold confirmed dots for that eye, `max_dev_deg` plus a per-ray
+   table of dot eccentricity minus outline (positive: seen outside the outline).
 
-Geometry: 600 dots lie at radius **10 m**, 25 per ray at eccentricities
-10°, 12.5°, …, 70° from forward. Visible sphere diameter is 1.0° and collision
-diameter is 2.2°. Nearest centres are 2.5° apart; the inner ring's adjacent rays
-are about 2.60° apart. `BoundaryDotsTests` exhaustively checks all collision pairs
+Geometry: 1104 dots lie at radius **10 m** on 48 rays 7.5° apart: the 24 main
+rays (multiples of 15°) carry 25 dots at eccentricities 10°, 12.5°, …, 70° from
+forward, the 24 intermediate rays 21 dots from 20°. Visible sphere diameter is
+0.5° and collision diameter is 2.2°. Nearest centres are 2.5° apart; the inner
+ring's adjacent rays are about 2.60° apart and intermediate rays start where
+their neighbours are 2.56° apart. `BoundaryDotsTests` exhaustively checks all collision pairs
 and checks the direction angles. At a representative 64 mm IPD, each eye is
 32 mm from the head centre: its angular offset at 10 m is **0.183°**; the total
 between-eye disparity is about 0.367°. Per the GM's clarification, 0.2° is the
 **per-eye** target. It is well below the 2.5° radial dot spacing. Actual IPD,
 device-vs-head origin, headset fit, eye cant and pose latency also limit accuracy.
-The finite dot diameter, 2.5° radial quantisation, and 15° ray spacing limit
+The finite dot diameter, 2.5° radial quantisation, and 7.5° ray spacing limit
 boundary accuracy; 70° is the field's ceiling, not a measured visibility cutoff.
 Do not move the headset or change its fit between M5 capture and measurement.
 
@@ -711,7 +736,7 @@ has `InputTargetComponent(.indirect)`, `CollisionComponent`, and
 `HoverEffectComponent`. The black backdrop also has indirect input and a sphere
 collision shape, without hover. `SpatialEventGesture.targetedToAnyEntity()` reads
 spatial-event chirality and timestamps, retaining each event's initial target
-and start time until release. Left steps and right holds ignore the target;
+and start time until release. Left drags (cursor or outline slider) and right holds ignore the target;
 short right pinches use the system-selected entity. Unknown chirality is ignored. This follows Apple's documented
 [device-transform placement](https://developer.apple.com/documentation/visionos/placing-entities-using-head-and-device-transform)
 and [entity gesture requirements](https://developer.apple.com/documentation/realitykit/responding-to-gestures-on-an-entity).
@@ -733,7 +758,15 @@ DIAG dots t_ms=102 eye=L action=confirm ray_deg=45.000 ecc_deg=60.000 yaw_deg=50
 DIAG dots_summary t_ms=103 eye=L points=2 rays=0:30,90:32.5
 DIAG dots_summary t_ms=103 eye=R points=0 rays=none
 DIAG dots_summary t_ms=103 eye=Both points=0 rays=none
+DIAG dots_outline t_ms=104 eye=L inset_deg=15.000 nasal_deg=30.000 temporal_deg=45.001 up_deg=30.000 down_deg=35.001 tangent_source=device_default tangents=1.7321,1.0000,1.1918,1.0000
 ```
+
+`dots_outline` (right hold, no cursor, L or R): limits are the frustum side minus
+the inset, clamped at 0; `tangent_source` is `m5_view` or `device_default`;
+`tangents` (left,right,bottom,top) is the frustum the outline was drawn from.
+Outline code: `BoundaryDotsFrustum`, `BoundaryDotsSlider` in `BoundaryDots.swift`,
+tested by `tests/swift/BoundaryOutlineTests.swift` and
+`tools/diag/test_boundary_outline_report.py`.
 
 Actions are `cursor`, `step_out`, `step_in`, `confirm`, and `clear`.
 `via=gaze` identifies cursor selection/clear; `via=step` identifies stepping and

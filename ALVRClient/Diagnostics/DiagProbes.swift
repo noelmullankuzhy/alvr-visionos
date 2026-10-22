@@ -231,6 +231,10 @@ final class DiagRenderProbe {
                                      "tex_format": s.format.map(DiagProbes.formatName) ?? "unavailable",
                                      "viewport": String(format: "%.0f,%.0f,%.0f,%.0f", vp.originX, vp.originY, vp.width, vp.height),
                                      "tangents": String(format: "%.4f,%.4f,%.4f,%.4f", t.x, t.y, t.z, t.w)])
+                // Boundary dots draws its outline from these (view 0 = L, view 1 = R).
+                if s.drawable == 0 {
+                    BoundaryDotsTangents.record(view: s.view, left: Double(t.x), right: Double(t.y), bottom: Double(t.z), top: Double(t.w))
+                }
             }
             for d in 0..<drawableCount where !snapshot.maps.contains(where: { $0.drawable == d }) {
                 Diag.log("m5_vrr", ["drawable": d, "map": "none"])

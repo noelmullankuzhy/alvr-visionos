@@ -9,22 +9,26 @@ enum BoundaryDotsTests {
             expect(abs(a - b) < 1e-9, "\(message): \(a) vs \(b)")
         }
         let dots = BoundaryDots.layout
-        expectEqual(dots.count, 24 * 25, "24 rays with 25 eccentricities")
+        expectEqual(dots.count, 24 * 25 + 24 * 21, "24 main rays from 10 deg, 24 intermediate rays from 20 deg")
         expectEqual(Set(dots).count, dots.count, "unique targets")
         near(BoundaryDots.radius, 10, "metres")
-        near(BoundaryDots.visualDiameterDeg, 1, "visual diameter")
+        near(BoundaryDots.visualDiameterDeg, 0.5, "visual diameter")
         near(BoundaryDots.collisionDiameterDeg, 2.2, "collision diameter")
-        near(2 * asin(BoundaryDots.visualRadius / 10) * 180 / .pi, 1, "sphere angular diameter")
-        for ray in 0..<24 {
-            let points = dots.filter { $0.rayDeg == Double(ray * 15) }
-            expectEqual(points.count, 25, "ray \(ray)")
+        near(BoundaryDots.rayStepDeg, 7.5, "ray spacing")
+        near(2 * asin(BoundaryDots.visualRadius / 10) * 180 / .pi, 0.5, "sphere angular diameter")
+        for ray in 0..<48 {
+            let rayDeg = Double(ray) * 7.5
+            let first = ray % 2 == 0 ? 10.0 : 20.0
+            near(BoundaryDots.minEccDeg(rayDeg: rayDeg), first, "first ring on ray \(rayDeg)")
+            let points = dots.filter { $0.rayDeg == rayDeg }
+            expectEqual(points.count, ray % 2 == 0 ? 25 : 21, "ray \(rayDeg)")
             for (i, dot) in points.enumerated() {
-                near(dot.eccDeg, 10 + 2.5 * Double(i), "radial spacing")
+                near(dot.eccDeg, first + 2.5 * Double(i), "radial spacing")
                 near(simd_length(dot.direction), 1, "unit direction")
                 near(acos(-dot.direction.z) * 180 / .pi, dot.eccDeg, "polar eccentricity")
                 near(tan(dot.yawDeg * .pi / 180), dot.direction.x / -dot.direction.z, "horizontal tangent angle")
                 near(tan(dot.pitchDeg * .pi / 180), dot.direction.y / -dot.direction.z, "vertical tangent angle")
-                near(atan2(dot.direction.y, dot.direction.x) * 180 / .pi + (ray > 12 ? 360 : 0), dot.rayDeg, "CCW from right")
+                near(atan2(dot.direction.y, dot.direction.x) * 180 / .pi + (ray > 24 ? 360 : 0), dot.rayDeg, "CCW from right")
             }
         }
         // Exhaustive pairwise geometry, including inner-ring neighbours on different rays.
@@ -146,6 +150,12 @@ enum BoundaryDotsTests {
         expectEqual(BoundaryDotsDragMap.target(from: BoundaryDot(rayDeg: 0, eccDeg: 65), displacement: [0.2, 0, 0]).eccDeg, 70, "clamp at 70")
         expectEqual(BoundaryDotsDragMap.target(from: BoundaryDot(rayDeg: 0, eccDeg: 15), displacement: [-0.2, 0, 0]).eccDeg, 10, "clamp at 10")
         expectEqual(BoundaryDotsDragMap.target(from: horizontal, displacement: [.nan, 0, 0]), horizontal, "non-finite displacement ignored")
+        expectEqual(BoundaryDotsDragMap.target(from: BoundaryDot(rayDeg: 7.5, eccDeg: 25), displacement: [-0.2, 0, 0]).eccDeg, 20,
+                    "intermediate rays clamp at their first ring")
+        var intermediate = BoundaryDotsSession()
+        _ = intermediate.select(BoundaryDot(rayDeg: 187.5, eccDeg: 20))
+        expectEqual(intermediate.step(outward: false), nil, "20 degree floor on intermediate rays")
+        expect(intermediate.place(BoundaryDot(rayDeg: 187.5, eccDeg: 22.5)), "place on an intermediate ray")
 
         // Drag tracker: world hand positions, head rotation, cursor re-anchoring and release.
         let level = simd_quatd(ix: 0, iy: 0, iz: 0, r: 1)

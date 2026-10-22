@@ -426,11 +426,16 @@ def dots_coordinates(yaw, pitch, tangents):
 
 
 def dots_direction(ray, ecc):
-    """Return projected yaw/pitch for a point on the specified dot lattice."""
+    """Return projected yaw/pitch for a point on the specified dot lattice.
+
+    Main rays every 15 degrees start at 10 degrees; intermediate rays (odd multiples
+    of 7.5 degrees) start at 20 degrees.
+    """
     ray, ecc = number(ray), number(ecc)
     if (ray is None or ecc is None or not 0 <= ray < 360 or not 10 <= ecc <= 70
-            or abs(ray / 15 - round(ray / 15)) > 1e-7
-            or abs((ecc - 10) / 2.5 - round((ecc - 10) / 2.5)) > 1e-7):
+            or abs(ray / 7.5 - round(ray / 7.5)) > 1e-7
+            or abs((ecc - 10) / 2.5 - round((ecc - 10) / 2.5)) > 1e-7
+            or round(ray / 7.5) % 2 == 1 and ecc < 20):
         return None
     r, e = math.radians(ray), math.radians(ecc)
     return dict(ray_deg=ray, ecc_deg=ecc,
@@ -456,7 +461,8 @@ def dots_boundaries(records):
             for point in points:
                 coords = dots_coordinates(point['yaw_deg'], point['pitch_deg'], values)
                 converted.append(dict(point, **(coords or dict(x_pct=None, y_pct=None, u=None, v=None))))
-            complete = valid and len(points) == 24 and all(p['u'] is not None for p in converted)
+            main_rays = {p['ray_deg'] for p in points if round(p['ray_deg'] / 7.5) % 2 == 0}
+            complete = valid and len(main_rays) == 24 and all(p['u'] is not None for p in converted)
             area = None
             if complete:
                 area = abs(sum(a['u'] * b['v'] - b['u'] * a['v']
@@ -518,7 +524,7 @@ def dots_boundaries(records):
                         valid = False
                         break
                     points.append(point)
-            valid = valid and count is not None and count.is_integer() and len(points) <= count <= 600
+            valid = valid and count is not None and count.is_integer() and len(points) <= count <= DOTS_LAYOUT_COUNT
             snapshot(label, sorted(points, key=lambda p: p['ray_deg']) if valid else [],
                      record['source'], count, valid)
             active.pop(label, None)
@@ -526,8 +532,119 @@ def dots_boundaries(records):
     return rows
 
 
+DOTS_LAYOUT_COUNT = 24 * 25 + 24 * 21
+# Device m5_view tangents (left,right,bottom,top), 21 Oct, used by the app until a Metal session logs its own.
+OUTLINE_DEVICE_TANGENTS = {'L': (1.7321, 1.0, 1.1918, 1.0), 'R': (1.0, 1.7321, 1.1918, 1.0)}
+
+
+def outline_edge_ecc(ray, tangents):
+    """Eccentricity (degrees) where the ray at `ray` degrees (CCW from right) meets the frustum edge."""
+    left, right, bottom, top = tangents
+    c, s = math.cos(math.radians(ray)), math.sin(math.radians(ray))
+    reach = [right / c if c > 1e-12 else None, left / -c if c < -1e-12 else None,
+             top / s if s > 1e-12 else None, bottom / -s if s < -1e-12 else None]
+    return math.degrees(math.atan(min(r for r in reach if r is not None)))
+
+
+def outline_ecc(ray, inset, tangents):
+    return max(0.0, outline_edge_ecc(ray, tangents) - inset)
+
+
+def outline_points(inset, tangents):
+    """The app's closed polygon: rays every 5 degrees plus the four corner rays, inset along each ray."""
+    left, right, bottom, top = tangents
+    corners = [math.degrees(math.atan2(y, x)) % 360 for x, y in
+               ((right, top), (-left, top), (-left, -bottom), (right, -bottom))]
+    rays = []
+    for ray in sorted(list(range(0, 360, 5)) + corners):
+        if not rays or ray - rays[-1] > 1e-9:
+            rays.append(ray)
+    return [(ray, outline_ecc(ray, inset, tangents)) for ray in rays]
+
+
+def outline_area_frac(inset, tangents):
+    """Outline polygon area in tangent space over the frustum area."""
+    left, right, bottom, top = tangents
+    xy = [(math.tan(math.radians(e)) * math.cos(math.radians(r)), math.tan(math.radians(e)) * math.sin(math.radians(r)))
+          for r, e in outline_points(inset, tangents)]
+    twice = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(xy, xy[1:] + xy[:1]))
+    return abs(twice) / 2 / ((left + right) * (bottom + top))
+
+
+def outline_limits(eye, inset, tangents):
+    """(nasal, temporal, up, down) degrees: frustum side minus inset, clamped at 0. L nasal is its right side."""
+    left, right, bottom, top = tangents
+
+    def side(t):
+        return max(0.0, math.degrees(math.atan(t)) - inset)
+    nasal, temporal = (right, left) if eye == 'L' else (left, right)
+    return side(nasal), side(temporal), side(top), side(bottom)
+
+
+def dots_outlines(records):
+    """One row per `dots_outline` line, with the area it implies and, when the same log has
+    confirmed dots for that eye (latest walk), the per-ray deviation dot minus outline."""
+    boundaries = {}
+    for boundary in dots_boundaries(records):
+        if boundary['label'] == boundary['eye']:
+            boundaries[boundary['eye']] = boundary
+    rows = []
+    for record in records:
+        f = record['fields']
+        if record['topic'] != 'dots_outline' or f.get('eye') not in ('L', 'R'):
+            continue
+        eye, inset = f['eye'], number(f.get('inset_deg'))
+        if inset is None:
+            continue
+        tangents = tuple(number(v) for v in f.get('tangents', '').split(','))
+        note = None
+        if len(tangents) != 4 or any(v is None or v <= 0 for v in tangents):
+            note = 'invalid tangents: device default' if 'tangents' in f else 'tangents not logged: device default'
+            tangents = OUTLINE_DEVICE_TANGENTS[eye]
+        deviations = []
+        for point in (boundaries.get(eye) or {}).get('points', []):
+            expected = outline_ecc(point['ray_deg'], inset, tangents)
+            deviations.append(dict(ray_deg=point['ray_deg'], dot_ecc_deg=point['ecc_deg'],
+                                   outline_ecc_deg=expected, deviation_deg=point['ecc_deg'] - expected))
+        worst = max(deviations, key=lambda d: abs(d['deviation_deg'])) if deviations else None
+        rows.append(dict(eye=eye, source=record['source'], inset_deg=inset,
+                         nasal_deg=number(f.get('nasal_deg')), temporal_deg=number(f.get('temporal_deg')),
+                         up_deg=number(f.get('up_deg')), down_deg=number(f.get('down_deg')),
+                         tangent_source=f.get('tangent_source'), tangents=tangents, tangent_note=note,
+                         area_frac=outline_area_frac(inset, tangents), deviations=deviations,
+                         max_dev_deg=abs(worst['deviation_deg']) if worst else None,
+                         max_dev_ray=worst['ray_deg'] if worst else None))
+    return rows
+
+
+def outline_report(records):
+    lines = ['### Outline slider', '',
+             'Each `dots_outline` line is one RIGHT hold with no cursor: the rendered frustum of that eye, inset '
+             'by inset_deg along every ray. Limits are the logged frustum sides minus the inset (clamped at 0), in '
+             'degrees from the head axis. area_frac is the outline polygon area in tangent space over the frustum '
+             'area (5-degree rays plus corners, as drawn). deviation_deg is the confirmed dot eccentricity minus '
+             'the outline on that ray (positive: the dot was seen outside the outline), against the latest walk '
+             'of the same eye in these logs.', '']
+    rows = dots_outlines(records)
+    for eye in ('L', 'R'):
+        mine = [r for r in rows if r['eye'] == eye]
+        lines += ['Outline eye={}'.format(eye), '']
+        lines += table([dict({k: fmt(r[k]) for k in ('inset_deg', 'nasal_deg', 'temporal_deg', 'up_deg', 'down_deg',
+                                                    'area_frac', 'max_dev_deg', 'max_dev_ray')},
+                             source=r['source'], tangent_source=r['tangent_source'],
+                             tangents=','.join('{:g}'.format(t) for t in r['tangents']) +
+                             (' ({})'.format(r['tangent_note']) if r['tangent_note'] else '')) for r in mine],
+                       ('source', 'inset_deg', 'nasal_deg', 'temporal_deg', 'up_deg', 'down_deg', 'area_frac',
+                        'max_dev_deg', 'max_dev_ray', 'tangent_source', 'tangents')) + ['']
+        if mine and mine[-1]['deviations']:
+            lines += ['Per-ray deviation, latest outline ({}):'.format(cell(mine[-1]['source'])), '']
+            lines += table([{k: fmt(v) for k, v in d.items()} for d in mine[-1]['deviations']],
+                           ('ray_deg', 'dot_ecc_deg', 'outline_ecc_deg', 'deviation_deg')) + ['']
+    return lines
+
+
 def dots_report(records):
-    selected = [r for r in records if r['topic'] in ('dots', 'dots_summary', 'dots_session')]
+    selected = [r for r in records if r['topic'] in ('dots', 'dots_summary', 'dots_session', 'dots_outline')]
     lines = section(SECTIONS[11], selected)
     lines += ['Angles use a head-vs-eye-origin approximation: head-frame projected yaw/pitch '
               '(tan(yaw)=x/-z, tan(pitch)=y/-z), without correcting eye position or cant. '
@@ -541,7 +658,8 @@ def dots_report(records):
               'these units, only with all 24 rays. Values are not clamped to the drawable. '
               'Missing rays are not interpolated. Summaries contain the outermost confirmed point '
               'on each ray and are authoritative; unsummarised marks are labelled by their last source.', '',
-              'Resolution: 2.5 degrees radially, 15 degrees between rays; targets are 1 degree wide. '
+              'Resolution: 2.5 degrees radially, 7.5 degrees between rays (15 before the outline slider; '
+              'intermediate rays start at 20 degrees); dots are 0.5 degree wide (1 degree before), gaze targets 2.2. '
               'Use cursor stepping to reach visible dots beyond gaze targeting. '
               'If no starting dot on a ray can be highlighted, record that tracker limit separately.', '']
     for boundary in dots_boundaries(records):
@@ -552,6 +670,7 @@ def dots_report(records):
                       len(boundary['points']), boundary['status'], fmt(boundary['visible_area_frac'])), '']
         lines += table([{k: fmt(v) for k, v in point.items()} for point in boundary['points']],
                        ('ray_deg', 'ecc_deg', 'yaw_deg', 'pitch_deg', 'x_pct', 'y_pct', 'u', 'v')) + ['']
+    lines += outline_report(records)
     lines += measurements(selected, ('eye', 'action', 'ray_deg', 'ecc_deg', 'yaw_deg', 'pitch_deg', 'points', 'rays')) + ['']
     return lines
 
@@ -1101,7 +1220,7 @@ def generate(directory, sender_path=None):
     lines += dots_report(records)
     lines += resolution_report(records, directory)
     selected = topics('eye_badge', 'diag')
-    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session', 'rrm', 'grating', 'chartcap'}
+    known = {'m1', 'm1_config', 'codec', 'm5', 'm5_view', 'm5_vrr', 'rq', 'm6', 'm9', 'edr', 'pq', 'decode', 'net', 'corner', 'corner_summary', 'eye_badge', 'diag', 'dots', 'dots_summary', 'dots_session', 'dots_outline', 'rrm', 'grating', 'chartcap'}
     unknown = [r for r in records if r['topic'] not in known]
     lines += section(SECTIONS[10], selected + unknown, malformed + bad_sender + errors)
     lines += ['malformed lines skipped={}; malformed sender lines skipped={}; input file errors={}'.format(len(malformed), len(bad_sender), len(errors)), '',
