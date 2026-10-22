@@ -99,7 +99,7 @@ holds, from its own lens model. Check the `DIAG fov_sent ... render_1to1=3968x32
 
 Columns of `summary.tsv`: `name verdict encode_nvenc_ms encode_nvenc_p95 encode_latency_ms encode_ms encode_ms_p95
 decode_ms_mean decode_ms_p95 decode_ms_p95_max dropped_total dropped_pct dropped_selection_skip device_fps bitrate_mbps device_n notes`. The matrix
-`summary.tsv` gains `encode_nvenc_ms`, `encode_nvenc_p95` as its last two columns.
+`summary.tsv` gains `encode_nvenc_ms`, `encode_nvenc_p95` after `encode_over_budget`, before the six MTF columns.
 
 Files per rung in `<out>/<rung>/`: `sets.txt` (the session sets), `events.jsonl` (the probe), `telemetry/` (the copied
 directory), `device-stats.jsonl` (the 60 windows used), `summary.tsv` (the row), `pc-*.sh/.log`, `launch.log`, `pull.log`,

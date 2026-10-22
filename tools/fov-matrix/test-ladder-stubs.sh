@@ -125,7 +125,7 @@ t "[ -s $T/o1/dC-p1-100/device-stats.jsonl ] && [ -s $T/o1/dC-p1-100/events.json
 t "[ ! -e $T/pc/fov-matrix/session.orig.json ]" "no backup left on the PC"
 
 echo "== client never connects"
-tunnels_alive && { pkill -f 'sleep 600' 2>/dev/null; }; rm -f "$T/pc/tunnel.pids"
+tunnels_alive && { while read -r pid; do pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null; done < "$T/pc/tunnel.pids"; }; rm -f "$T/pc/tunnel.pids"
 ( NOCLIENT=1; export NOCLIENT; run "$T/o2" > "$T/o2.out" 2> "$T/o2.err" ); rc=$?
 t "[ $rc = 1 ]" "exit 1 (rc=$rc)"
 t "grep -q '^OPERATOR:' $T/o2.err" "one OPERATOR line printed"
