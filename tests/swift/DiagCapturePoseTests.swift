@@ -1,6 +1,6 @@
 // SOURCES: ALVRClient/Diagnostics/DiagCapturePose.swift
 // capture.json additions for the streaming DiagFrameCapture: the sRGB encode applied to linear drawables, the
-// render-vs-display head-pose delta (right-handed, yaw +Y, pitch +X, roll +Z, intrinsic Y-X-Z, degrees; delta = display - render)
+// render-vs-display head-pose delta (right-handed, yaw +Y, pitch +X, roll +Z, intrinsic Y-X-Z, degrees; delta = display relative to render, R_render^T R_display)
 // and the schema of the new "encoding", "source_pixel_format" and "pose" fields.
 import Foundation
 import simd
@@ -43,18 +43,26 @@ import simd
         var translated = rotation(yaw: 0.2, pitch: 0, roll: 0); translated.columns.3 = simd_float4(1, 2, 3, 1)
         expect(near(DiagCapturePose.angles(matrix: translated, t: 1).yawDeg, 0.2 * deg), "translation does not change the angles")
 
-        // Delta = display - render: display yaw +0.4 deg against render 0 gives +0.4.
-        let render = DiagCapturePose.Angles(yawDeg: 0, pitchDeg: 0, rollDeg: 0, t: 10)
-        let display = DiagCapturePose.Angles(yawDeg: 0.4, pitchDeg: -0.1, rollDeg: 0.05, t: 10.02)
+        // Delta = display orientation in the render camera frame: R_rel = R_render^T * R_display, intrinsic Y-X-Z.
+        let rad = Float.pi / 180
+        let render = rotation(yaw: 0, pitch: 0, roll: 0)
+        let display = rotation(yaw: 0.4 * rad, pitch: 0, roll: 0)
         let delta = DiagCapturePose.delta(render: render, display: display)
-        expect(near(delta.yawDeg, 0.4) && near(delta.pitchDeg, -0.1) && near(delta.rollDeg, 0.05), "delta = display - render")
-        let wrapped = DiagCapturePose.delta(render: .init(yawDeg: 179.9, pitchDeg: 0, rollDeg: 0, t: 0),
-                                            display: .init(yawDeg: -179.9, pitchDeg: 0, rollDeg: 0, t: 0))
-        expect(near(wrapped.yawDeg, 0.2), "delta wraps across +-180 to the short way round")
+        expect(near(delta.yawDeg, 0.4) && near(delta.pitchDeg, 0) && near(delta.rollDeg, 0), "display yaw +0.4 vs render 0 -> delta yaw +0.4")
+        let same = DiagCapturePose.delta(render: rotation(yaw: 0.3, pitch: 0.2, roll: -0.1), display: rotation(yaw: 0.3, pitch: 0.2, roll: -0.1))
+        expect(near(same.yawDeg, 0) && near(same.pitchDeg, 0) && near(same.rollDeg, 0), "equal poses -> zero delta")
+        // Pitched render camera, display yawed by 1 deg about the world Y: in the render camera frame that rotation axis is
+        // (0, cos30, -sin30), so yaw 0.866, roll -0.5 (not the world-frame Euler difference, which would say yaw 1, roll 0).
+        let pitched = DiagCapturePose.delta(render: rotation(yaw: 0, pitch: 30 * rad, roll: 0), display: rotation(yaw: 1 * rad, pitch: 30 * rad, roll: 0))
+        expect(near(pitched.yawDeg, 0.866, 0.002), "pitched render: delta yaw 0.866, got \(pitched.yawDeg)")
+        expect(near(pitched.pitchDeg, 0.0, 0.01), "pitched render: delta pitch ~0, got \(pitched.pitchDeg)")
+        expect(near(pitched.rollDeg, -0.5, 0.002), "pitched render: delta roll -0.5, got \(pitched.rollDeg)")
+        var moved = display; moved.columns.3 = simd_float4(5, 6, 7, 1)
+        expect(near(DiagCapturePose.delta(render: render, display: moved).yawDeg, 0.4), "translation ignored in the delta")
 
         // capture.json schema round trip.
         var json: [String: Any] = ["trigger": ["reason": "request_file"]]
-        DiagCapturePose.annotate(&json, sourcePixelFormat: "rgba16Float", render: render, display: display, simYawDitherRad: 3e-5)
+        DiagCapturePose.annotate(&json, sourcePixelFormat: "rgba16Float", render: render, display: display, renderT: 10, displayT: 10.02, simYawDitherRad: 3e-5)
         let object = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) as! [String: Any]
         expectEqual(object["encoding"] as? String, "srgb", "encoding field")
         expectEqual(object["source_pixel_format"] as? String, "rgba16Float", "source_pixel_format field")
@@ -71,7 +79,7 @@ import simd
         expect(near(d["yaw"]!, 0.4), "delta yaw in the file")
         expect(near(pose["sim_yaw_dither_rad"] as! Double, 3e-5, 1e-9), "sim_yaw_dither_rad number")
         var device: [String: Any] = [:]
-        DiagCapturePose.annotate(&device, sourcePixelFormat: "bgra8Unorm_srgb", render: render, display: display, simYawDitherRad: nil)
+        DiagCapturePose.annotate(&device, sourcePixelFormat: "bgra8Unorm_srgb", render: render, display: display, renderT: 10, displayT: 10.02, simYawDitherRad: nil)
         let devicePose = (try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: device)) as! [String: Any])["pose"] as! [String: Any]
         expect(devicePose["sim_yaw_dither_rad"] is NSNull, "sim_yaw_dither_rad is null off the simulator")
         finishTests("DiagCapturePose")
