@@ -67,6 +67,8 @@ struct ALVRClientApp: App {
     @State private var realityKitImmersionStyle: ImmersionStyle = ALVRClientApp.gStore.settings.enableProgressive ? .progressive : .mixed
     
     static let shared = ALVRClientApp()
+
+    init() { ClientLogging.installConsoleStamp() }
     static var showedChangelog = false
     @State private var showChangelog = false
     
