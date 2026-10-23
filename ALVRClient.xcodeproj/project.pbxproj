@@ -57,6 +57,8 @@
 		D3C0DE012C0000010011AA01 /* DecodeInFlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C0DE022C0000010011AA02 /* DecodeInFlight.swift */; };
 		D3C0DE012C0000010011AA11 /* LaunchFlags.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C0DE022C0000010011AA12 /* LaunchFlags.swift */; };
 		1B0CB0012C0000010011AA01 /* LockedBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B0CB0012C0000010011AA02 /* LockedBox.swift */; };
+		D3C0DE012C0000010011AA21 /* BrightTrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C0DE022C0000010011AA22 /* BrightTrace.swift */; };
+		D3C0DE012C0000010011AA31 /* BrightTraceSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3C0DE022C0000010011AA32 /* BrightTraceSession.swift */; };
 		E70C9AEA2C9377F50035B4F9 /* Codable.swift in Sources */ = {isa = PBXBuildFile; fileRef = E70C9AE92C9377F20035B4F9 /* Codable.swift */; };
 		E71352CE2DF784C60079F12B /* GCController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71352CD2DF784BF0079F12B /* GCController.swift */; };
 		E71DEF972C18D478008A2074 /* RealityKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71DEF932C18D325008A2074 /* RealityKit.swift */; };
@@ -204,6 +206,8 @@
 		D3C0DE022C0000010011AA02 /* DecodeInFlight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecodeInFlight.swift; sourceTree = "<group>"; };
 		D3C0DE022C0000010011AA12 /* LaunchFlags.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchFlags.swift; sourceTree = "<group>"; };
 		1B0CB0012C0000010011AA02 /* LockedBox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LockedBox.swift; sourceTree = "<group>"; };
+		D3C0DE022C0000010011AA22 /* BrightTrace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrightTrace.swift; sourceTree = "<group>"; };
+		D3C0DE022C0000010011AA32 /* BrightTraceSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrightTraceSession.swift; sourceTree = "<group>"; };
 		E70C9AE92C9377F20035B4F9 /* Codable.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Codable.swift; sourceTree = "<group>"; };
 		E71352CD2DF784BF0079F12B /* GCController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GCController.swift; sourceTree = "<group>"; };
 		E71DEF932C18D325008A2074 /* RealityKit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealityKit.swift; sourceTree = "<group>"; };
@@ -386,6 +390,8 @@
 				D3C0DE022C0000010011AA02 /* DecodeInFlight.swift */,
 				D3C0DE022C0000010011AA12 /* LaunchFlags.swift */,
 				1B0CB0012C0000010011AA02 /* LockedBox.swift */,
+				D3C0DE022C0000010011AA22 /* BrightTrace.swift */,
+				D3C0DE022C0000010011AA32 /* BrightTraceSession.swift */,
 				0FDF7F3AB0664D5089D91DE3 /* PerformanceTracker.swift */,
 				A7E1C0DE5EED000000000001 /* StreamTelemetry.swift */,
 				5BD00478C3614F7DB55D935E /* PerformanceOverlayView.swift */,
@@ -602,6 +608,8 @@
 				D3C0DE012C0000010011AA01 /* DecodeInFlight.swift in Sources */,
 				D3C0DE012C0000010011AA11 /* LaunchFlags.swift in Sources */,
 				1B0CB0012C0000010011AA01 /* LockedBox.swift in Sources */,
+				D3C0DE012C0000010011AA21 /* BrightTrace.swift in Sources */,
+				D3C0DE012C0000010011AA31 /* BrightTraceSession.swift in Sources */,
 				93F10375671142039BA634E8 /* PerformanceTracker.swift in Sources */,
 				A7E1C0DE5EED000000000002 /* StreamTelemetry.swift in Sources */,
 				E7AC9193873D48A2B7122E11 /* PerformanceOverlayView.swift in Sources */,

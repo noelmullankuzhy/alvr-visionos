@@ -423,6 +423,10 @@ struct Entry: View {
                                    key: HDRPipeline.probeKey, $gStore.settings.hdrProbe) {
                             HDRProbe.updateEnabled(defaultsValue: LaunchFlags.bool(HDRPipeline.probeKey, setting: gStore.settings.hdrProbe))
                         }
+                        flagToggle("Brightness trace", "Per-frame input and output luma to Documents/diag/brighttrace-*.jsonl, a 1 Hz BRIGHTTRACE log line and jump lines. Applies immediately.",
+                                   key: BrightTrace.defaultsKey, $gStore.settings.brightnessTrace) {
+                            BrightTraceSession.updateEnabled(LaunchFlags.bool(BrightTrace.defaultsKey, setting: gStore.settings.brightnessTrace))
+                        }
                         flagToggle("Eye badges (L/R)", "Shows per-eye labels in the Metal renderer. Applies immediately.",
                                    key: EyeBadgeFlag.defaultsKey, $gStore.settings.eyeBadges) {
                             EyeBadgeFlag.shared.update(defaultsValue: LaunchFlags.bool(EyeBadgeFlag.defaultsKey, setting: gStore.settings.eyeBadges))

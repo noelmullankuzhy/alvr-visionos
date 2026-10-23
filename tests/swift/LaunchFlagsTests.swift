@@ -30,10 +30,11 @@ private func testOldSettingsDecodeWithDefaults() {
     expectEqual(s.hdrHeadroom, 0, "headroom default automatic")
     expectEqual(s.cropInsetDeg, 15, "crop inset default 15")
     expectEqual(s.hdrReferenceWhiteNits, 0, "reference white default stream value")
-    expect(!s.eyeBadges && !s.hdrProbe, "diagnostics flags default off")
-    let new = Data(#"{"asyncDecode":true,"hdrHeadroom":2}"#.utf8)
+    expect(!s.eyeBadges && !s.hdrProbe && !s.brightnessTrace, "diagnostics flags default off")
+    let new = Data(#"{"asyncDecode":true,"hdrHeadroom":2,"brightnessTrace":true}"#.utf8)
     let t = try? JSONDecoder().decode(GlobalSettings.self, from: new)
-    expect(t?.asyncDecode == true && t?.hdrHeadroom == 2, "new keys round-trip from data")
+    expect(t?.asyncDecode == true && t?.hdrHeadroom == 2 && t?.brightnessTrace == true, "new keys round-trip from data")
+    expect(LaunchFlags.bool("ALVRBrightTrace", setting: false, arguments: ["ALVRBrightTrace": "YES"]), "-ALVRBrightTrace YES turns the trace on")
 }
 
 @main
