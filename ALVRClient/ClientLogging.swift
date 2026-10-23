@@ -65,18 +65,31 @@ extension ClientLogging {
         }
     }
 
+    /// Points fds 1 and 2 at `write`; if either dup2 fails, puts the saved fds back and returns false.
+    static func redirectConsole(to write: Int32, savedOut: Int32, savedErr: Int32,
+                                dup2Fn: (Int32, Int32) -> Int32 = { dup2($0, $1) }) -> Bool {
+        if dup2Fn(write, STDOUT_FILENO) >= 0 && dup2Fn(write, STDERR_FILENO) >= 0 { return true }
+        let failure = errno
+        if savedOut >= 0 { _ = dup2Fn(savedOut, STDOUT_FILENO) }
+        if savedErr >= 0 { _ = dup2Fn(savedErr, STDERR_FILENO) }
+        errno = failure
+        return false
+    }
+
     /// Stamps every console line (stdout and stderr) with wall-clock and monotonic time when the flag is on.
     static func installConsoleStamp(_ defaults: UserDefaults = .standard) {
         guard consoleStampEnabled(defaults), !consoleStampInstalled else { return }
         consoleStampInstalled = true
-        let out = dup(STDOUT_FILENO)
+        let out = dup(STDOUT_FILENO), err = dup(STDERR_FILENO)
         var fds: [Int32] = [-1, -1]
-        if out < 0 || pipe(&fds) != 0 || dup2(fds[1], STDOUT_FILENO) < 0 || dup2(fds[1], STDERR_FILENO) < 0 {
-            let err = errno
-            if out >= 0 { writeAll(out, Array("CONSOLESTAMP v1 failed errno=\(err)\n".utf8)) }
+        guard out >= 0, err >= 0, pipe(&fds) == 0, redirectConsole(to: fds[1], savedOut: out, savedErr: err) else {
+            let failure = errno
+            if out >= 0 { writeAll(out, Array("CONSOLESTAMP v1 failed errno=\(failure)\n".utf8)) }
+            for fd in [out, err] + fds where fd >= 0 { close(fd) }
             return
         }
         close(fds[1])
+        close(err)
         setvbuf(stdout, nil, _IOLBF, 0)
         setvbuf(stderr, nil, _IONBF, 0)
         let readFD = fds[0]
