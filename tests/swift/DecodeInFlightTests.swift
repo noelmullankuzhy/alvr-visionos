@@ -90,6 +90,15 @@ private func testConfiguredSlotWait() {
     expectEqual(DecodeInFlight.configuredSlotWait([DecodeInFlight.slotWaitKey: "abc"]), 0.1, "non-numeric keeps 100 ms")
 }
 
+private func testNonFiniteFlagsIgnored() {
+    for text in ["nan", "inf"] {
+        expectEqual(DecodeInFlight.configuredLimit([DecodeInFlight.inFlightKey: text]), 2, "\(text) keeps two")
+        expectEqual(DecodeInFlight.configuredSlotWait([DecodeInFlight.slotWaitKey: text]), 0.1, "\(text) keeps 100 ms")
+    }
+    expectEqual(DecodeInFlight.configuredLimit([DecodeInFlight.inFlightKey: NSNumber(value: Double.nan)]), 2, "NSNumber nan keeps two")
+    expectEqual(DecodeInFlight.configuredSlotWait([DecodeInFlight.slotWaitKey: NSNumber(value: Double.nan)]), 0.1, "NSNumber nan keeps 100 ms")
+}
+
 private func testConfiguredLimitInFlight() {
     var four = DecodeInFlight(limit: 4)
     for i in 1...4 { expect(four.submit(timestampNs: UInt64(i), submitNs: 1) != nil, "limit 4 accepts submit \(i)") }
@@ -120,6 +129,7 @@ enum DecodeInFlightTests {
         testGateBlocksThirdSubmit()
         testConfiguredLimit()
         testConfiguredSlotWait()
+        testNonFiniteFlagsIgnored()
         testConfiguredLimitInFlight()
         testGateRefusesAtOnceWithZeroTimeout()
         finishTests("DecodeInFlightTests")
