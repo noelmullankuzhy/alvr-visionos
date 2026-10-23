@@ -40,6 +40,25 @@ enum ConsoleStampTests {
         let out = s.feed([euro[0], euro[1]], prefix: p) + s.feed([euro[2], 10], prefix: p)
         expectEqual(out, bytes("<P1>€\n"), "split multibyte")
 
+        // Redirect with a recording fake dup2: no real fds are touched.
+        func redirect(failing: Int32?) -> (Bool, [[Int32]]) {
+            var calls = [[Int32]]()
+            let ok = ClientLogging.redirectConsole(to: 50, savedOut: 60, savedErr: 61) { from, to in
+                calls.append([from, to])
+                return to == failing ? -1 : to
+            }
+            return (ok, calls)
+        }
+        let okRun = redirect(failing: nil)
+        expectEqual(okRun.0, true, "redirect success")
+        expectEqual(okRun.1, [[50, 1], [50, 2]], "redirect success calls")
+        let err2 = redirect(failing: 2)
+        expectEqual(err2.0, false, "fd 2 failure")
+        expectEqual(err2.1, [[50, 1], [50, 2], [60, 1], [61, 2]], "fd 2 failure restores both")
+        let err1 = redirect(failing: 1)
+        expectEqual(err1.0, false, "fd 1 failure")
+        expectEqual(err1.1, [[50, 1], [60, 1], [61, 2]], "fd 1 failure restores both")
+
         // End to end on a pipe pair we own.
         var inFD: [Int32] = [0, 0], outFD: [Int32] = [0, 0]
         expect(pipe(&inFD) == 0 && pipe(&outFD) == 0, "pipes")
