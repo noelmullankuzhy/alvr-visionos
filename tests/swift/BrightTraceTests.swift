@@ -254,6 +254,63 @@ private func testEyeTargets() {
     expectEqual(r.eyes.map(\.eye), ["L", "R"], "eye identity on the record")
 }
 
+private func testQueueCaps() {
+    // Admission: at most `capacity` in flight, the excess dropped and counted until taken.
+    var gate = BrightTraceGate(capacity: 2)
+    expect(gate.admit() && gate.admit(), "admits up to capacity")
+    expect(!gate.admit() && !gate.admit(), "full: dropped")
+    expectEqual(gate.inFlight, 2, "drops do not count as in flight")
+    gate.release()
+    expect(gate.admit(), "a release makes room")
+    expectEqual(gate.takeDropped(), 2, "drops counted")
+    expectEqual(gate.takeDropped(), 0, "drop count resets when taken")
+    // Slow consumer: 1000 offers against 8 slots never hold more than 8.
+    var slow = BrightTraceGate(capacity: BrightTrace.maxFramesInFlight)
+    var peak = 0
+    for i in 0..<1000 {
+        _ = slow.admit()
+        peak = max(peak, slow.inFlight)
+        if i % 10 == 0 { slow.release() }
+    }
+    expect(peak == BrightTrace.maxFramesInFlight && slow.takeDropped() == 1000 - 100 - BrightTrace.maxFramesInFlight,
+           "bounded under a slow consumer: the excess dropped")
+    // The 1 Hz line reports both drop counts.
+    var summary = BrightTraceSummary()
+    _ = summary.take(nowMs: 0, tMs: 0)
+    summary.addDropped(frames: 3, lines: 2)
+    let line = summary.take(nowMs: 1_000, tMs: 1) ?? ""
+    expect(line.contains(" dropped=3") && line.contains(" dropped_lines=2"), "drops in the summary: \(line)")
+}
+
+private func testBufferPool() {
+    var pool = BrightTracePool<Int>(capacity: 4)
+    // Four frames before any allocation lands: four requests, then no more.
+    let requests = (0..<5).map { _ in pool.take(length: 100) }
+    expect(requests.prefix(4).allSatisfy { $0.buffer == nil && $0.allocate == 100 && $0.evicted == nil }, "empty pool: allocate off the render thread")
+    expect(requests[4].buffer == nil && requests[4].allocate == nil, "requests bounded by capacity")
+    for id in 0..<4 { pool.allocated(id, length: 100) }
+    expectEqual(pool.count, 4, "four buffers")
+    let small = pool.take(length: 100)
+    expect(small.buffer != nil && small.allocate == nil, "a fitting idle buffer is reused")
+    pool.put(small.buffer!, length: 100)
+    // A larger readback replaces an undersized idle buffer instead of failing for good.
+    let large = pool.take(length: 400)
+    expect(large.buffer == nil && large.allocate == 400 && large.evicted != nil, "undersized buffer evicted, larger one requested")
+    expectEqual(pool.count, 4, "capacity kept while replacing")
+    pool.allocated(9, length: 400)
+    expectEqual(pool.take(length: 400).buffer, 9, "the larger buffer serves the next readback")
+    // All four in use: nothing to evict, no allocation beyond capacity.
+    let held = (0..<3).compactMap { _ in pool.take(length: 100).buffer }
+    expectEqual(held.count, 3, "the rest taken")
+    let none = pool.take(length: 100)
+    expect(none.buffer == nil && none.allocate == nil && none.evicted == nil, "capacity bound: no readback this frame")
+    expectEqual(pool.count, 4, "never more than capacity")
+    pool.put(held[0], length: 100)
+    _ = pool.take(length: 800)
+    pool.allocated(nil, length: 800)
+    expectEqual(pool.count, 3, "a failed allocation frees its slot")
+}
+
 @main
 enum BrightTraceTests {
     static func main() {
@@ -266,6 +323,8 @@ enum BrightTraceTests {
         testRecordEncoding()
         testOutputRows()
         testEyeTargets()
+        testQueueCaps()
+        testBufferPool()
         finishTests("BrightTrace")
     }
 }

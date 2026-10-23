@@ -31,6 +31,13 @@ enum BrightTrace {
     // Exponents closer than this belong to one output level.
     static let levelGap = 0.05
     static let maxFileBytes = 50 * 1024 * 1024
+    // All brighttrace files together; the oldest are deleted.
+    static let maxTotalBytes = 200 * 1024 * 1024
+    // Frames admitted but not yet written (each holds its decoded buffer until sampled), and lines queued on the
+    // sink; the excess is dropped and counted in the 1 Hz line.
+    static let maxFramesInFlight = 8
+    static let maxQueuedLines = 32
+    static let maxReadbackBuffers = 4
     static let summaryIntervalMs = 1000
 
     static func gridCoordinates(origin: Double, length: Double, count: Int = gridSize) -> [Double] {
@@ -247,7 +254,7 @@ struct BrightTraceJumpDetector {
 // The 1 Hz BRIGHTTRACE line. Trace queue only.
 struct BrightTraceSummary {
     private var startMs: Int?
-    private var frames = 0, new = 0, generations = 0, attachments = 0, jumps = 0
+    private var frames = 0, new = 0, generations = 0, attachments = 0, jumps = 0, droppedFrames = 0, droppedLines = 0
     private var inputs: [Double] = [], outputs: [Double] = [], exponents: [Double] = []
     // Per eye: exponents, log gains (fit intercepts) and jumps.
     private var eyeExponents: [String: [Double]] = [:], eyeLogGains: [String: [Double]] = [:], eyeJumps: [String: Int] = [:]
@@ -273,6 +280,11 @@ struct BrightTraceSummary {
         for eye in eyes { eyeJumps[eye, default: 0] += 1 }
     }
 
+    mutating func addDropped(frames: Int, lines: Int) {
+        droppedFrames += frames
+        droppedLines += lines
+    }
+
     mutating func take(nowMs: Int, tMs: Int) -> String? {
         guard let start = startMs else { startMs = nowMs; return nil }
         guard nowMs - start >= BrightTrace.summaryIntervalMs || nowMs < start else { return nil }
@@ -285,11 +297,63 @@ struct BrightTraceSummary {
             + " exp_min=\(f(exponents.min())) exp_max=\(f(exponents.max())) levels=\(levels.max() ?? 0)"
             + zip(eyes, levels).map { " levels_\($0)=\($1)" }.joined()
             + " gen_changes=\(generations) variants=\(variants.sorted().joined(separator: ",")) attach_changes=\(attachments) jumps=\(jumps)"
-            + eyes.map { " jumps_\($0)=\(eyeJumps[$0] ?? 0)" }.joined()
+            + eyes.map { " jumps_\($0)=\(eyeJumps[$0] ?? 0)" }.joined() + " dropped=\(droppedFrames) dropped_lines=\(droppedLines)"
         self = BrightTraceSummary()
         startMs = nowMs
         return line
     }
+}
+
+// Admission cap: at most `capacity` in flight, the excess dropped and counted. Caller locks.
+struct BrightTraceGate {
+    let capacity: Int
+    private(set) var inFlight = 0
+    private var dropped = 0
+
+    init(capacity: Int) { self.capacity = capacity }
+
+    mutating func admit() -> Bool {
+        guard inFlight < capacity else { dropped += 1; return false }
+        inFlight += 1
+        return true
+    }
+
+    mutating func release() { inFlight = max(inFlight - 1, 0) }
+
+    mutating func takeDropped() -> Int {
+        defer { dropped = 0 }
+        return dropped
+    }
+}
+
+// Readback buffers, at most `capacity` idle, in use or being allocated. take hands out an idle buffer that fits, or
+// asks for one to be allocated off the render thread, making room by evicting the smallest idle (undersized) buffer,
+// which the caller releases off the render thread too. Caller locks; this is bookkeeping only.
+struct BrightTracePool<Buffer> {
+    let capacity: Int
+    private var idle: [(buffer: Buffer, length: Int)] = []
+    private(set) var count = 0
+
+    init(capacity: Int) { self.capacity = capacity }
+
+    mutating func take(length: Int) -> (buffer: Buffer?, allocate: Int?, evicted: Buffer?) {
+        if let i = idle.firstIndex(where: { $0.length >= length }) { return (idle.remove(at: i).buffer, nil, nil) }
+        var evicted: Buffer?
+        if count >= capacity, let i = idle.indices.min(by: { idle[$0].length < idle[$1].length }) {
+            evicted = idle.remove(at: i).buffer
+            count -= 1
+        }
+        guard count < capacity else { return (nil, nil, nil) }
+        count += 1
+        return (nil, length, evicted)
+    }
+
+    // A requested allocation finished; nil: it failed and its slot is free.
+    mutating func allocated(_ buffer: Buffer?, length: Int) {
+        if let buffer { idle.append((buffer, length)) } else { count -= 1 }
+    }
+
+    mutating func put(_ buffer: Buffer, length: Int) { idle.append((buffer, length)) }
 }
 
 // Output grid of one eye in its texture slice: the screen-space cell centres of the viewport mapped through the

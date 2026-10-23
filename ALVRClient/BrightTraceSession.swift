@@ -5,9 +5,11 @@
 // the trace on: copies references and scalars, encodes one blit per output grid row into a pooled shared buffer in the
 // presenting command buffer and adds a completion handler. Everything else runs on one utility serial queue: the Y-plane
 // grid of the retained decoded buffer (read-only lock), the CVPixelBuffer attachments, the readback decode after GPU
-// completion, the jsonl line (DiagSink, Documents/diag/brighttrace-<UTC>.jsonl, 50 MB rotation), the jump detector and
-// the 1 Hz BRIGHTTRACE line through alvr_log at Info (forwarded to the streamer log like HDRPROBE). Off: the caller's
-// one flag check. No waitUntilCompleted or getBytes on the render thread.
+// completion, the jsonl line (DiagSink, Documents/diag/brighttrace-<UTC>.jsonl, 50 MB rotation, 200 MB in total), the
+// jump detector and the 1 Hz BRIGHTTRACE line through alvr_log at Info (forwarded to the streamer log like HDRPROBE).
+// Off: the caller's one atomic load. No waitUntilCompleted, getBytes or buffer allocation on the render thread: readback
+// buffers are allocated on a utility queue, the render thread only takes the bookkeeping lock. Bounded: at most
+// maxFramesInFlight frames admitted and maxQueuedLines lines queued on the sink; drops are counted in the 1 Hz line.
 //
 // visionOS exposes no per-frame EDR headroom or display brightness (UIScreen is unavailable, LayerRenderer, its drawable
 // and RealityKit have none, checked against the visionOS 27 SDK), and no drawable colour space: drawable_colorspace is
@@ -18,27 +20,30 @@ import Foundation
 import CoreVideo
 import Metal
 import CompositorServices
+import Synchronization
 
 final class BrightTraceSession {
     // One eye's colour texture, slice, viewport and the rate map (and layer) mapping it (BrightTrace.targets).
     typealias View = (eye: String, texture: MTLTexture, slice: Int, viewport: MTLViewport, rateMap: MTLRasterizationRateMap?, layer: Int)
 
-    private static let lock = NSLock()
-    private static var on = LaunchFlags.bool(BrightTrace.defaultsKey, setting: ALVRClientApp.gStore.settings.brightnessTrace)
-    static var enabled: Bool { lock.lock(); defer { lock.unlock() }; return on }
-    static func updateEnabled(_ value: Bool) { lock.lock(); on = value; lock.unlock() }
+    private static let on = Atomic<Bool>(LaunchFlags.bool(BrightTrace.defaultsKey, setting: ALVRClientApp.gStore.settings.brightnessTrace))
+    static var enabled: Bool { on.load(ordering: .relaxed) }
+    static func updateEnabled(_ value: Bool) { on.store(value, ordering: .relaxed) }
 
     static let shared = BrightTraceSession()
     private let queue = DispatchQueue(label: "uk.lumenio.alvr.brighttrace", qos: .utility)
-    private let poolLock = NSLock()
-    private var pool: [MTLBuffer] = []
-    private var buffersMade = 0
-    private static let maxBuffers = 4
+    private let allocationQueue = DispatchQueue(label: "uk.lumenio.alvr.brighttrace.alloc", qos: .utility)
+    // Bookkeeping only (admission, line cap, pool); never held across an allocation, encode or I/O.
+    private let lock = NSLock()
+    private var frames = BrightTraceGate(capacity: BrightTrace.maxFramesInFlight)
+    private var lines = BrightTraceGate(capacity: BrightTrace.maxQueuedLines)
+    private var pool = BrightTracePool<MTLBuffer>(capacity: BrightTrace.maxReadbackBuffers)
     private var seq = 0   // render thread only
 
     // Trace queue only.
     private lazy var sink = DiagSink(directory: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("diag"),
-                                     maxBytes: BrightTrace.maxFileBytes, now: { Date() }, console: nil, name: "brighttrace", fileExtension: "jsonl")
+                                     maxBytes: BrightTrace.maxFileBytes, now: { Date() }, console: nil, name: "brighttrace", fileExtension: "jsonl",
+                                     maxTotalBytes: BrightTrace.maxTotalBytes)
     private var state = BrightTraceState()
     private var detector = BrightTraceJumpDetector()
     private var summary = BrightTraceSummary()
@@ -51,6 +56,10 @@ final class BrightTraceSession {
                colour: StreamColourState, secret: Bool, realityKit: Bool, asyncDecode: Bool, renderStartS: Double, presentS: Double,
                layerFormat: MTLPixelFormat?, overlayAlpha: Float) {
         seq += 1
+        lock.lock()
+        let admitted = frames.admit()
+        lock.unlock()
+        guard admitted else { return }
         // Scalars and the decoded buffer only: the drawable textures are not retained past this frame.
         let id = seq, tMs = Int(Date().timeIntervalSince1970 * 1000), pixelBuffer = queuedFrame.imageBuffer, ts = queuedFrame.timestamp
         let drawableFormat = views.first?.texture.pixelFormat ?? .invalid, eyes = views.map(\.eye)
@@ -69,7 +78,12 @@ final class BrightTraceSession {
         commandBuffer.addCompletedHandler { [self] done in
             let ok = done.status == .completed
             queue.async { [self] in
-                defer { if let buffer = readback?.buffer { poolLock.lock(); pool.append(buffer); poolLock.unlock() } }
+                defer {
+                    lock.lock()
+                    if let buffer = readback?.buffer { pool.put(buffer, length: buffer.length) }
+                    frames.release()
+                    lock.unlock()
+                }
                 let outputs = eyes.indices.map { i -> [Double]? in
                     guard ok, let readback, let format = readback.formats[i] else { return nil }
                     return readback.rows[i].luma(readback.buffer.contents().advanced(by: readback.offsets[i]), rowBytes: readback.rowBytes[i], format: format)
@@ -109,12 +123,21 @@ final class BrightTraceSession {
         let rowBytes = rows.indices.map { (rows[$0].span * (formats[$0] == .half ? 8 : 4) + 255) & ~255 }
         let offsets = rows.indices.map { i in rows.indices.prefix(i).reduce(0) { $0 + rowBytes[$1] * rows[$1].rows.count } }
         let length = rows.indices.reduce(0) { $0 + rowBytes[$1] * rows[$1].rows.count }
-        poolLock.lock()
-        var buffer = pool.firstIndex { $0.length >= length }.map { pool.remove(at: $0) }
-        if buffer == nil, buffersMade < Self.maxBuffers { buffersMade += 1; buffer = device.makeBuffer(length: length, options: .storageModeShared) }
-        poolLock.unlock()
-        guard let buffer else { return nil }
-        guard let blit = commandBuffer.makeBlitCommandEncoder() else { poolLock.lock(); pool.append(buffer); poolLock.unlock(); return nil }
+        lock.lock()
+        let taken = pool.take(length: length)
+        lock.unlock()
+        if let allocate = taken.allocate {
+            // No buffer fits: this frame has no output samples; a buffer for the next is made (and any evicted one
+            // released) off the render thread.
+            let evicted = taken.evicted
+            allocationQueue.async { [self] in
+                let made = device.makeBuffer(length: allocate, options: .storageModeShared)
+                withExtendedLifetime(evicted) {}
+                lock.lock(); pool.allocated(made, length: allocate); lock.unlock()
+            }
+        }
+        guard let buffer = taken.buffer else { return nil }
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else { lock.lock(); pool.put(buffer, length: buffer.length); lock.unlock(); return nil }
         blit.label = "Brightness trace readback"
         for (i, view) in views.enumerated() where formats[i] != nil {
             for (r, y) in rows[i].rows.enumerated() {
@@ -138,7 +161,14 @@ final class BrightTraceSession {
         }
         state.annotate(&record)
         summary.add(record)
-        sink.write(record.line())
+        lock.lock()
+        let queued = lines.admit()
+        summary.addDropped(frames: frames.takeDropped(), lines: lines.takeDropped())
+        lock.unlock()
+        if queued {
+            sink.write(record.line())
+            sink.async { [self] in lock.lock(); lines.release(); lock.unlock() }
+        }
         let nowMs = HDRProbeClock.monotonicMs()
         if let jump = detector.check(record, nowMs: nowMs) {
             summary.addJump(eyes: jump.eyes)

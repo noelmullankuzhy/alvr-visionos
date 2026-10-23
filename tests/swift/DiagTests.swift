@@ -82,6 +82,36 @@ private func testRotation() {
            "names are brighttrace-<UTC stamp>.jsonl, rotated: \(names)")
 }
 
+private func testRetention() {
+    // prune: the oldest of this sink's files (modification time) go first until the rest fit; others untouched.
+    let dir = tempDir("retention")
+    let fm = FileManager.default
+    // (file, bytes, seconds since last written)
+    for (file, size, age) in [("brighttrace-20261023T000000Z.jsonl", 100, 30.0), ("brighttrace-20261023T000001Z.jsonl", 100, 20),
+                              ("brighttrace-20261023T000001Z-1.jsonl", 100, 10), ("brighttrace-20261023T000002Z.jsonl", 0, 0),
+                              ("diag-20261023T000000Z.log", 500, 40)] {
+        let url = dir.appendingPathComponent(file)
+        try? Data(count: size).write(to: url)
+        try? fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -age)], ofItemAtPath: url.path)
+    }
+    DiagSink.prune(directory: dir, name: "brighttrace", fileExtension: "jsonl", budget: 150, keep: "brighttrace-20261023T000002Z.jsonl")
+    let left = ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).sorted()
+    expectEqual(left, ["brighttrace-20261023T000001Z-1.jsonl", "brighttrace-20261023T000002Z.jsonl", "diag-20261023T000000Z.log"],
+                "oldest deleted until the others fit the budget; the current file and other sinks kept")
+    // A sink with a total limit: rotation keeps the whole set within it (current file at its size limit included).
+    let dir2 = tempDir("retention-sink")
+    let sink = DiagSink(directory: dir2, maxBytes: 50, now: { Date(timeIntervalSince1970: 1_792_500_000) }, console: nil,
+                        name: "brighttrace", fileExtension: "jsonl", maxTotalBytes: 130)
+    for i in 0..<8 { sink.write("line \(i) " + String(repeating: "x", count: 30)) }
+    sink.flush()
+    let files = ((try? fm.contentsOfDirectory(atPath: dir2.path)) ?? [])
+    let total = files.reduce(0) { $0 + (((try? fm.attributesOfItem(atPath: dir2.appendingPathComponent($1).path))?[.size] as? Int) ?? 0) }
+    expect(total <= 130 && files.count == 3, "total within 130 bytes: \(files.count) files, \(total) bytes")
+    // Same-second rotation reuses freed names; age, not name, decides what goes.
+    let kept = files.compactMap { try? String(contentsOf: dir2.appendingPathComponent($0), encoding: .utf8) }.map { String($0.prefix(6)) }.sorted()
+    expectEqual(kept, ["line 5", "line 6", "line 7"], "the newest lines kept")
+}
+
 private func testConsoleSink() {
     let dir = tempDir("console")
     let lock = NSLock()
@@ -386,6 +416,7 @@ enum DiagTests {
         testLineFormat()
         testEnabled()
         testRotation()
+        testRetention()
         testConsoleSink()
         testConcurrentWrites()
         testSuspensionRecovery()

@@ -123,6 +123,7 @@ final class DiagSink {
     private let name: String   // files are <name>-<UTC stamp>.<fileExtension>
     private let fileExtension: String
     private let maxBytes: Int
+    private let maxTotalBytes: Int   // all of this sink's files together, the current one counted at maxBytes
     private let now: () -> Date
     private let console: ((String) -> Void)?
     private let opener: (String) -> Int32
@@ -133,11 +134,12 @@ final class DiagSink {
 
     // opener: open(2) with O_CREAT | O_EXCL; replaceable to simulate suspension in tests.
     init(directory: URL, maxBytes: Int, now: @escaping () -> Date, console: ((String) -> Void)?, opener: ((String) -> Int32)? = nil,
-         name: String = "diag", fileExtension: String = "log") {
+         name: String = "diag", fileExtension: String = "log", maxTotalBytes: Int = .max) {
         self.directory = directory
         self.name = name
         self.fileExtension = fileExtension
         self.maxBytes = maxBytes
+        self.maxTotalBytes = maxTotalBytes
         self.now = now
         self.console = console
         self.opener = opener ?? { open($0, O_WRONLY | O_CREAT | O_EXCL, 0o644) }
@@ -213,9 +215,29 @@ final class DiagSink {
             let fd = opener(directory.appendingPathComponent(file).path)
             if fd >= 0 {
                 handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+                if maxTotalBytes < .max {
+                    Self.prune(directory: directory, name: name, fileExtension: fileExtension, budget: maxTotalBytes - maxBytes, keep: file)
+                }
                 return
             }
             if errno != EEXIST { return }
+        }
+    }
+
+    // Deletes this sink's oldest files (<name>-*.<ext>, by modification time, then name: a name freed by a deletion can
+    // be reused within the same second) until the rest, `keep` excluded, total at most `budget` bytes.
+    static func prune(directory: URL, name: String, fileExtension: String, budget: Int, keep: String) {
+        let fm = FileManager.default
+        let files = ((try? fm.contentsOfDirectory(atPath: directory.path)) ?? [])
+            .filter { $0 != keep && $0.hasPrefix(name + "-") && $0.hasSuffix("." + fileExtension) }
+            .map { file -> (name: String, size: Int, modified: Date) in
+                let attributes = (try? fm.attributesOfItem(atPath: directory.appendingPathComponent(file).path)) ?? [:]
+                return (file, attributes[.size] as? Int ?? 0, attributes[.modificationDate] as? Date ?? .distantPast)
+            }
+            .sorted { ($0.modified, $0.name) < ($1.modified, $1.name) }
+        var total = files.reduce(0) { $0 + $1.size }
+        for file in files where total > budget {
+            if (try? fm.removeItem(at: directory.appendingPathComponent(file.name))) != nil { total -= file.size }
         }
     }
 }
