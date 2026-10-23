@@ -215,7 +215,7 @@ struct EntryControls: View {
                     else {
                         await openStreamSpace(fullImmersion: gStore.settings.streamFullImmersion)
                     }
-                    VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
+                    VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.decoder.format)
                     if gStore.settings.eyeDecodeWindows && eventHandler.streamingActive {
                         EyeDecodeWindows.shared.start()
                         // Right opens from the Left window's onAppear, so it can be placed beside it.

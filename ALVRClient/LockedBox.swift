@@ -102,21 +102,27 @@ final class LastQueuedFrameSlot<Frame> {
 
 // EventHandler's decoder session and its format: stop() tears them down while the decode thread copies them.
 final class DecoderSlot<Session: AnyObject, Format: AnyObject> {
-    private let box = LockedBox<(session: Session?, format: Format?)>((nil, nil))
+    private let box = LockedBox<(session: Session?, format: Format?, codec: Int)>((nil, nil, -1))
 
     var session: Session? { box.get().session }
     var format: Format? { box.get().format }
+    var codec: Int { box.get().codec }
 
-    // Both from one decoder, or nil.
-    func snapshot() -> (session: Session, format: Format)? {
+    // Session, format and codec of one decoder, or nil.
+    func snapshot() -> (session: Session, format: Format, codec: Int)? {
         let current = box.get()
         guard let session = current.session, let format = current.format else { return nil }
-        return (session, format)
+        return (session, format, current.codec)
     }
 
-    // Installs a decoder (nil, nil tears down) and returns the old session to finish outside the lock.
+    // Installs a decoder with its codec (nil, nil, -1 tears down) and returns the old session to finish outside the lock.
     @discardableResult
-    func replace(session: Session?, format: Format?) -> Session? {
-        box.exchange((session, format)).session
+    func replace(session: Session?, format: Format?, codec: Int) -> Session? {
+        box.exchange((session, format, codec)).session
+    }
+
+    // A codec for the current session (DecoderConfig with a decoder already up, or a reset to -1).
+    func setCodec(_ codec: Int) {
+        box.update { $0.codec = codec }
     }
 }
