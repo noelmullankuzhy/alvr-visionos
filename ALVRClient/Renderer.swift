@@ -322,6 +322,9 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 depthFormat: layerRenderer?.configuration.depthFormat ?? renderDepthFormat,
                 viewCount: layerRenderer?.properties.viewCount ?? renderViewCount
         )
+        if uniformSnapshot {
+            print("RENDERFIX uniform_snapshot=on")
+        }
         if depthPassFix {
             print("RENDERFIX depth_pass=on")
             self.videoFrameDepthOnlyPipelineState = try! Renderer.buildRenderPipelineForVideoFrameDepthWithDevice(
@@ -687,6 +690,29 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         planeUniformBufferIndex = (planeUniformBufferIndex + 1) % maxPlanesDrawn
         planeUniformBufferOffset = alignedPlaneUniformSize * planeUniformBufferIndex
         planeUniforms = UnsafeMutableRawPointer(dynamicPlaneUniformBuffer.contents() + planeUniformBufferOffset).bindMemory(to:PlaneUniform.self, capacity:1)
+    }
+
+    // Binds the current `uniforms` slot. -ALVRUniformSnapshot: a setVertexBytes copy of it, so the GPU never reads a
+    // ring slot (six, no completion fence) that later frames rewrite; off: the ring slot, as before.
+    private func bindUniforms(_ renderEncoder: any MTLRenderCommandEncoder) {
+        if uniformSnapshot {
+            var snapshot = uniforms.pointee
+            renderEncoder.setVertexBytes(&snapshot, length: MemoryLayout<UniformsArray>.stride, index: BufferIndex.uniforms.rawValue)
+        } else {
+            renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset:uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+        }
+    }
+
+    // Binds the current `planeUniforms` slot, likewise. Off: `rebind` binds the buffer, otherwise only its offset moves.
+    private func bindPlaneUniforms(_ renderEncoder: any MTLRenderCommandEncoder, rebind: Bool = true) {
+        if uniformSnapshot {
+            var snapshot = planeUniforms.pointee
+            renderEncoder.setVertexBytes(&snapshot, length: MemoryLayout<PlaneUniform>.stride, index: BufferIndex.planeUniforms.rawValue)
+        } else if rebind {
+            renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
+        } else {
+            renderEncoder.setVertexBufferOffset(planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
+        }
     }
 
     // Writes FOV/tangents/etc information to the uniform buffer.
@@ -1483,7 +1509,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderEncoder.setDepthClipMode(.clamp)
 #endif
         
-        renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset:uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+        bindUniforms(renderEncoder)
         
         renderEncoder.setViewports(viewports)
         
@@ -1539,8 +1565,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderEncoder.setDepthClipMode(.clamp)
 #endif
         
-        renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset:uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue) // unused
+        bindUniforms(renderEncoder)
+        bindPlaneUniforms(renderEncoder) // unused
         
         renderEncoder.setViewports(viewports)
         
@@ -1587,8 +1613,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderEncoder.setCullMode(.back)
         renderEncoder.setFrontFacing(.counterClockwise)
         renderEncoder.setViewports(viewports)
-        renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset:uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue) // unused
+        bindUniforms(renderEncoder)
+        bindPlaneUniforms(renderEncoder) // unused
         
         if viewports.count > 1 {
             var viewMappings = (0..<viewports.count).map {
@@ -1626,12 +1652,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 self.planeUniforms[0].planeTransform = plane.originFromAnchorTransform
                 self.planeUniforms[0].planeColor = planeToColor(plane: plane)
                 self.planeUniforms[0].planeDoProximity = 1.0
-                if firstBind {
-                    renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                    firstBind = false
-                } else {
-                    renderEncoder.setVertexBufferOffset(planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                }
+                bindPlaneUniforms(renderEncoder, rebind: firstBind)
+                firstBind = false
                 
                 renderEncoder.setTriangleFillMode(.fill)
                 renderEncoder.drawIndexedPrimitives(type: faces.primitive == .triangle ? MTLPrimitiveType.triangle : MTLPrimitiveType.line,
@@ -1659,12 +1681,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 self.planeUniforms[0].planeTransform = plane.originFromAnchorTransform
                 self.planeUniforms[0].planeColor = planeToLineColor(plane: plane)
                 self.planeUniforms[0].planeDoProximity = 0.0
-                if firstBind {
-                    renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                    firstBind = false
-                } else {
-                    renderEncoder.setVertexBufferOffset(planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                }
+                bindPlaneUniforms(renderEncoder, rebind: firstBind)
+                firstBind = false
                 
                 renderEncoder.setTriangleFillMode(.lines)
                 renderEncoder.drawIndexedPrimitives(type: faces.primitive == .triangle ? MTLPrimitiveType.triangle : MTLPrimitiveType.line,
@@ -1694,12 +1712,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 self.planeUniforms[0].planeTransform = (matTransform.columns.3.asFloat3()).asFloat4x4() * (basisScale * matTransform.orientationOnly().asFloat4x4())
                 self.planeUniforms[0].planeColor = basisColors[i]
                 self.planeUniforms[0].planeDoProximity = 0.0
-                if firstBind {
-                    renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                    firstBind = false
-                } else {
-                    renderEncoder.setVertexBufferOffset(planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                }
+                bindPlaneUniforms(renderEncoder, rebind: firstBind)
+                firstBind = false
                 
                 renderEncoder.setTriangleFillMode(.lines)
                 renderEncoder.drawPrimitives(type: .triangle, vertexStart: 3*i, vertexCount: 3)
@@ -1719,12 +1733,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 self.planeUniforms[0].planeTransform = matTransform
                 self.planeUniforms[0].planeColor = color
                 self.planeUniforms[0].planeDoProximity = 0.0
-                if firstBind {
-                    renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                    firstBind = false
-                } else {
-                    renderEncoder.setVertexBufferOffset(planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                }
+                bindPlaneUniforms(renderEncoder, rebind: firstBind)
+                firstBind = false
 
                 renderEncoder.setTriangleFillMode(.lines)
                 renderEncoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: ibexMeshVertexCount)
@@ -1766,8 +1776,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderEncoder.setCullMode(.back)
         renderEncoder.setFrontFacing(.counterClockwise)
         renderEncoder.setViewports(viewports)
-        renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset:uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue) // unused
+        bindUniforms(renderEncoder)
+        bindPlaneUniforms(renderEncoder) // unused
 
         if viewports.count > 1 {
             var viewMappings = (0..<viewports.count).map {
@@ -1842,12 +1852,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             self.planeUniforms[0].planeTransform = plane.originFromAnchorTransform
             self.planeUniforms[0].planeColor = planeColor
             self.planeUniforms[0].planeDoProximity = 1.0
-            if firstBind {
-                renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset:planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-                firstBind = false
-            } else {
-                renderEncoder.setVertexBufferOffset(planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
-            }
+            bindPlaneUniforms(renderEncoder, rebind: firstBind)
+            firstBind = false
             
             renderEncoder.setTriangleFillMode(.fill)
             renderEncoder.drawIndexedPrimitives(type: faces.primitive == .triangle ? MTLPrimitiveType.triangle : MTLPrimitiveType.line,
@@ -1946,8 +1952,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderEncoder.setCullMode(.back)
         renderEncoder.setFrontFacing(.counterClockwise)
         renderEncoder.setViewports(viewports)
-        renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
-        renderEncoder.setVertexBuffer(dynamicPlaneUniformBuffer, offset: planeUniformBufferOffset, index: BufferIndex.planeUniforms.rawValue)
+        bindUniforms(renderEncoder)
+        bindPlaneUniforms(renderEncoder)
 
         if viewports.count > 1 {
             var viewMappings = (0..<viewports.count).map {
@@ -2128,7 +2134,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderEncoder.setDepthClipMode(.clamp)
 #endif
         
-        renderEncoder.setVertexBuffer(dynamicUniformBuffer, offset:uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
+        bindUniforms(renderEncoder)
 
         return renderEncoder
     }

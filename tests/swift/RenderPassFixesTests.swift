@@ -43,12 +43,27 @@ private func testDepthPipelineColourWrites() {
     expect(!on.colorAttachments[0].isBlendingEnabled, "on: no blending either")
 }
 
+// -ALVRUniformSnapshot covers every ring binding only if each goes through Renderer.bindUniforms/bindPlaneUniforms: the
+// raw ring binds appear once each, inside those helpers.
+private func testUniformBindingsGoThroughHelpers() {
+    let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    guard let source = try? String(contentsOf: root.appendingPathComponent("ALVRClient/Renderer.swift"), encoding: .utf8) else {
+        return expect(false, "Renderer.swift readable")
+    }
+    func count(_ needle: String) -> Int { source.components(separatedBy: needle).count - 1 }
+    expectEqual(count("setVertexBuffer(dynamicUniformBuffer"), 1, "uniform ring bound only in bindUniforms")
+    expectEqual(count("setVertexBuffer(dynamicPlaneUniformBuffer"), 1, "plane ring bound only in bindPlaneUniforms")
+    expectEqual(count("setVertexBufferOffset(planeUniformBufferOffset"), 1, "plane ring offset moved only in bindPlaneUniforms")
+    expect(count("bindUniforms(renderEncoder)") >= 6 && count("bindPlaneUniforms(renderEncoder") >= 9, "call sites use the helpers")
+}
+
 @main
 enum RenderPassFixesTests {
     static func main() {
         testFlagParsing()
         testDepthPassDescriptor()
         testDepthPipelineColourWrites()
+        testUniformBindingsGoThroughHelpers()
         finishTests("RenderPassFixes")
     }
 }
