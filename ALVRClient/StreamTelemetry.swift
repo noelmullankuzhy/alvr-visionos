@@ -101,6 +101,10 @@ struct StreamStatsRecord: Encodable, Equatable {
     var renderLoopHz: Double
     var repeatsNoNewFrame: Int
     var repeatsRetry: Int
+    // A received frame with the previous received frame's timestamp (the server reused a pose timestamp), and
+    // a dequeued frame drawn with the presented frame's timestamp: a new image counted as a repeat.
+    var receivedSameTimestamp: Int
+    var repeatsSameTimestamp: Int
     var lateFrames: Int
     var decodeMsMean: Double?
     var decodeMsP95: Double?
@@ -204,6 +208,12 @@ final class StreamTelemetry {
     private var uniquePresented = 0
     private var repeatsNoNewFrame = 0
     private var repeatsRetry = 0
+    private var receivedSameTimestamp = 0
+    private var repeatsSameTimestamp = 0
+    private var lastReceivedTimestampNs: UInt64? = nil
+    // Timestamp of the frame this render loop dequeued as new, until its recordRender; a loop that returns
+    // without a drawable never renders it, and the next selection replaces it.
+    private var selectedNewTimestampNs: UInt64? = nil
     private var lateFrames = 0
     private var decodeMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var receiveToPresentMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
@@ -250,6 +260,8 @@ final class StreamTelemetry {
             active = true
             resetWindow(clock())
             lastPresentedTimestampNs = nil
+            lastReceivedTimestampNs = nil
+            selectedNewTimestampNs = nil
             presentedThisWindow.removeAll(keepingCapacity: true)
             presentedLastWindow.removeAll(keepingCapacity: true)
         }
@@ -286,6 +298,10 @@ final class StreamTelemetry {
         let now = clock()
         lock.lock()
         framesReceived += 1
+        if timestampNs == lastReceivedTimestampNs {
+            receivedSameTimestamp += 1
+        }
+        lastReceivedTimestampNs = timestampNs
         receiveRingTimestamps[receiveRingIndex] = timestampNs
         receiveRingNs[receiveRingIndex] = now
         receiveRingIndex = (receiveRingIndex + 1) % StreamTelemetry.receiveRingSize
@@ -369,6 +385,7 @@ final class StreamTelemetry {
         }
         pollWaitMs.add(Double(pollWaitNs) / 1_000_000.0)
         droppedSelectionSkip += skipped
+        selectedNewTimestampNs = source == .new ? timestampNs : nil
         switch source {
         case .new:
             if let ts = timestampNs {
@@ -419,6 +436,9 @@ final class StreamTelemetry {
             }
             if ts == lastPresentedTimestampNs {
                 framesRepeated += 1
+                if ts == selectedNewTimestampNs {
+                    repeatsSameTimestamp += 1
+                }
             } else {
                 framesPresented += 1
                 lastPresentedTimestampNs = ts
@@ -432,6 +452,7 @@ final class StreamTelemetry {
         } else {
             framesBlank += 1
         }
+        selectedNewTimestampNs = nil
         let record = takeWindowIfDue(now)
         lock.unlock()
         emit(record)
@@ -501,6 +522,8 @@ final class StreamTelemetry {
         uniquePresented = 0
         repeatsNoNewFrame = 0
         repeatsRetry = 0
+        receivedSameTimestamp = 0
+        repeatsSameTimestamp = 0
         lateFrames = 0
         decodeInFlightMax = 0
         decodeMs.reset()
@@ -545,6 +568,8 @@ final class StreamTelemetry {
             renderLoopHz: perSecond(loops),
             repeatsNoNewFrame: repeatsNoNewFrame,
             repeatsRetry: repeatsRetry,
+            receivedSameTimestamp: receivedSameTimestamp,
+            repeatsSameTimestamp: repeatsSameTimestamp,
             lateFrames: lateFrames,
             decodeMsMean: ms3(decodeMs.mean),
             decodeMsP95: ms3(decodeMs.percentile(0.95)),
