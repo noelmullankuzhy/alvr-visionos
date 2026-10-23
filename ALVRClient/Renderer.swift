@@ -802,9 +802,9 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             sched_yield()
 
             // If visionOS skipped our last frame, let the queue fill up a bit
-            // One locked copy: EventHandler.stop() clears lastQueuedFrame on another thread (a nil check then `!` crashed).
+            // One locked copy: EventHandler.stop() clears lastQueued on another thread (a nil check then `!` crashed).
             objc_sync_enter(EventHandler.shared.frameQueueLock)
-            let last = EventHandler.shared.lastQueuedFrame
+            let last = EventHandler.shared.lastQueued.frame
             let queueCount = EventHandler.shared.frameQueue.count
             objc_sync_exit(EventHandler.shared.frameQueueLock)
             if let last = last {
@@ -833,7 +833,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
 
         // Recycle old frame with old timestamp/anchor (visionOS doesn't do timewarp for us?)
         objc_sync_enter(EventHandler.shared.frameQueueLock)
-        let lastForReuse = EventHandler.shared.lastQueuedFrame
+        let lastForReuse = EventHandler.shared.lastQueued.frame
         objc_sync_exit(EventHandler.shared.frameQueueLock)
         if queuedFrame == nil, let lastForReuse = lastForReuse {
             //print("Using last frame...")
@@ -850,7 +850,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             let waitDeadlineNs = FramePacing.waitDeadlineNs(startNs: layerClockNs(LayerRenderer.Clock().now), renderingDeadlineNs: layerClockNs(timing.renderingDeadline), gpuP95Ns: gpuTimes.p95Ns(), marginNs: FramePacing.marginNs)
             while true {
                 objc_sync_enter(EventHandler.shared.frameQueueLock)
-                let lastFrame = EventHandler.shared.lastQueuedFrame
+                let lastFrame = EventHandler.shared.lastQueued.frame
                 let choice = FramePacing.choose(queue: EventHandler.shared.frameQueue.map { $0.timestamp }, targetNs: targetNs, lastTimestamp: lastFrame?.timestamp, lastSubmitted: lastFrame == nil || lastFrame!.timestamp == EventHandler.shared.lastSubmittedTimestamp, canWait: FramePacing.budgetRemains(nowNs: layerClockNs(LayerRenderer.Clock().now), waitDeadlineNs: waitDeadlineNs))
                 if case .queued(let index) = choice {
                     queuedFrame = EventHandler.shared.frameQueue[index]
@@ -901,7 +901,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             drawables = frame.queryDrawables()
             if drawables.isEmpty {
                 if queuedFrame != nil {
-                    EventHandler.shared.lastQueuedFrame = queuedFrame
+                    EventHandler.shared.lastQueued.frame = queuedFrame
                 }
                 return
             }
@@ -911,7 +911,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         else {
             guard let _drawable = frame.queryDrawable() else {
                 if queuedFrame != nil {
-                    EventHandler.shared.lastQueuedFrame = queuedFrame
+                    EventHandler.shared.lastQueued.frame = queuedFrame
                 }
                 return
             }
@@ -921,7 +921,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
 #else
         guard let _drawable = frame.queryDrawable() else {
             if queuedFrame != nil {
-                EventHandler.shared.lastQueuedFrame = queuedFrame
+                EventHandler.shared.lastQueued.frame = queuedFrame
             }
             return
         }
@@ -1012,7 +1012,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                                                                   render1to1: crop ? render1to1 : nil, recommended: recommended))
                 }
 
-                EventHandler.shared.viewFovs = [leftFovCorrected, rightFovCorrected]
+                EventHandler.shared.viewFovsBox.set([leftFovCorrected, rightFovCorrected])
                 if let debugEyes {
                     EventHandler.shared.debugEyeTangentsRecord = DebugEyeTangents.captureRecord(
                         argument: debugEyes.argument, requested: debugEyes.tangents, fovRenderScale: settings.fovRenderScale,
@@ -1094,7 +1094,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             }
             // TODO: I suspect Apple changes view transforms every frame to account for pupil swim, figure out how to fit the latest view transforms in?
             // Since pupil swim is purely an axial thing, maybe we can just timewarp the view transforms as well idk
-            let viewFovs = EventHandler.shared.viewFovs
+            let viewFovs = EventHandler.shared.viewFovsBox.get()
             let viewTransforms = EventHandler.shared.viewTransforms
 
             let targetTimestamp = vsyncTime// + (Double(min(alvr_get_head_prediction_offset_ns(), WorldTracker.maxPrediction)) / Double(NSEC_PER_SEC))
@@ -1115,7 +1115,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         else if !renderOwnership.offlineDiagnostics {
             EventHandler.shared.sendBootstrapTrackingIfNeeded()
 #if DEBUG_ALVR_TRACKING
-            let viewFovs = EventHandler.shared.viewFovs
+            let viewFovs = EventHandler.shared.viewFovsBox.get()
             let viewTransforms = EventHandler.shared.viewTransforms
 
             let targetTimestamp = vsyncTime// + (Double(min(alvr_get_head_prediction_offset_ns(), WorldTracker.maxPrediction)) / Double(NSEC_PER_SEC))
@@ -1173,7 +1173,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             frameIsSuitableForDisplaying = false
             print("Origin is bad, no frame")
         }
-        if EventHandler.shared.videoFormat == nil {
+        if EventHandler.shared.decoder.format == nil {
             frameIsSuitableForDisplaying = false
             print("Missing video format, no frame")
         }
@@ -1335,8 +1335,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         frame.endSubmission()
         
         if !renderOwnership.offlineDiagnostics {
-            EventHandler.shared.lastQueuedFrame = queuedFrame
-            EventHandler.shared.lastQueuedFramePose = framePreviouslyPredictedPose
+            EventHandler.shared.lastQueued.set(queuedFrame, pose: framePreviouslyPredictedPose)
         }
     }
     

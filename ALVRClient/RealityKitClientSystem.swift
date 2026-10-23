@@ -1486,9 +1486,9 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             Thread.sleep(forTimeInterval: 0.00001)
             
             // If visionOS skipped our last frame, let the queue fill up a bit
-            // One locked copy: EventHandler.stop() clears lastQueuedFrame on another thread (a nil check then `!` crashed).
+            // One locked copy: EventHandler.stop() clears lastQueued on another thread (a nil check then `!` crashed).
             objc_sync_enter(EventHandler.shared.frameQueueLock)
-            let last = EventHandler.shared.lastQueuedFrame
+            let last = EventHandler.shared.lastQueued.frame
             let queueCount = EventHandler.shared.frameQueue.count
             objc_sync_exit(EventHandler.shared.frameQueueLock)
             if let last = last {
@@ -1515,7 +1515,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
         
         // Recycle old frame with old timestamp/anchor (visionOS doesn't do timewarp for us?)
         objc_sync_enter(EventHandler.shared.frameQueueLock)
-        let lastForReuse = EventHandler.shared.lastQueuedFrame
+        let lastForReuse = EventHandler.shared.lastQueued.frame
         objc_sync_exit(EventHandler.shared.frameQueueLock)
         if queuedFrame == nil, let lastForReuse = lastForReuse {
             //print("Using last frame...")
@@ -1559,7 +1559,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
                 let rightAngles = DummyMetalRenderer.renderViewTransforms.count > 1 ? atan(renderTangents[1]) : leftAngles
                 let leftFov = AlvrFov(left: -leftAngles.x, right: leftAngles.y, up: leftAngles.z, down: -leftAngles.w)
                 let rightFov = AlvrFov(left: -rightAngles.x, right: rightAngles.y, up: rightAngles.z, down: -rightAngles.w)
-                EventHandler.shared.viewFovs = [leftFov, rightFov]
+                EventHandler.shared.viewFovsBox.set([leftFov, rightFov])
                 EventHandler.shared.viewTransforms = [DummyMetalRenderer.renderViewTransforms[0], DummyMetalRenderer.renderViewTransforms.count > 1 ? DummyMetalRenderer.renderViewTransforms[1] : DummyMetalRenderer.renderViewTransforms[0]]
 
                 EventHandler.shared.sentViewTangents = DummyMetalRenderer.renderTangents
@@ -1624,7 +1624,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
         else if EventHandler.shared.alvrInitialized  {
             // TODO: I suspect Apple changes view transforms every frame to account for pupil swim, figure out how to fit the latest view transforms in?
             // Since pupil swim is purely an axial thing, maybe we can just timewarp the view transforms as well idk
-            let viewFovs = EventHandler.shared.viewFovs
+            let viewFovs = EventHandler.shared.viewFovsBox.get()
             let viewTransforms = EventHandler.shared.viewTransforms
             
             let rkLatencyLimit = max(WorldTracker.maxPredictionRK, UInt64(visionProVsyncPrediction.vsyncLatency * Double(NSEC_PER_SEC))) //UInt64(Double(visionProVsyncPrediction.vsyncDelta * 6.0) * Double(NSEC_PER_SEC))
@@ -1682,7 +1682,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             frameIsSuitableForDisplaying = false
             print("Origin is bad, no frame")
         }
-        if EventHandler.shared.videoFormat == nil {
+        if EventHandler.shared.decoder.format == nil {
             frameIsSuitableForDisplaying = false
             print("Missing video format, no frame")
         }
@@ -1773,8 +1773,7 @@ class RealityKitClientSystemCorrectlyAssociated : System {
             renderer.fadeInOverlayAlpha = 0.0
         }
 
-        EventHandler.shared.lastQueuedFrame = queuedFrame // crashed once?
-        EventHandler.shared.lastQueuedFramePose = framePreviouslyPredictedPose
+        EventHandler.shared.lastQueued.set(queuedFrame, pose: framePreviouslyPredictedPose)
         
         let submitTime = CACurrentMediaTime()
         

@@ -133,9 +133,9 @@ class EventHandler: ObservableObject {
     var renderStarted = false
     
     var inputRunning = false
-    var vtDecompressionSession:VTDecompressionSession? = nil
-    var videoFormat:CMFormatDescription? = nil
-    var currentCodec: Int = -1
+    // stop() tears the decoder down on the event thread while handleNals copies it on the decode thread: the session,
+    // its format and its codec live only in this slot, and the decode thread takes them in one snapshot.
+    let decoder = DecoderSlot<VTDecompressionSession, CMFormatDescription>()
     var av1InstantiatedForReal = false
     var frameQueueLock = NSObject()
     // -ALVRAsyncDecode YES: pipelined hardware decode, at most DecodeInFlight.limit frames in flight; nil decodes synchronously.
@@ -144,13 +144,16 @@ class EventHandler: ObservableObject {
     var frameQueue = [QueuedFrame]()
     var frameQueueLastTimestamp: UInt64 = 0
     var frameQueueLastImageBuffer: CVImageBuffer? = nil
-    var lastQueuedFrame: QueuedFrame? = nil
-    var lastQueuedFramePose: simd_float4x4? = nil
+    // The last submitted frame and its pose: render threads set them, stop() clears them on the event thread, so every
+    // access goes through this one lock (an unlocked assign racing stop() crashed in CVPixelBuffer finalize).
+    let lastQueued = LastQueuedFrameSlot<QueuedFrame>()
     var lastRequestedTimestamp: UInt64 = 0
     var lastSubmittedTimestamp: UInt64 = 0
     var lastIpd: Float = -1
     var viewTransforms: [simd_float4x4] = [matrix_identity_float4x4, matrix_identity_float4x4]
-    var viewFovs: [AlvrFov] = [AlvrFov(left: -1.0471973, right: 0.7853982, up: 0.7853982, down: -0.8726632), AlvrFov(left: -0.7853982, right: 1.0471973, up: 0.7853982, down: -0.8726632)]
+    // One lock for every reader and writer: Renderer/RealityKit replace it, the decode callback (under frameQueueLock)
+    // and the keepalive (under viewParamsLock) read it. A leaf lock, so nesting it under either takes no other lock.
+    let viewFovsBox = LockedBox<[AlvrFov]>([AlvrFov(left: -1.0471973, right: 0.7853982, up: 0.7853982, down: -0.8726632), AlvrFov(left: -0.7853982, right: 1.0471973, up: 0.7853982, down: -0.8726632)])
     var sentViewTangents: [simd_float4] = [simd_float4(1.73205, 1.0, 1.0, 1.19175), simd_float4(1.0, 1.73205, 1.0, 1.19175)]
     var realViewTangents: [simd_float4] = [simd_float4(1.73205, 1.0, 1.0, 1.19175), simd_float4(1.0, 1.73205, 1.0, 1.19175)]
     /// capture.json debug_eye_tangents while -ALVRDebugEyeTangents is active (DebugEyeTangents); nil otherwise.
@@ -266,18 +269,15 @@ class EventHandler: ObservableObject {
         StreamTelemetry.shared.streamingStopped()
         EyeDecodeWindows.shared.stop()
         streamingActive = false
-        finishAsyncDecode(vtDecompressionSession)
-        vtDecompressionSession = nil
-        videoFormat = nil
+        // Cleared under the decoder lock first, then the old session drains outside it.
+        finishAsyncDecode(decoder.replace(session: nil, format: nil, codec: -1))
         lastRequestedTimestamp = 0
         lastSubmittedTimestamp = 0
         framesRendered = 0
         framesSinceLastIDR = 0
         framesSinceLastDecode = 0
         lastIpd = -1
-        objc_sync_enter(frameQueueLock)
-        lastQueuedFrame = nil
-        objc_sync_exit(frameQueueLock)
+        lastQueued.clear()
         withStreamBootstrap { $0.streamStopped() }
         objc_sync_enter(viewParamsLock)
         poseKeepalive.reset()
@@ -301,9 +301,7 @@ class EventHandler: ObservableObject {
         framesSinceLastDecode = 0
         lastRequestedTimestamp = 0
         lastSubmittedTimestamp = 0
-        objc_sync_enter(frameQueueLock)
-        lastQueuedFrame = nil
-        objc_sync_exit(frameQueueLock)
+        lastQueued.clear()
         withStreamBootstrap { $0.reentered() }
     }
 
@@ -323,7 +321,7 @@ class EventHandler: ObservableObject {
         defer { objc_sync_exit(viewParamsLock) }
         guard streamingActive && lastIpd == -1 else { return }
         if withStreamBootstrap({ $0.shouldSendFakeTracking(now: CACurrentMediaTime()) }) {
-            WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: CACurrentMediaTime() - 1.0)
+            WorldTracker.shared.sendFakeTracking(viewFovs: viewFovsBox.get(), targetTimestamp: CACurrentMediaTime() - 1.0)
             noteRenderPoseSent(realHead: nil)
         }
     }
@@ -346,7 +344,7 @@ class EventHandler: ObservableObject {
             WorldTracker.shared.sendKeepaliveHead(head, targetTimestamp: timestamp)
             kind = "real"
         case .fake:
-            WorldTracker.shared.sendFakeTracking(viewFovs: viewFovs, targetTimestamp: now - 1.0, includeViewParams: !realViewParams)
+            WorldTracker.shared.sendFakeTracking(viewFovs: viewFovsBox.get(), targetTimestamp: now - 1.0, includeViewParams: !realViewParams)
             kind = "fake"
         }
         if send.startsEpisode {
@@ -383,7 +381,7 @@ class EventHandler: ObservableObject {
         objc_sync_enter(viewParamsLock)
         defer { objc_sync_exit(viewParamsLock) }
         lastIpd = ipd
-        WorldTracker.shared.sendViewParams(viewTransforms: viewTransforms, viewFovs: viewFovs)
+        WorldTracker.shared.sendViewParams(viewTransforms: viewTransforms, viewFovs: viewFovsBox.get())
     }
     
     // Various hacks to be performed when the headset is removed or the app is exiting.
@@ -643,21 +641,20 @@ class EventHandler: ObservableObject {
         
         let startedDecodeTime = CACurrentMediaTime()
         
-        if currentCodec == ALVR_CODEC_AV1.rawValue && !av1InstantiatedForReal {
+        let codec = decoder.codec
+        if codec == ALVR_CODEC_AV1.rawValue && !av1InstantiatedForReal {
             print("Creating AV1 codec for real now.")
-            let (attemptVtDecompressionSession, attemptVideoFormat) = VideoHandler.createVideoDecoder(initialNals: nal, codec: currentCodec)
+            let (attemptVtDecompressionSession, attemptVideoFormat) = VideoHandler.createVideoDecoder(initialNals: nal, codec: codec)
             if attemptVtDecompressionSession != nil && attemptVideoFormat != nil {
-                finishAsyncDecode(vtDecompressionSession)
-                vtDecompressionSession = attemptVtDecompressionSession
-                videoFormat = attemptVideoFormat
+                finishAsyncDecode(decoder.replace(session: attemptVtDecompressionSession, format: attemptVideoFormat, codec: codec))
                 av1InstantiatedForReal = true
                 VideoHandler.reportVideoFormat(attemptVideoFormat!)
             }
         }
 
-        if let vtDecompressionSession = self.vtDecompressionSession {
+        if let current = decoder.snapshot() {
             // The stream this frame was decoded for: its colour state is derived from it, not from a later videoFormat.
-            let frameVideoFormat = self.videoFormat!
+            let frameVideoFormat = current.format
             let frameStream = EventHandler.videoStreams.currentStream
             // -ALVRAsyncDecode: hold a slot (waits while DecodeInFlight.limit frames are in flight) and decode from a copy.
             var slot: (token: UInt64, inFlight: Int)? = nil
@@ -672,7 +669,7 @@ class EventHandler: ObservableObject {
                 StreamTelemetry.shared.recordDecodeInFlight(acquired.inFlight)
                 inputCopy = DecodeInputCopy(nal)
             }
-            let submitted = VideoHandler.feedVideoIntoDecoder(decompressionSession: vtDecompressionSession, nals: inputCopy?.buffer ?? nal, timestamp: timestamp, videoFormat: frameVideoFormat, codec: currentCodec, asynchronous: asyncDecode != nil) { [self] imageBuffer in
+            let submitted = VideoHandler.feedVideoIntoDecoder(decompressionSession: current.session, nals: inputCopy?.buffer ?? nal, timestamp: timestamp, videoFormat: frameVideoFormat, codec: current.codec, asynchronous: asyncDecode != nil) { [self] imageBuffer in
                 // Every output, decoded or not, releases its slot; the overrun is measured from this frame's own submit.
                 var asyncFrame: DecodeInFlight.Frame? = nil
                 if let asyncDecode, let slot {
@@ -722,7 +719,8 @@ class EventHandler: ObservableObject {
                     alvr_report_frame_decoded(timestamp)
                     
                     let dummyPose = AlvrPose()
-                    let viewParamsDummy = [AlvrViewParams(pose: dummyPose, fov: viewFovs[0]), AlvrViewParams(pose: dummyPose, fov: viewFovs[1])]
+                    let fovs = viewFovsBox.get()
+                    let viewParamsDummy = [AlvrViewParams(pose: dummyPose, fov: fovs[0]), AlvrViewParams(pose: dummyPose, fov: fovs[1])]
 
                     // TODO: For some reason, really low frame rates seem to decode the wrong image for a split second?
                     // But for whatever reason this is fine at high FPS.
@@ -886,7 +884,7 @@ class EventHandler: ObservableObject {
     func handleAlvrEvents() {
         print("Start event thread...")
         Thread.setThreadPriority(0.9)
-        currentCodec = -1
+        decoder.setCodec(-1)
         av1InstantiatedForReal = false
         while inputRunning {
             eventHeartbeat += 1
@@ -982,7 +980,7 @@ class EventHandler: ObservableObject {
                             stop()
                             timeLastAlvrEvent = CACurrentMediaTime()
                             timeLastFrameSent = CACurrentMediaTime()
-                            currentCodec = -1
+                            decoder.setCodec(-1)
                         }
                     }
                     parseMessage(message)
@@ -1008,7 +1006,7 @@ class EventHandler: ObservableObject {
                     framesSinceLastIDR = 0
                     framesSinceLastDecode = 0
                     lastIpd = -1
-                    currentCodec = -1
+                    decoder.setCodec(-1)
                     EventHandler.shared.updateConnectionState(.connected)
                 }
                 // Outside the block above: a DecoderConfig may already have set streamingActive.
@@ -1050,7 +1048,7 @@ class EventHandler: ObservableObject {
                     stop()
                     timeLastAlvrEvent = CACurrentMediaTime()
                     timeLastFrameSent = CACurrentMediaTime()
-                    currentCodec = -1
+                    decoder.setCodec(-1)
                 }
                 Settings.clearSettingsCache()
                 clearHostVersion()
@@ -1077,13 +1075,15 @@ class EventHandler: ObservableObject {
                 }
             case ALVR_EVENT_DECODER_CONFIG.rawValue:
                 streamingActive = true
-                currentCodec = Int(alvrEvent.DECODER_CONFIG.codec)
-                print("create decoder \(alvrEvent.DECODER_CONFIG) codec ID: \(currentCodec)")
+                let codec = Int(alvrEvent.DECODER_CONFIG.codec)
+                print("create decoder \(alvrEvent.DECODER_CONFIG) codec ID: \(codec)")
                 Settings.clearSettingsCache()
                 updateHostVersion()
 
-                // Don't reinstantiate the decoder if it's already created.
-                if vtDecompressionSession == nil {
+                // Don't reinstantiate the decoder if it's already created (each IDR resend carries the same codec).
+                if decoder.session != nil {
+                    decoder.setCodec(codec)
+                } else {
                     let numBytes = alvr_get_decoder_config(nil)
                     var nalBuffer: UnsafeMutableBufferPointer<UInt8>? = nil
                     if numBytes > 0 {
@@ -1096,7 +1096,9 @@ class EventHandler: ObservableObject {
                     alvr_get_decoder_config(nalBuffer?.baseAddress)
 
                     av1InstantiatedForReal = false
-                    (vtDecompressionSession, videoFormat) = VideoHandler.createVideoDecoder(initialNals: nalBuffer!, codec: currentCodec)
+                    let (session, videoFormat) = VideoHandler.createVideoDecoder(initialNals: nalBuffer!, codec: codec)
+                    // One step: handleNals never sees the new session with the old codec.
+                    decoder.replace(session: session, format: videoFormat, codec: codec)
                     if let videoFormat {
                         VideoHandler.reportVideoFormat(videoFormat)
                     }

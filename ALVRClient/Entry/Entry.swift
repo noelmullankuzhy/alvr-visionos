@@ -66,7 +66,7 @@ struct Entry: View {
     }
     
     func applyStreamHz() {
-        VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.videoFormat)
+        VideoHandler.applyRefreshRate(videoFormat: EventHandler.shared.decoder.format)
     }
 
     // Settings control for an option that also has a launch argument: the argument wins and disables the control.

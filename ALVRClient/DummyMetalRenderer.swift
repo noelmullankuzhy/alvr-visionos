@@ -63,7 +63,7 @@ class DummyMetalRenderer {
 #else
         guard let drawable = frame.queryDrawable() else {
             if queuedFrame != nil {
-                EventHandler.shared.lastQueuedFrame = queuedFrame
+                EventHandler.shared.lastQueued.frame = queuedFrame
             }
             return
         }
