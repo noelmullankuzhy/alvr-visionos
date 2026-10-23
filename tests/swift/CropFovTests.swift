@@ -1,4 +1,4 @@
-// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/BoundaryDotsLensModel.swift ALVRClient/Diagnostics/ProjectionOverlay.swift ALVRClient/ViewLayout.swift ALVRClient/CropFov.swift
+// SOURCES: ALVRClient/Diagnostics/Diag.swift ALVRClient/Diagnostics/BoundaryDots.swift ALVRClient/Diagnostics/BoundaryDotsLensModel.swift ALVRClient/Diagnostics/ProjectionOverlay.swift ALVRClient/ViewLayout.swift ALVRClient/CropFov.swift ALVRClient/LaunchFlags.swift
 // Crop FOV to outline: the per-eye tangents sent to the server (the model lens's inset rectangle + margin, clamped to the
 // device frustum), the ALVR center_shift that keeps the 1:1 band on the eye axis inside the cropped frame, and the video
 // quad the display draws from the sent tangents. Shared fixture with avp-sharpness.py: tools/diag/fixtures/crop-fov.json.
@@ -248,6 +248,50 @@ enum CropFovTests {
         CropFov.recordGrid(screenWidth: 0, screenHeight: 4395, device: deviceL)
         near(CropFov.grid.density.x, 5479 / 2.7321, "zero screen ignored", tolerance: 1e-3)
         CropFov.resetGrid()
+
+        // Launch arguments: -ALVRCropInsetDeg / -ALVRCropMarginDeg over the settings, clamped (inset 0...30, margin 0...10).
+        CropFov.resetInset()
+        CropFov.applyLaunch(insetSetting: 15, arguments: [:])
+        near(CropFov.inset, 15, "no argument, default setting: inset 15")
+        near(CropFov.effectiveMargin(setting: 2.5, arguments: [:]), 2.5, "no argument: margin is the setting")
+        CropFov.applyLaunch(insetSetting: 12, arguments: [:])
+        near(CropFov.inset, 12, "no argument: inset is the setting")
+        CropFov.applyLaunch(insetSetting: 12, arguments: ["ALVRCropInsetDeg": "10"])
+        near(CropFov.inset, 10, "argument overrides the setting")
+        near(CropFov.effectiveMargin(setting: 2.5, arguments: ["ALVRCropMarginDeg": "4"]), 4, "margin argument overrides the setting")
+        CropFov.recordInset(7)
+        near(CropFov.inset, 7, "lens slider overrides within the session")
+        CropFov.resetInset()
+        near(CropFov.inset, 10, "resetInset returns to the launch value")
+        near(CropFov.effectiveInset(setting: 15, arguments: ["ALVRCropInsetDeg": "99"]), 30, "inset clamps to 30")
+        near(CropFov.effectiveInset(setting: 15, arguments: ["ALVRCropInsetDeg": "-4"]), 0, "inset clamps to 0")
+        near(CropFov.effectiveMargin(setting: 2.5, arguments: ["ALVRCropMarginDeg": "40"]), 10, "margin clamps to 10")
+        near(CropFov.effectiveMargin(setting: 2.5, arguments: ["ALVRCropMarginDeg": "-1"]), 0, "margin clamps to 0")
+        near(CropFov.effectiveInset(setting: 15, arguments: ["ALVRCropInsetDeg": Double.nan]), 15, "non-finite inset falls back to the setting")
+        near(CropFov.effectiveMargin(setting: 2.5, arguments: ["ALVRCropMarginDeg": Double.infinity]), 2.5, "non-finite margin falls back to the setting")
+        near(CropFov.effectiveInset(setting: 50, arguments: [:]), 30, "setting is clamped too")
+        CropFov.applyLaunch(insetSetting: 15, arguments: [:])
+        // Each stream's apply picks up the settings then: change 15 -> 10 and the next stream uses 10; a slider value still wins.
+        CropFov.resetInset()
+        CropFov.applyLaunch(insetSetting: 15, marginSetting: 2.5, arguments: [:])
+        near(CropFov.inset, 15, "stream 1 uses the setting 15")
+        near(CropFov.margin, 2.5, "stream 1 margin is the setting")
+        CropFov.applyLaunch(insetSetting: 10, marginSetting: 4, arguments: [:])
+        near(CropFov.inset, 10, "stream 2 uses the changed setting 10")
+        near(CropFov.margin, 4, "stream 2 margin is the changed setting")
+        CropFov.recordInset(6)
+        CropFov.applyLaunch(insetSetting: 8, marginSetting: 4, arguments: [:])
+        near(CropFov.inset, 6, "slider value still wins over the next stream's setting")
+        CropFov.applyLaunch(insetSetting: 8, marginSetting: 99, arguments: ["ALVRCropMarginDeg": "3"])
+        near(CropFov.margin, 3, "margin argument wins and is cached")
+        CropFov.resetInset()
+        near(CropFov.inset, 8, "reset returns to the latest launch value")
+        CropFov.applyLaunch(insetSetting: 15, arguments: [:])
+        // Inset 10 / margin 2 on the reference device: each sent edge = device edge - 10 + 2 deg.
+        near4(CropFov.tangents(eye: .left, device: CropFov.referenceDevice[0], insetDeg: 10, marginDeg: 2),
+              [tand(deg(1.7321) - 8), tand(45 - 8), tand(deg(1.1918) - 8), tand(45 - 8)], "L inset 10 margin 2 = device edge - 8 deg")
+        near4(CropFov.tangents(eye: .right, device: CropFov.referenceDevice[1], insetDeg: 10, marginDeg: 2),
+              [tand(45 - 8), tand(deg(1.7321) - 8), tand(deg(1.1918) - 8), tand(45 - 8)], "R inset 10 margin 2 = device edge - 8 deg")
 
         finishTests("CropFov")
     }

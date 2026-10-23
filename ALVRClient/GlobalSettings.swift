@@ -49,6 +49,8 @@ struct GlobalSettings: Codable {
     // FOV instead of the device frustum; on by default (CropFov.defaultEnabled); read when the view config is sent (stream start).
     var cropFovToOutline: Bool = CropFov.defaultEnabled
     var cropMarginDeg: Double = CropFov.defaultMarginDeg
+    // Model lens inset for the crop (-ALVRCropInsetDeg overrides); read at connect.
+    var cropInsetDeg: Double = BoundaryDotsOutline.defaultInsetDeg
     // Golden frame set (GoldenFrame.swift): a Documents/diag/golden/<set> directory name, or Off; Diagnostics only, both
     // charts off; read at renderer start.
     var goldenFrameSet: String = GoldenFrameSetting.off
@@ -114,6 +116,7 @@ struct GlobalSettings: Codable {
         self.resolutionFoveation = try container.decodeIfPresent(Bool.self, forKey: .resolutionFoveation) ?? self.resolutionFoveation
         self.cropFovToOutline = try container.decodeIfPresent(Bool.self, forKey: .cropFovToOutline) ?? self.cropFovToOutline
         self.cropMarginDeg = try container.decodeIfPresent(Double.self, forKey: .cropMarginDeg) ?? self.cropMarginDeg
+        self.cropInsetDeg = try container.decodeIfPresent(Double.self, forKey: .cropInsetDeg) ?? self.cropInsetDeg
         self.goldenFrameSet = try container.decodeIfPresent(String.self, forKey: .goldenFrameSet) ?? self.goldenFrameSet
         self.eyeDecodeWindows = try container.decodeIfPresent(Bool.self, forKey: .eyeDecodeWindows) ?? self.eyeDecodeWindows
         self.asyncDecode = try container.decodeIfPresent(Bool.self, forKey: .asyncDecode) ?? self.asyncDecode

@@ -218,9 +218,10 @@ class EventHandler: ObservableObject {
             // "Crop FOV to outline": ask for the 1:1 render size of the frame the crop will send (CropFov.oneToOne), at the grid
             // density measured from the layer, else the reference device's; crop off keeps the default size. Fixed per stream.
             let settings = ALVRClientApp.gStore.settings
+            CropFov.applyLaunch(insetSetting: settings.cropInsetDeg, marginSetting: settings.cropMarginDeg)
             let recommended = CropFov.recommendedViewResolution(
                 crop: settings.cropFovToOutline, device: CropFov.referenceDevice, density: CropFov.grid.density,
-                insetDeg: CropFov.inset, marginDeg: settings.cropMarginDeg, fallback: (renderWidth * 2, renderHeight * 2))
+                insetDeg: CropFov.inset, marginDeg: CropFov.margin, fallback: (renderWidth * 2, renderHeight * 2))
             recommendedViewResolution = recommended
             print("Recommended view resolution", recommended.width, "x", recommended.height)
 
@@ -991,6 +992,9 @@ class EventHandler: ObservableObject {
                 updateHostVersion()
             case ALVR_EVENT_STREAMING_STARTED.rawValue:
                 print("streaming started \(alvrEvent.STREAMING_STARTED)")
+                // Every stream (connect and reconnect) re-reads the crop inset/margin settings and launch arguments.
+                let cropSettings = ALVRClientApp.gStore.settings
+                CropFov.applyLaunch(insetSetting: cropSettings.cropInsetDeg, marginSetting: cropSettings.cropMarginDeg)
                 updateHostVersion()
                 numberOfEventThreadRestarts = 0
                 

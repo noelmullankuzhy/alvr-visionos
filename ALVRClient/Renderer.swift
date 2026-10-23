@@ -976,6 +976,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 // The frame quad is drawn on the sent tangents (uniforms.tangents) under the device projection.
                 let debugEyes = DebugEyeTangents.current
                 let cropInset = CropFov.inset
+                let cropMargin = CropFov.margin
                 // The logical grid (rate map screen size, else the view's viewport) over the device frustum: px per tangent unit.
                 // The connect-time recommendation uses the last measured grid (reference device's until then); recommended= in
                 // fov_sent shows what was sent, render_1to1= what the frame sent now needs.
@@ -984,7 +985,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 CropFov.recordGrid(screenWidth: screen?.width ?? Int(viewport.width), screenHeight: screen?.height ?? Int(viewport.height),
                                    device: tangentsLeft)
                 let sent = CropFov.choose(device: [tangentsLeft, tangentsRight], debug: debugEyes?.tangents,
-                                          crop: settings.cropFovToOutline, insetDeg: cropInset, marginDeg: settings.cropMarginDeg)
+                                          crop: settings.cropFovToOutline, insetDeg: cropInset, marginDeg: cropMargin)
                 let leftAngles = ViewLayout.fovAngles(tangents: sent.tangents[0], scale: settings.fovRenderScale)
                 let rightAngles = debugEyes != nil || mainDrawable.views.count > 1
                     ? ViewLayout.fovAngles(tangents: sent.tangents[1], scale: settings.fovRenderScale) : leftAngles
@@ -1006,7 +1007,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 for (eye, fov) in [("L", leftFovCorrected), ("R", rightFovCorrected)] {
                     let crop = sent.source == "crop"
                     Diag.log("fov_sent", ViewLayout.fovSentFields(eye: eye, left: fov.left, right: fov.right, up: fov.up, down: fov.down,
-                                                                  source: sent.source, marginDeg: crop ? settings.cropMarginDeg : nil,
+                                                                  source: sent.source, marginDeg: crop ? cropMargin : nil,
                                                                   insetDeg: crop ? cropInset : 0, offsetDeg: crop ? 0 : nil,
                                                                   axisCenterShift: axisShift, sessionCenterShift: sessionShift,
                                                                   render1to1: crop ? render1to1 : nil, recommended: recommended))
