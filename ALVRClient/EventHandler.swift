@@ -138,8 +138,10 @@ class EventHandler: ObservableObject {
     let decoder = DecoderSlot<VTDecompressionSession, CMFormatDescription>()
     var av1InstantiatedForReal = false
     var frameQueueLock = NSObject()
-    // -ALVRAsyncDecode YES: pipelined hardware decode, at most DecodeInFlight.limit frames in flight; nil decodes synchronously.
-    let asyncDecode: DecodeGate? = LaunchFlags.bool(DecodeInFlight.asyncDefaultsKey, setting: ALVRClientApp.gStore.settings.asyncDecode) ? DecodeGate() : nil
+    // -ALVRAsyncDecode YES: pipelined hardware decode, at most the configured limit of frames in flight; nil decodes synchronously.
+    let asyncDecode: DecodeGate? = LaunchFlags.bool(DecodeInFlight.asyncDefaultsKey, setting: ALVRClientApp.gStore.settings.asyncDecode) ? DecodeGate(limit: DecodeInFlight.configuredLimit(LaunchFlags.currentArguments)) : nil
+    // -ALVRDecodeSlotWaitMs: how long handleNals waits for a slot before refusing the frame (0 refuses at once).
+    let decodeSlotWait = DecodeInFlight.configuredSlotWait(LaunchFlags.currentArguments)
 
     var frameQueue = [QueuedFrame]()
     var frameQueueLastTimestamp: UInt64 = 0
@@ -201,8 +203,12 @@ class EventHandler: ObservableObject {
     private var streamStartTiming = StreamStartTiming()
     private let streamStartTimingLock = NSLock()
 
-    init() {}
-    
+    init() {
+        if let asyncDecode {
+            print("DECODEGATE v1 limit=\(asyncDecode.limit) slot_wait_ms=\(Int(decodeSlotWait * 1000))")
+        }
+    }
+
     func initializeAlvr() {
         fixAudioForDirectStereo()
         if !alvrInitialized {
@@ -657,13 +663,13 @@ class EventHandler: ObservableObject {
             // The stream this frame was decoded for: its colour state is derived from it, not from a later videoFormat.
             let frameVideoFormat = current.format
             let frameStream = EventHandler.videoStreams.currentStream
-            // -ALVRAsyncDecode: hold a slot (waits while DecodeInFlight.limit frames are in flight) and decode from a copy.
+            // -ALVRAsyncDecode: hold a slot (waits while the configured limit of frames are in flight) and decode from a copy.
             var slot: (token: UInt64, inFlight: Int)? = nil
             var inputCopy: DecodeInputCopy? = nil
             if let asyncDecode {
-                slot = asyncDecode.acquire(timestampNs: timestamp, timeout: 0.1)
+                slot = asyncDecode.acquire(timestampNs: timestamp, timeout: decodeSlotWait)
                 guard let acquired = slot else {
-                    print("Async decode: no slot within 100 ms, dropping frame for an IDR")
+                    print("Async decode: no slot within \(Int(decodeSlotWait * 1000)) ms, dropping frame for an IDR")
                     StreamTelemetry.shared.recordDroppedBeforeDecode()
                     return false
                 }

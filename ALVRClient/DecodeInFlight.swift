@@ -13,7 +13,31 @@ struct DecodeInFlight {
     // Opt-in switches, both off by default (synchronous decode, no real-time hint).
     static let asyncDefaultsKey = "ALVRAsyncDecode"
     static let realTimeDefaultsKey = "ALVRDecodeRealTime"
-    static let limit = 2
+    static let defaultLimit = 2
+    // Launch-only A/B flags: frames in flight (1...8) and how long the input thread waits for a slot (0...100 ms).
+    static let inFlightKey = "ALVRDecodeInFlight"
+    static let slotWaitKey = "ALVRDecodeSlotWaitMs"
+
+    static func configuredLimit(_ arguments: [String: Any]) -> Int {
+        guard let value = number(arguments[inFlightKey]) else { return defaultLimit }
+        return Int(min(max(value, 1), 8))
+    }
+
+    static func configuredSlotWait(_ arguments: [String: Any]) -> TimeInterval {
+        guard let value = number(arguments[slotWaitKey]) else { return 0.1 }
+        return min(max(value, 0), 100) / 1000
+    }
+
+    // Finite values only: nan and inf fall back to the default (Int(nan) would trap).
+    private static func number(_ raw: Any?) -> Double? {
+        let parsed: Double?
+        switch raw {
+        case let value as NSNumber: parsed = value.doubleValue
+        case let value as String: parsed = Double(value.trimmingCharacters(in: .whitespaces))
+        default: parsed = nil
+        }
+        return parsed.flatMap { $0.isFinite ? $0 : nil }
+    }
 
     struct Frame: Equatable {
         let token: UInt64
@@ -27,13 +51,19 @@ struct DecodeInFlight {
         case unknown            // cancelled, drained or already output
     }
 
+    let limit: Int
+
+    init(limit: Int = DecodeInFlight.defaultLimit) {
+        self.limit = limit
+    }
+
     private var frames: [Frame] = []
     private var nextToken: UInt64 = 1
     private var lastOutputTimestampNs: UInt64? = nil
     private(set) var maxCount = 0
 
     var count: Int { frames.count }
-    var canSubmit: Bool { frames.count < DecodeInFlight.limit }
+    var canSubmit: Bool { frames.count < limit }
 
     // nil when `limit` frames are already in flight.
     mutating func submit(timestampNs: UInt64, submitNs: UInt64) -> UInt64? {
@@ -84,7 +114,13 @@ final class DecodeInputCopy {
 // the decoder output handler releases the slot in `complete`.
 final class DecodeGate {
     private let condition = NSCondition()
-    private var flight = DecodeInFlight()
+    private var flight: DecodeInFlight
+
+    init(limit: Int = DecodeInFlight.defaultLimit) {
+        flight = DecodeInFlight(limit: limit)
+    }
+
+    var limit: Int { flight.limit }
 
     var maxInFlight: Int {
         condition.lock()
