@@ -211,6 +211,9 @@ final class StreamTelemetry {
     private var receivedSameTimestamp = 0
     private var repeatsSameTimestamp = 0
     private var lastReceivedTimestampNs: UInt64? = nil
+    // Timestamp of the frame this render loop dequeued as new, until its recordRender; a loop that returns
+    // without a drawable never renders it, and the next selection replaces it.
+    private var selectedNewTimestampNs: UInt64? = nil
     private var lateFrames = 0
     private var decodeMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
     private var receiveToPresentMs = LatencySamples(capacity: StreamTelemetry.sampleCapacity)
@@ -258,6 +261,7 @@ final class StreamTelemetry {
             resetWindow(clock())
             lastPresentedTimestampNs = nil
             lastReceivedTimestampNs = nil
+            selectedNewTimestampNs = nil
             presentedThisWindow.removeAll(keepingCapacity: true)
             presentedLastWindow.removeAll(keepingCapacity: true)
         }
@@ -381,12 +385,10 @@ final class StreamTelemetry {
         }
         pollWaitMs.add(Double(pollWaitNs) / 1_000_000.0)
         droppedSelectionSkip += skipped
+        selectedNewTimestampNs = source == .new ? timestampNs : nil
         switch source {
         case .new:
             if let ts = timestampNs {
-                if ts == lastPresentedTimestampNs {
-                    repeatsSameTimestamp += 1
-                }
                 // Newest enqueue first, so a re-queued timestamp is aged from its latest decode.
                 for back in 1...StreamTelemetry.receiveRingSize {
                     let i = (queuedRingIndex - back + StreamTelemetry.receiveRingSize) % StreamTelemetry.receiveRingSize
@@ -434,6 +436,9 @@ final class StreamTelemetry {
             }
             if ts == lastPresentedTimestampNs {
                 framesRepeated += 1
+                if ts == selectedNewTimestampNs {
+                    repeatsSameTimestamp += 1
+                }
             } else {
                 framesPresented += 1
                 lastPresentedTimestampNs = ts
@@ -447,6 +452,7 @@ final class StreamTelemetry {
         } else {
             framesBlank += 1
         }
+        selectedNewTimestampNs = nil
         let record = takeWindowIfDue(now)
         lock.unlock()
         emit(record)
