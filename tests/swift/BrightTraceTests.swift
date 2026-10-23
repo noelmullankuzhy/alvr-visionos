@@ -183,6 +183,17 @@ private func testRecordEncoding() {
     expectEqual((eyes[0]["in_fixed"] as? [Double])?.count, 4, "input fixed points")
     expect(close(eyes[0]["exp"] as? Double, 1.25, 1e-3), "exponent encoded")
     expect(eyes[1]["in"] is NSNull && eyes[1]["exp"] is NSNull, "missing samples encode as null")
+    expect(eyes[0]["post"] is NSNull && eyes[0]["post_mean"] is NSNull, "no post readback: post grid null")
+    // Post: the eye texture read again after overlays, just before present; its own grid, fixed cells and mean.
+    let grid = (0..<256).map { Double($0) / 256 }
+    let post = BrightTraceEye(eye: "R", input: grid, output: grid, post: grid.map { $0 / 2 })
+    let postJSON = post.json()
+    expectEqual((postJSON["post"] as? [Double])?.count, 256, "post grid")
+    expectEqual((postJSON["post_fixed"] as? [Double])?.count, 4, "post fixed points")
+    expect(close(postJSON["post_mean"] as? Double, post.outputMean! / 2), "post mean")
+    expect(close(post.fit?.slope, 1, 1e-9), "the fit stays on the pre-overlay output")
+    let postLine = BrightTraceJSON.encode(postJSON)
+    expect(postLine.contains(#""post":["#) && postLine.contains(#""out":["#), "post and out are separate grids in the record")
     expectEqual(BrightTraceJSON.encode([0.7, 1.235e-05, Double.nan, "a\"b\\c\n"] as [Any]), #"[0.7,1.235e-05,null,"a\"b\\c\n"]"#, "number and string encoding")
     expectEqual(BrightTrace.rounded(0.123456), 0.1235, "4 significant digits")
     expectEqual(BrightTrace.rounded(1.234567e-5), 1.235e-5, "small values keep 4 significant digits")
@@ -309,6 +320,8 @@ private func testBufferPool() {
     _ = pool.take(length: 800)
     pool.allocated(nil, length: 800)
     expectEqual(pool.count, 3, "a failed allocation frees its slot")
+    // Two readbacks per traced frame (out and post): the pool keeps four frames' worth, as with one readback before.
+    expectEqual(BrightTrace.maxReadbackBuffers, 8, "two buffers per frame")
 }
 
 @main

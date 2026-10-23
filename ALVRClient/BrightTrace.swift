@@ -3,7 +3,9 @@
 //
 // Brightness trace ("brightness waves"): per presented frame and eye, the decoded Y plane and the drawn eye texture
 // sampled on the same 16x16 grid of cell centres, both in relative linear light (SDR white = 1.0), with the frame's
-// timing, path, colour state, CVPixelBuffer attachments and output format. Off by default (GlobalSettings.brightnessTrace,
+// timing, path, colour state, CVPixelBuffer attachments and output format. The eye texture is read twice: `out` right
+// after the video pass, `post` after the last pass (overlays, depth re-render, HUD, badges) just before present; the fit,
+// gain and jumps use `out`. Off by default (GlobalSettings.brightnessTrace,
 // -ALVRBrightTrace YES). Pure Foundation/simd (tests/swift/BrightTraceTests.swift); BrightTraceSession.swift samples
 // and writes. Analysis: tools/brighttrace.py.
 //
@@ -37,7 +39,8 @@ enum BrightTrace {
     // sink; the excess is dropped and counted in the 1 Hz line.
     static let maxFramesInFlight = 8
     static let maxQueuedLines = 32
-    static let maxReadbackBuffers = 4
+    // Two readbacks (out, post) per frame.
+    static let maxReadbackBuffers = 8
     static let summaryIntervalMs = 1000
 
     static func gridCoordinates(origin: Double, length: Double, count: Int = gridSize) -> [Double] {
@@ -146,17 +149,21 @@ struct BrightTraceEye {
     let eye: String
     let input: [Double]?    // 16x16 row-major, relative linear
     let output: [Double]?
+    let post: [Double]?     // the same grid read just before present
     let inputMean: Double?
     let outputMean: Double?
+    let postMean: Double?
     let fit: (slope: Double, logGain: Double)?
 
-    init(eye: String, input: [Double]?, output: [Double]?) {
+    init(eye: String, input: [Double]?, output: [Double]?, post: [Double]? = nil) {
         self.eye = eye
         self.input = input
         self.output = output
+        self.post = post
         func mean(_ v: [Double]?) -> Double? { v.flatMap { $0.isEmpty ? nil : $0.reduce(0, +) / Double($0.count) } }
         inputMean = mean(input)
         outputMean = mean(output)
+        postMean = mean(post)
         fit = input.flatMap { i in output.flatMap { BrightTrace.exponent(input: i, output: $0) } }
     }
 
@@ -169,7 +176,8 @@ struct BrightTraceEye {
     func json() -> [String: Any?] {
         ["eye": eye, "in": input?.map(BrightTrace.rounded), "out": output?.map(BrightTrace.rounded),
          "in_fixed": input.map(BrightTrace.fixed), "out_fixed": output.map(BrightTrace.fixed),
-         "in_mean": inputMean, "out_mean": outputMean, "exp": fit?.slope, "log_gain": fit?.logGain]
+         "in_mean": inputMean, "out_mean": outputMean, "exp": fit?.slope, "log_gain": fit?.logGain,
+         "post": post?.map(BrightTrace.rounded), "post_fixed": post.map(BrightTrace.fixed), "post_mean": postMean]
     }
 }
 
