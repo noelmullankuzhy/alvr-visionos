@@ -282,6 +282,31 @@ private func testSameTimestampCounters() {
     expectEqual(int(r, "repeats_same_timestamp"), 0, "reset per window")
 }
 
+// A same-timestamp repeat counts only when drawn: a selection whose loop returned without a drawable (no
+// recordRender) or was not displayed is not counted; the next displayed new-frame twin is.
+private func testSameTimestampRepeatCountedOnlyWhenDisplayed() {
+    let (telemetry, sink, clock) = makeTelemetry()
+    startStream(telemetry)
+    telemetry.recordSelection(timestampNs: 200, source: .new, pollWaitNs: 0)
+    telemetry.recordRender(frameTimestampNs: 200, displayed: true, presentNs: clock.ns)
+    // Twin of 200 selected, then the loop returned without a drawable.
+    telemetry.recordSelection(timestampNs: 200, source: .new, pollWaitNs: 0)
+    // Next loop reuses 200 and draws it: a reuse, not a same-timestamp repeat.
+    telemetry.recordSelection(timestampNs: 200, source: .reuse, pollWaitNs: 0)
+    telemetry.recordRender(frameTimestampNs: 200, displayed: true, presentNs: clock.ns)
+    // Twin selected and rendered but not displayed.
+    telemetry.recordSelection(timestampNs: 200, source: .new, pollWaitNs: 0)
+    telemetry.recordRender(frameTimestampNs: 200, displayed: false, presentNs: clock.ns)
+    // Twin selected and displayed: counted.
+    telemetry.recordSelection(timestampNs: 200, source: .new, pollWaitNs: 0)
+    telemetry.recordRender(frameTimestampNs: 200, displayed: true, presentNs: clock.ns)
+    clock.advance(ms: 1000)
+    telemetry.recordRender(frameTimestampNs: nil, displayed: false, presentNs: clock.ns)
+    let s = sink.objects("ALVRSTATS").first ?? [:]
+    expectEqual(int(s, "repeats_same_timestamp"), 1, "only the displayed twin counts")
+    expectEqual(int(s, "repeats_no_new_frame"), 1, "the reuse stays a reuse")
+}
+
 // Out-of-order presentation: every timestamp not presented before counts once.
 private func testUniquePresentedOutOfOrder() {
     let (telemetry, sink, clock) = makeTelemetry()
@@ -578,6 +603,7 @@ enum StreamTelemetryTests {
         testDecodeModeFields()
         testPacingCounters()
         testSameTimestampCounters()
+        testSameTimestampRepeatCountedOnlyWhenDisplayed()
         testUniquePresentedOutOfOrder()
         testUniquePresentedWindows()
         testQueueAgeUsesLatestEnqueue()
