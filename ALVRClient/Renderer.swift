@@ -110,6 +110,12 @@ class Renderer {
     // they were built for. Each renderer owns its slot; the state key also includes its display headroom.
     let videoFramePipelines = VideoPipelineSlot<FoveationVars?, (biplanar: MTLRenderPipelineState, secret: MTLRenderPipelineState)>(gate: EventHandler.videoStreams)
 var videoFrameDepthPipelineState: MTLRenderPipelineState!
+    // -ALVRDepthPassFix / -ALVRUniformSnapshot (RenderPassFixes, LaunchFlags.swift), read once; both off by default.
+    let depthPassFix = RenderPassFixes.enabled(RenderPassFixes.depthPassKey)
+    let uniformSnapshot = RenderPassFixes.enabled(RenderPassFixes.uniformSnapshotKey)
+    // Depth fix only: the depth pipeline with colour writes masked, for the "Rerender depth" pass (renderNothing keeps
+    // videoFrameDepthPipelineState). Built once in init: the pass is Metal-path only, whose layer colour format is fixed.
+    private(set) var videoFrameDepthOnlyPipelineState: MTLRenderPipelineState?
     var fullscreenQuadBuffer:MTLBuffer!
     var unitVectorXYZBuffer:MTLBuffer!
     /// Steam Controller body wireframe. Built on first use rather than at init,
@@ -316,6 +322,17 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                 depthFormat: layerRenderer?.configuration.depthFormat ?? renderDepthFormat,
                 viewCount: layerRenderer?.properties.viewCount ?? renderViewCount
         )
+        if depthPassFix {
+            print("RENDERFIX depth_pass=on")
+            self.videoFrameDepthOnlyPipelineState = try! Renderer.buildRenderPipelineForVideoFrameDepthWithDevice(
+                    device: self.device,
+                    mtlVertexDescriptor: self.mtlVertexDescriptor,
+                    colorFormat: layerRenderer?.configuration.colorFormat ?? currentRenderColorFormat,
+                    depthFormat: layerRenderer?.configuration.depthFormat ?? renderDepthFormat,
+                    viewCount: layerRenderer?.properties.viewCount ?? renderViewCount,
+                    depthOnly: true
+            )
+        }
         
         rebuildRenderPipelines()
         self.goldenFrame = layerRenderer.flatMap { GoldenFrameRenderer.make(renderer: self, layerRenderer: $0) }
@@ -559,7 +576,8 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                                                           mtlVertexDescriptor: MTLVertexDescriptor,
                                                           colorFormat: MTLPixelFormat,
                                                           depthFormat: MTLPixelFormat,
-                                                          viewCount: Int) throws -> MTLRenderPipelineState {
+                                                          viewCount: Int,
+                                                          depthOnly: Bool = false) throws -> MTLRenderPipelineState {
         /// Build a render state pipeline object
 
         let library = device.makeDefaultLibrary()
@@ -568,12 +586,13 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         let fragmentFunction = library?.makeFunction(name: "videoFrameDepthFragmentShader")
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
-        pipelineDescriptor.label = "VideoFrameDepthRenderPipeline"
+        pipelineDescriptor.label = depthOnly ? "VideoFrameDepthOnlyRenderPipeline" : "VideoFrameDepthRenderPipeline"
         pipelineDescriptor.vertexFunction = vertexFunction
         pipelineDescriptor.fragmentFunction = fragmentFunction
         //pipelineDescriptor.vertexDescriptor = mtlVertexDescriptor
 
         pipelineDescriptor.colorAttachments[0].pixelFormat = colorFormat
+        if depthOnly { RenderPassFixes.configureDepthPipeline(pipelineDescriptor, fix: true) }
         pipelineDescriptor.depthAttachmentPixelFormat = depthFormat
 
         pipelineDescriptor.maxVertexAmplificationCount = viewCount
@@ -1437,15 +1456,13 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
             return
         }
 
+        // Off: colour .load/.dontCare with colour writes on (today). -ALVRDepthPassFix: colour .load/.store, writes masked.
+        let depthOnlyPipeline = depthPassFix ? videoFrameDepthOnlyPipelineState : nil
         let renderPassDescriptor = MTLRenderPassDescriptor()
         renderPassDescriptor.colorAttachments[0].texture = renderTargetColor
-        renderPassDescriptor.colorAttachments[0].loadAction = .load
-        renderPassDescriptor.colorAttachments[0].storeAction = .dontCare
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0.0, green: 0.0, blue: 0.0, alpha: (frameChromaKey?.enabled ?? chromaKeyEnabled) ? 0.0 : 1.0)
         renderPassDescriptor.depthAttachment.texture = renderTargetDepth
-        renderPassDescriptor.depthAttachment.loadAction = .clear
-        renderPassDescriptor.depthAttachment.storeAction = .store
-        renderPassDescriptor.depthAttachment.clearDepth = 0.000000001
+        RenderPassFixes.configureDepthPass(renderPassDescriptor, fix: depthOnlyPipeline != nil)
         renderPassDescriptor.rasterizationRateMap = rasterizationRateMap
         
         renderPassDescriptor.renderTargetArrayLength = viewports.count
@@ -1460,7 +1477,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         renderEncoder.pushDebugGroup("Draw ALVR Frame Depth")
         renderEncoder.setCullMode(.back)
         renderEncoder.setFrontFacing(.counterClockwise)
-        renderEncoder.setRenderPipelineState(videoFrameDepthPipelineState)
+        renderEncoder.setRenderPipelineState(depthOnlyPipeline ?? videoFrameDepthPipelineState)
         renderEncoder.setDepthStencilState(depthStateAlways)
 #if !targetEnvironment(simulator)
         renderEncoder.setDepthClipMode(.clamp)
