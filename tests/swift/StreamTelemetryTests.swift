@@ -156,8 +156,8 @@ private func testStatsJsonShape() {
     expect(!line.json.contains("\n"), "one line")
     let keys = ["decode_async", "decode_errors", "decode_in_flight_max", "decode_realtime", "dropped_before_decode", "dropped_decode_overrun", "dropped_queue_overflow",
                 "dropped_selection_skip", "frames_blank", "frames_decoded", "frames_dropped", "frames_presented",
-                "frames_received", "frames_repeated", "late_frames", "presented_fps", "render_loop_hz", "render_loops",
-                "repeats_no_new_frame", "repeats_retry", "t", "type", "unique_presented_fps", "window_s"]
+                "frames_received", "frames_repeated", "late_frames", "presented_fps", "received_same_timestamp",
+                "render_loop_hz", "render_loops", "repeats_no_new_frame", "repeats_retry", "repeats_same_timestamp", "t", "type", "unique_presented_fps", "window_s"]
     let object = sink.objects("ALVRSTATS").last ?? [:]
     expectEqual(object.keys.sorted(), keys, "stable stats keys (no optional latency keys without samples)")
     let positions = keys.compactMap { line.json.range(of: "\"\($0)\"")?.lowerBound }
@@ -249,6 +249,37 @@ private func testPacingCounters() {
     clock.advance(ms: 1000)
     telemetry.recordRender(frameTimestampNs: 50, displayed: true, presentNs: clock.ns)
     expectEqual(double(sink.objects("ALVRSTATS").last ?? [:], "unique_presented_fps"), 1.0, "unique count restarts per session")
+}
+
+// Two received frames with one timestamp: the second is counted on receive, and when the render loop dequeues
+// it as a new frame after its twin was presented, that repeat is counted separately from retry/reuse.
+private func testSameTimestampCounters() {
+    let (telemetry, sink, clock) = makeTelemetry()
+    startStream(telemetry)
+    for ts: UInt64 in [100, 200, 200, 300, 200] {
+        telemetry.recordReceived(timestampNs: ts)
+    }
+    telemetry.recordSelection(timestampNs: 100, source: .new, pollWaitNs: 0)
+    telemetry.recordRender(frameTimestampNs: 100, displayed: true, presentNs: clock.ns)
+    telemetry.recordSelection(timestampNs: 200, source: .new, pollWaitNs: 0)
+    telemetry.recordRender(frameTimestampNs: 200, displayed: true, presentNs: clock.ns)
+    telemetry.recordSelection(timestampNs: 200, source: .new, pollWaitNs: 0)
+    telemetry.recordRender(frameTimestampNs: 200, displayed: true, presentNs: clock.ns)
+    telemetry.recordSelection(timestampNs: 200, source: .reuse, pollWaitNs: 0)
+    telemetry.recordRender(frameTimestampNs: 200, displayed: true, presentNs: clock.ns)
+    clock.advance(ms: 1000)
+    telemetry.recordRender(frameTimestampNs: nil, displayed: false, presentNs: clock.ns)
+    let s = sink.objects("ALVRSTATS").first ?? [:]
+    expectEqual(int(s, "received_same_timestamp"), 1, "only the consecutive 200, 200 receive (not the later 200)")
+    expectEqual(int(s, "repeats_same_timestamp"), 1, "the dequeued twin of the presented 200")
+    expectEqual(int(s, "repeats_no_new_frame"), 1, "the reuse stays a reuse")
+    expectEqual(int(s, "frames_repeated"), 2, "both show as repeats by timestamp")
+
+    clock.advance(ms: 1000)
+    telemetry.recordRender(frameTimestampNs: nil, displayed: false, presentNs: clock.ns)
+    let r = sink.objects("ALVRSTATS").last ?? [:]
+    expectEqual(int(r, "received_same_timestamp"), 0, "reset per window")
+    expectEqual(int(r, "repeats_same_timestamp"), 0, "reset per window")
 }
 
 // Out-of-order presentation: every timestamp not presented before counts once.
@@ -546,6 +577,7 @@ enum StreamTelemetryTests {
         testStatsJsonShape()
         testDecodeModeFields()
         testPacingCounters()
+        testSameTimestampCounters()
         testUniquePresentedOutOfOrder()
         testUniquePresentedWindows()
         testQueueAgeUsesLatestEnqueue()
