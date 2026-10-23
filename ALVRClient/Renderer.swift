@@ -1268,6 +1268,7 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
         var diagSourceId: UInt64? = nil
         var diagStreamFrame = false   // stream content composited this frame (streaming capture trigger)
         var diagPose: DiagFrameCapture.PoseRecord? = nil   // render vs display head pose of that frame (capture.json "pose")
+        var brightTracePost: (post: BrightTraceSession.Post, views: [BrightTraceSession.View])? = nil   // read again before present
         for (drawableIndex, drawable) in drawables.enumerated() {
             drawable.deviceAnchor = deviceAnchor
             
@@ -1315,8 +1316,11 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                     renderStreamingFrame(0, commandBuffer: commandBuffer, renderEncoder: encoder, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor)
                     endRenderStreamingFrame(renderEncoder: encoder)
                     if BrightTraceSession.enabled, drawableIndex == 0, let queuedFrame {
-                        brightTrace(commandBuffer: commandBuffer, views: Self.brightTraceViews(drawable), queuedFrame: queuedFrame,
-                                    renderStartS: lastRoundTripRenderTimestamp, presentS: vsyncTime)
+                        let views = Self.brightTraceViews(drawable)
+                        if let post = brightTrace(commandBuffer: commandBuffer, views: views, queuedFrame: queuedFrame,
+                                                  renderStartS: lastRoundTripRenderTimestamp, presentS: vsyncTime) {
+                            brightTracePost = (post, views)
+                        }
                     }
                 }
                 renderStreamingFrameOverlays(0, commandBuffer: commandBuffer, renderTargetColor: drawable.colorTextures[0], renderTargetDepth: drawable.depthTextures[0], viewports: viewports, viewTransforms: viewTransforms, sentViewTangents: sentViewTangents, realViewTangents: realViewTangents, nearZ: nearZ, farZ: farZ, rasterizationRateMap: rasterizationRateMap, queuedFrame: queuedFrame, framePose: framePose, simdDeviceAnchor: simdDeviceAnchor, drawable: drawable)
@@ -1364,6 +1368,10 @@ var videoFrameDepthPipelineState: MTLRenderPipelineState!
                                  streamFrame: diagStreamFrame, pose: diagPose, chart: cornerChart,
                                  stages: { self.diagStreamStageTargets(commandBuffer: commandBuffer) })
         diagStreamSource = nil
+        // Brightness trace post grid: the traced eyes after every pass above, the last GPU work before present.
+        if let brightTracePost {
+            BrightTraceSession.shared.post(brightTracePost.post, commandBuffer: commandBuffer, views: brightTracePost.views)
+        }
         for drawable in drawables {
             drawable.encodePresent(commandBuffer: commandBuffer)
         }

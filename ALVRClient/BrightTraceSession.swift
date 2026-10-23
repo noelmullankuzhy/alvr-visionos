@@ -3,7 +3,8 @@
 //
 // Brightness trace sampling and sinks (BrightTrace.swift has the maths and record). Render thread, per drawn frame with
 // the trace on: copies references and scalars, encodes one blit per output grid row into a pooled shared buffer in the
-// presenting command buffer and adds a completion handler. Everything else runs on one utility serial queue: the Y-plane
+// presenting command buffer and adds a completion handler; on the Metal path, again (the post grid) after the last pass
+// just before present, into a second pooled buffer through the frame's Post. Everything else runs on one utility serial queue: the Y-plane
 // grid of the retained decoded buffer (read-only lock), the CVPixelBuffer attachments, the readback decode after GPU
 // completion, the jsonl line (DiagSink, Documents/diag/brighttrace-<UTC>.jsonl, 50 MB rotation, 200 MB in total), the
 // jump detector and the 1 Hz BRIGHTTRACE line through alvr_log at Info (forwarded to the streamer log like HDRPROBE).
@@ -51,15 +52,22 @@ final class BrightTraceSession {
     private var pendingInput: [Int: [[Double]?]] = [:]
     private var lastInput: (timestampNs: UInt64, eyes: [[Double]?])?
 
-    // Render thread, after the video pass into `texture`.
+    // An admitted frame's second readback, encoded by post(_:) before present; read under `lock` at completion.
+    final class Post {
+        fileprivate var readback: Readback?
+        fileprivate var encoded = false
+    }
+
+    // Render thread, after the video pass into `texture`. nil: not admitted (no post readback either).
+    @discardableResult
     func frame(commandBuffer: MTLCommandBuffer, views: [View], queuedFrame: QueuedFrame,
                colour: StreamColourState, secret: Bool, realityKit: Bool, asyncDecode: Bool, renderStartS: Double, presentS: Double,
-               layerFormat: MTLPixelFormat?, overlayAlpha: Float) {
+               layerFormat: MTLPixelFormat?, overlayAlpha: Float) -> Post? {
         seq += 1
         lock.lock()
         let admitted = frames.admit()
         lock.unlock()
-        guard admitted else { return }
+        guard admitted else { return nil }
         // Scalars and the decoded buffer only: the drawable textures are not retained past this frame.
         let id = seq, tMs = Int(Date().timeIntervalSince1970 * 1000), pixelBuffer = queuedFrame.imageBuffer, ts = queuedFrame.timestamp
         let drawableFormat = views.first?.texture.pixelFormat ?? .invalid, eyes = views.map(\.eye)
@@ -75,26 +83,44 @@ final class BrightTraceSession {
                                             fields: fields, overlayAlpha: Double(overlayAlpha), eyes: [])
         }
         let readback = encodeReadback(commandBuffer: commandBuffer, views: views)
+        let post = Post()
         commandBuffer.addCompletedHandler { [self] done in
             let ok = done.status == .completed
+            lock.lock()
+            let postReadback = post.readback
+            lock.unlock()
             queue.async { [self] in
                 defer {
                     lock.lock()
-                    if let buffer = readback?.buffer { pool.put(buffer, length: buffer.length) }
+                    for buffer in [readback?.buffer, postReadback?.buffer].compactMap({ $0 }) { pool.put(buffer, length: buffer.length) }
                     frames.release()
                     lock.unlock()
                 }
-                let outputs = eyes.indices.map { i -> [Double]? in
-                    guard ok, let readback, let format = readback.formats[i] else { return nil }
-                    return readback.rows[i].luma(readback.buffer.contents().advanced(by: readback.offsets[i]), rowBytes: readback.rowBytes[i], format: format)
+                func grids(_ readback: Readback?) -> [[Double]?] {
+                    eyes.indices.map { i -> [Double]? in
+                        guard ok, let readback, i < readback.formats.count, let format = readback.formats[i] else { return nil }
+                        return readback.rows[i].luma(readback.buffer.contents().advanced(by: readback.offsets[i]), rowBytes: readback.rowBytes[i], format: format)
+                    }
                 }
-                finish(id, eyes: eyes, outputs: outputs)
+                finish(id, eyes: eyes, outputs: grids(readback), posts: grids(postReadback))
             }
         }
+        return post
+    }
+
+    // Render thread, after the last pass of the frame `post` came from, just before present: the same views read again
+    // (the post grid). Once per Post; no buffer free in the pool: that frame's post grid is null.
+    func post(_ post: Post, commandBuffer: MTLCommandBuffer, views: [View]) {
+        guard !post.encoded else { return }
+        post.encoded = true
+        let readback = encodeReadback(commandBuffer: commandBuffer, views: views, label: "Brightness trace post readback")
+        lock.lock()
+        post.readback = readback
+        lock.unlock()
     }
 
     // Per view: a nil format when its texture format or slice cannot be read.
-    private struct Readback { let buffer: MTLBuffer; let rows: [BrightTraceRows]; let offsets: [Int]; let rowBytes: [Int]; let formats: [BrightTraceRows.Format?] }
+    fileprivate struct Readback { let buffer: MTLBuffer; let rows: [BrightTraceRows]; let offsets: [Int]; let rowBytes: [Int]; let formats: [BrightTraceRows.Format?] }
 
     private static func format(_ texture: MTLTexture, slice: Int) -> BrightTraceRows.Format? {
         guard slice < (texture.textureType == .type2DArray ? texture.arrayLength : 1) else { return nil }
@@ -108,7 +134,7 @@ final class BrightTraceSession {
         }
     }
 
-    private func encodeReadback(commandBuffer: MTLCommandBuffer, views: [View]) -> Readback? {
+    private func encodeReadback(commandBuffer: MTLCommandBuffer, views: [View], label: String = "Brightness trace readback") -> Readback? {
         let formats = views.map { Self.format($0.texture, slice: $0.slice) }
         guard let device = views.first?.texture.device, formats.contains(where: { $0 != nil }) else { return nil }
         let rows = views.map { v in
@@ -138,7 +164,7 @@ final class BrightTraceSession {
         }
         guard let buffer = taken.buffer else { return nil }
         guard let blit = commandBuffer.makeBlitCommandEncoder() else { lock.lock(); pool.put(buffer, length: buffer.length); lock.unlock(); return nil }
-        blit.label = "Brightness trace readback"
+        blit.label = label
         for (i, view) in views.enumerated() where formats[i] != nil {
             for (r, y) in rows[i].rows.enumerated() {
                 blit.copy(from: view.texture, sourceSlice: view.slice, sourceLevel: 0, sourceOrigin: MTLOrigin(x: rows[i].xMin, y: y, z: 0),
@@ -152,12 +178,12 @@ final class BrightTraceSession {
 
     // Trace queue.
     // Inputs are indexed by eye (left and right halves of the plane), outputs by view.
-    private func finish(_ id: Int, eyes: [String], outputs: [[Double]?]) {
+    private func finish(_ id: Int, eyes: [String], outputs: [[Double]?], posts: [[Double]?]) {
         guard var record = pending.removeValue(forKey: id) else { return }
         let inputs = pendingInput.removeValue(forKey: id) ?? []
-        record.eyes = zip(eyes, outputs).map { eye, out in
-            let i = ["L", "R"].firstIndex(of: eye) ?? -1
-            return BrightTraceEye(eye: eye, input: inputs.indices.contains(i) ? inputs[i] : nil, output: out)
+        record.eyes = eyes.indices.map { v in
+            let i = ["L", "R"].firstIndex(of: eyes[v]) ?? -1
+            return BrightTraceEye(eye: eyes[v], input: inputs.indices.contains(i) ? inputs[i] : nil, output: outputs[v], post: posts[v])
         }
         state.annotate(&record)
         summary.add(record)
@@ -236,10 +262,12 @@ final class BrightTraceSession {
 
 extension Renderer {
     // Both render paths, right after the video pass (Metal: first drawable only). Caller checks BrightTraceSession.enabled.
-    // views: every eye, each from its own mapped texture and slice (layered, dedicated or shared layout).
-    func brightTrace(commandBuffer: MTLCommandBuffer, views: [BrightTraceSession.View], queuedFrame: QueuedFrame, renderStartS: Double, presentS: Double) {
-        guard let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit, displayHeadroom: displayHeadroom) else { return }
-        BrightTraceSession.shared.frame(commandBuffer: commandBuffer, views: views, queuedFrame: queuedFrame, colour: colour,
+    // views: every eye, each from its own mapped texture and slice (layered, dedicated or shared layout). The Metal path
+    // passes the returned Post to BrightTraceSession.post just before present.
+    @discardableResult
+    func brightTrace(commandBuffer: MTLCommandBuffer, views: [BrightTraceSession.View], queuedFrame: QueuedFrame, renderStartS: Double, presentS: Double) -> BrightTraceSession.Post? {
+        guard let colour = VideoHandler.streamColourState(for: queuedFrame, realityKit: isRealityKit, displayHeadroom: displayHeadroom) else { return nil }
+        return BrightTraceSession.shared.frame(commandBuffer: commandBuffer, views: views, queuedFrame: queuedFrame, colour: colour,
                                         secret: VideoHandler.usesSecretPipeline(colour, format: CVPixelBufferGetPixelFormatType(queuedFrame.imageBuffer)),
                                         realityKit: isRealityKit, asyncDecode: EventHandler.shared.asyncDecode != nil, renderStartS: renderStartS,
                                         presentS: presentS, layerFormat: layerRenderer?.configuration.colorFormat, overlayAlpha: fadeInOverlayAlpha)
