@@ -28,12 +28,15 @@ struct DecodeInFlight {
         return min(max(value, 0), 100) / 1000
     }
 
+    // Finite values only: nan and inf fall back to the default (Int(nan) would trap).
     private static func number(_ raw: Any?) -> Double? {
+        let parsed: Double?
         switch raw {
-        case let value as NSNumber: return value.doubleValue
-        case let value as String: return Double(value.trimmingCharacters(in: .whitespaces))
-        default: return nil
+        case let value as NSNumber: parsed = value.doubleValue
+        case let value as String: parsed = Double(value.trimmingCharacters(in: .whitespaces))
+        default: parsed = nil
         }
+        return parsed.flatMap { $0.isFinite ? $0 : nil }
     }
 
     struct Frame: Equatable {
